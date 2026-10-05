@@ -1,3 +1,4 @@
+import Link from "next/link";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -32,7 +33,10 @@ export default function HomePage() {
           </div>
 
           <div className="flex items-center gap-3">
-            <Badge variant="outline" className="border-emerald-500/30 text-emerald-600 bg-emerald-50 dark:bg-emerald-950/30">
+            <Button asChild size="sm" variant="default">
+              <Link href="/onboarding">Get Started / Onboarding</Link>
+            </Button>
+            <Badge variant="outline" className="border-emerald-500/30 text-emerald-600 bg-emerald-50 dark:bg-emerald-950/30 hidden sm:flex">
               <span className="h-2 w-2 rounded-full bg-emerald-500 mr-1.5 animate-pulse" />
               Multi-Tenant Architecture
             </Badge>
@@ -53,6 +57,18 @@ export default function HomePage() {
             Scalable digital presence for independent medical practices, multi-specialty hospitals,
             and affiliated clinicians with zero-drift data inheritance.
           </p>
+
+          <div className="flex flex-wrap justify-center gap-3 pt-2">
+            <Button asChild size="lg">
+              <Link href="/onboarding/doctor">Create Doctor Website</Link>
+            </Button>
+            <Button asChild size="lg" variant="outline">
+              <Link href="/onboarding/hospital">Register Hospital/Clinic</Link>
+            </Button>
+            <Button asChild size="lg" variant="ghost">
+              <Link href="/onboarding/hospital-doctor">Join as Hospital Doctor</Link>
+            </Button>
+          </div>
         </div>
 
         {/* Multi-Tenant Models Grid */}
