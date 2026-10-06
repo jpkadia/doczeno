@@ -13,6 +13,7 @@ import {
   Trash2,
   CheckCircle,
   Stethoscope,
+  Sparkles,
 } from "lucide-react";
 import { AdminShell, NavItem } from "../admin-shell";
 import { Card, CardHeader, CardTitle, CardContent, CardDescription, CardFooter } from "@/components/ui/card";
@@ -22,6 +23,7 @@ import { Badge } from "@/components/ui/badge";
 import { Table, TableHeader, TableRow, TableHead, TableBody, TableCell } from "@/components/ui/table";
 import { FormField } from "@/components/forms/form-field";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter, DialogTrigger } from "@/components/ui/dialog";
+import { AIContentPanel } from "../ai-content-panel";
 
 export interface HospitalDoctorItem {
   id: string;
@@ -148,6 +150,7 @@ export function HospitalAdmin({
     { id: "doctors", label: "Doctor Management", icon: Users, badge: String(doctors.length) },
     { id: "departments", label: "Departments", icon: Stethoscope },
     { id: "appointments", label: "Appointments", icon: CalendarCheck, badge: String(appointments.length) },
+    { id: "ai", label: "AI Content & Copy", icon: Sparkles },
     { id: "gallery", label: "Facility Gallery", icon: ImageIcon },
     { id: "branding", label: "Theme & Branding", icon: Palette },
     { id: "settings", label: "Settings", icon: Settings },
@@ -834,6 +837,19 @@ export function HospitalAdmin({
             )}
           </CardContent>
         </Card>
+      )}
+
+      {/* TAB: AI CONTENT & COPY */}
+      {activeTab === "ai" && (
+        <div className="max-w-4xl">
+          <AIContentPanel
+            targetType="HOSPITAL"
+            targetId={hospital.id}
+            onPublished={() => {
+              handleUpdateHospital({});
+            }}
+          />
+        </div>
       )}
 
       {/* TAB 8: FACILITY GALLERY */}

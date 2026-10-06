@@ -61,6 +61,8 @@ function loadRootEnvTxt(): void {
         process.env.SUPERADMIN_EMAIL = val;
       } else if (inSuperadmin && key === "password" && !process.env.SUPERADMIN_PASSWORD) {
         process.env.SUPERADMIN_PASSWORD = val;
+      } else if ((key.includes("gemini") || key.includes("google_api_key")) && !process.env.GEMINI_API_KEY) {
+        process.env.GEMINI_API_KEY = val;
       }
     }
   } catch {
@@ -101,7 +103,7 @@ const envSchema = z.object({
 
   // Gemini AI configuration
   GEMINI_API_KEY: z.string().optional(),
-  GEMINI_MODEL: z.string().default("gemini-2.0-flash"),
+  GEMINI_MODEL: z.string().default("gemini-3.8-flash"),
 
   // Initial Platform Superadmin
   SUPERADMIN_EMAIL: z.string().email().optional(),

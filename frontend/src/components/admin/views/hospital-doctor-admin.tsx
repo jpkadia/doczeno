@@ -13,6 +13,7 @@ import {
   CheckCircle,
   ExternalLink,
   Info,
+  Sparkles,
 } from "lucide-react";
 import { AdminShell, NavItem } from "../admin-shell";
 import { Card, CardHeader, CardTitle, CardContent, CardDescription, CardFooter } from "@/components/ui/card";
@@ -21,6 +22,7 @@ import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { Table, TableHeader, TableRow, TableHead, TableBody, TableCell } from "@/components/ui/table";
 import { FormField } from "@/components/forms/form-field";
+import { AIContentPanel } from "../ai-content-panel";
 
 export interface InheritedHospitalInfo {
   organizationId: string;
@@ -104,6 +106,7 @@ export function HospitalDoctorAdmin({
     { id: "professional", label: "Professional Info", icon: GraduationCap },
     { id: "schedule", label: "Consultation & Hours", icon: Clock },
     { id: "appointments", label: "My Appointments", icon: CalendarCheck, badge: String(appointments.length) },
+    { id: "ai", label: "AI Content & Bio", icon: Sparkles },
     { id: "photo", label: "My Photo", icon: Camera },
     { id: "inherited", label: "Hospital Facility & Brand", icon: Building2, isLocked: true },
     { id: "settings", label: "Account Settings", icon: Settings },
@@ -706,6 +709,19 @@ export function HospitalDoctorAdmin({
             )}
           </CardContent>
         </Card>
+      )}
+
+      {/* TAB: AI CONTENT & CLINICAL BIO */}
+      {activeTab === "ai" && (
+        <div className="max-w-4xl">
+          <AIContentPanel
+            targetType="HOSPITAL_DOCTOR"
+            targetId={data.id}
+            onPublished={() => {
+              handleUpdate({});
+            }}
+          />
+        </div>
       )}
 
       {/* TAB 6: MY PHOTO */}

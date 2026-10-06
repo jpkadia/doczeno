@@ -21,6 +21,7 @@ import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { Table, TableHeader, TableRow, TableHead, TableBody, TableCell } from "@/components/ui/table";
 import { FormField } from "@/components/forms/form-field";
+import { AIContentPanel } from "../ai-content-panel";
 
 export interface IndependentDoctorData {
   id: string;
@@ -685,28 +686,16 @@ export function IndependentDoctorAdmin({
 
       {/* TAB 7: AI CONTENT */}
       {activeTab === "ai" && (
-        <Card className="bg-white border-slate-200 max-w-3xl">
-          <CardHeader>
-            <CardTitle className="text-base font-bold">Clinical Bio & Content Editor</CardTitle>
-            <CardDescription className="text-xs">Fine-tune the narrative copy presented to patients on your public page.</CardDescription>
-          </CardHeader>
-          <CardContent className="space-y-4">
-            <FormField id="aiBio" label="Full Clinical Overview">
-              <textarea
-                id="aiBio"
-                rows={6}
-                value={data.bio || ""}
-                onChange={(e) => setData({ ...data, bio: e.target.value })}
-                className="w-full text-sm rounded-md border border-input p-3"
-              />
-            </FormField>
-          </CardContent>
-          <CardFooter className="flex justify-end">
-            <Button onClick={() => handleUpdate({ bio: data.bio })} disabled={isSaving} className="bg-slate-900 text-white">
-              Save Content
-            </Button>
-          </CardFooter>
-        </Card>
+        <div className="max-w-4xl">
+          <AIContentPanel
+            targetType="INDEPENDENT_DOCTOR"
+            targetId={data.id}
+            onPublished={() => {
+              // Refresh doctor data after publishing
+              handleUpdate({});
+            }}
+          />
+        </div>
       )}
 
       {/* TAB 8: SEO & BRANDING */}

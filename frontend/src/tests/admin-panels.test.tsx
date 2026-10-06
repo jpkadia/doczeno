@@ -387,7 +387,7 @@ describe("TASK 5 — Admin Panels + CRUD + Doctor Management + Appointments", ()
       expect(deactivateButtons.length).toBe(2);
 
       // Click deactivate on Rajiv Shah
-      fireEvent.click(deactivateButtons[0]);
+      fireEvent.click(deactivateButtons[0]!);
       expect(mockToggle).toHaveBeenCalledWith("doc-rajiv", "INACTIVE");
     });
 
@@ -583,7 +583,7 @@ describe("TASK 5 — Admin Panels + CRUD + Doctor Management + Appointments", ()
       expect(screen.getByText(/Rajiv Shah/i)).toBeDefined();
 
       const deactButtons = screen.getAllByRole("button", { name: "Deactivate" });
-      fireEvent.click(deactButtons[0]);
+      fireEvent.click(deactButtons[0]!);
 
       expect(mockToggleDoc).toHaveBeenCalledWith("doc-1", "INACTIVE");
     });
@@ -614,7 +614,7 @@ describe("TASK 5 — Admin Panels + CRUD + Doctor Management + Appointments", ()
 
       // Click Unpublish to Draft
       const unpublishBtn = screen.getAllByRole("button", { name: "Unpublish to Draft" })[0];
-      fireEvent.click(unpublishBtn);
+      fireEvent.click(unpublishBtn!);
 
       expect(mockToggleWebsite).toHaveBeenCalledWith("site-1", "DRAFT");
     });
