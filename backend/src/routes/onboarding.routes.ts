@@ -62,6 +62,10 @@ onboardingRouter.post(
         weeklyOff: validated.weeklyOff.join(", "),
         appointmentRequired: validated.appointmentRequired,
         doctorPhoto: validated.doctorPhoto,
+        clinicName: validated.clinicName,
+        address: validated.address,
+        clinicLogo: validated.clinicLogo,
+        clinicPhotos: validated.clinicPhotos,
         slug: finalSlug,
         status: validated.isDraft ? "INACTIVE" : "ACTIVE",
         organizationId: null, // Autonomous

@@ -30,6 +30,7 @@ describe("Runtime Data Inheritance Engine (Supertest)", () => {
       websiteType: WebsiteType.HOSPITAL_DOCTOR,
       doctorId: docId,
       organizationId: orgId,
+      publishStatus: "PUBLISHED",
     } as any);
 
     // Mock Doctor (does NOT store hospital address or logo)
@@ -44,6 +45,7 @@ describe("Runtime Data Inheritance Engine (Supertest)", () => {
       weeklyOff: "Sunday",
       doctorPhoto: { url: "https://res.cloudinary.com/doczeno/dr-rajiv.jpg" },
       gender: "MALE",
+      status: "ACTIVE",
     } as any);
 
     // Mock Parent Hospital (the runtime source of truth)
@@ -63,6 +65,7 @@ describe("Runtime Data Inheritance Engine (Supertest)", () => {
       selectedTheme: "theme-teal-hospital",
       faviconUrl: "https://res.cloudinary.com/doczeno/apollo-favicon.ico",
       browserTabTitle: "Apollo Hospitals — Compassion & Excellence",
+      status: "ACTIVE",
     } as any);
 
     const res = await request(app).get("/api/v1/websites/effective/apollo-dr-rajiv-shah");

@@ -18,6 +18,24 @@ export interface IDoctor extends Document {
     url: string;
     publicId?: string;
   };
+  clinicName?: string;
+  address?: {
+    street?: string;
+    city: string;
+    state: string;
+    pincode: string;
+    country: string;
+  };
+  clinicLogo?: {
+    url: string;
+    publicId?: string;
+  };
+  clinicPhotos?: Array<{
+    url: string;
+    publicId?: string;
+    caption?: string;
+  }>;
+  bio?: string;
   slug: string;
   status: "ACTIVE" | "INACTIVE";
   createdAt: Date;
@@ -96,6 +114,32 @@ const DoctorSchema = new Schema<IDoctor>(
     doctorPhoto: {
       url: { type: String },
       publicId: { type: String },
+    },
+    clinicName: {
+      type: String,
+      trim: true,
+    },
+    address: {
+      street: { type: String, trim: true },
+      city: { type: String, trim: true },
+      state: { type: String, trim: true },
+      pincode: { type: String, trim: true },
+      country: { type: String, default: "India", trim: true },
+    },
+    clinicLogo: {
+      url: { type: String },
+      publicId: { type: String },
+    },
+    clinicPhotos: [
+      {
+        url: { type: String },
+        publicId: { type: String },
+        caption: { type: String },
+      },
+    ],
+    bio: {
+      type: String,
+      trim: true,
     },
     slug: {
       type: String,

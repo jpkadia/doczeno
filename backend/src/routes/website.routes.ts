@@ -32,6 +32,34 @@ websiteRouter.get(
   }
 );
 
+/**
+ * Public: Resolves effective website rendering data for affiliated hospital doctors
+ * Route: /api/v1/websites/effective/:orgSlug/:doctorSlug
+ * Enforces internal ID ownership between organization and doctor.
+ */
+websiteRouter.get(
+  "/effective/:orgSlug/:doctorSlug",
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const data = await WebsiteService.resolveEffectiveHospitalDoctorData(
+        req.params.orgSlug as string,
+        req.params.doctorSlug as string
+      );
+      if (!data) {
+        res.status(404).json({
+          success: false,
+          error: "Hospital doctor website not found or affiliated organization unavailable",
+          code: "NOT_FOUND",
+        });
+        return;
+      }
+      res.status(200).json({ success: true, data });
+    } catch (error) {
+      next(error);
+    }
+  }
+);
+
 // Authenticated: Get website by ID
 websiteRouter.get(
   "/:id",

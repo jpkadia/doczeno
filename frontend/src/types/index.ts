@@ -38,6 +38,61 @@ export interface MediaAsset {
   mimeType?: string;
 }
 
+export interface DoctorDirectoryItem {
+  id: string;
+  doctorId?: string;
+  doctorName: string;
+  degree: string;
+  specialization: string;
+  yearsOfExperience: number;
+  slug: string;
+  doctorPhoto?: MediaAsset;
+}
+
+export interface FaqItem {
+  question: string;
+  answer: string;
+}
+
+export interface EffectiveWebsiteData {
+  websiteType: WebsiteType;
+  slug: string;
+  organizationName: string;
+  organizationType?: "HOSPITAL" | "CLINIC";
+  logo?: MediaAsset;
+  galleryPhotos: MediaAsset[];
+  address: AddressInfo;
+  selectedTheme: string;
+  faviconUrl?: string;
+  browserTabTitle: string;
+  phone?: string;
+  whatsApp?: string;
+  email?: string;
+  about?: string;
+  workingHours?: string;
+  // Doctor info
+  doctorName?: string;
+  gender?: string;
+  degree?: string;
+  specialization?: string;
+  yearsOfExperience?: number;
+  bio?: string;
+  consultationHours?: string;
+  weeklyOff?: string;
+  appointmentRequired?: boolean;
+  doctorPhoto?: MediaAsset;
+  isHospitalChild: boolean;
+  hospitalSlug?: string;
+  doctorDirectory?: DoctorDirectoryItem[];
+  departments?: string[];
+  faqs?: FaqItem[];
+  seoMetadata?: {
+    title?: string;
+    description?: string;
+    ogImage?: string;
+  };
+}
+
 /**
  * Hospital / Clinic public details that are inherited by child hospital doctors
  */
@@ -61,7 +116,6 @@ export interface EffectiveDoctorWebsiteData {
   specialties: string[];
   bio?: string;
   photo?: MediaAsset;
-  // Runtime inherited or doctor-owned fields:
   organizationName: string;
   logo?: MediaAsset;
   galleryPhotos: MediaAsset[];
