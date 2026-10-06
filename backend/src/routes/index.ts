@@ -10,6 +10,7 @@ import { mediaRouter } from "./media.routes";
 import { onboardingRouter } from "./onboarding.routes";
 import { superadminRouter } from "./superadmin.routes";
 import { aiRouter } from "./ai.routes";
+import { chatbotRouter } from "./chatbot.routes";
 
 export const apiV1Router = Router();
 
@@ -24,3 +25,4 @@ apiV1Router.use("/media", mediaRouter);
 apiV1Router.use("/onboarding", onboardingRouter);
 apiV1Router.use("/superadmin", superadminRouter);
 apiV1Router.use("/ai", aiRouter);
+apiV1Router.use("/chatbot", chatbotRouter);

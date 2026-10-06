@@ -5,10 +5,12 @@ import {
   LogOut,
   Lock,
   Layers,
+  Sparkles,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
+import { AdminAssistantDrawer } from "./admin-assistant-drawer";
 
 export interface NavItem {
   id: string;
@@ -44,6 +46,7 @@ export function AdminShell({
   onLogout,
 }: AdminShellProps) {
   const [mobileMenuOpen, setMobileMenuOpen] = React.useState(false);
+  const [copilotOpen, setCopilotOpen] = React.useState(false);
 
   return (
     <div className="min-h-screen bg-slate-50 flex flex-col md:flex-row text-slate-900 font-sans">
@@ -186,7 +189,18 @@ export function AdminShell({
             </div>
           </div>
 
-          <div className="flex items-center gap-3">
+          <div className="flex items-center gap-2.5">
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              onClick={() => setCopilotOpen(true)}
+              className="h-8 gap-1.5 border-emerald-600/40 text-emerald-700 hover:bg-emerald-50 hover:text-emerald-800 text-xs font-semibold"
+            >
+              <Sparkles className="h-3.5 w-3.5 text-emerald-600" />
+              <span>AI Copilot</span>
+            </Button>
+
             <Badge variant="secondary" className="text-xs font-semibold">
               {roleBadge}
             </Badge>
@@ -207,6 +221,14 @@ export function AdminShell({
           {children}
         </main>
       </div>
+
+      {/* Slide-over Admin Assistant Copilot */}
+      <AdminAssistantDrawer
+        isOpen={copilotOpen}
+        onClose={() => setCopilotOpen(false)}
+        roleBadge={roleBadge}
+        practiceTitle={title}
+      />
     </div>
   );
 }
