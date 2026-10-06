@@ -19,7 +19,9 @@ vi.mock("@/services/audit.service", () => ({
   logAuditEvent: vi.fn().mockResolvedValue(undefined),
 }));
 
-const AUTH_SECRET = "doczeno-secure-default-auth-secret-key-32chars";
+import { getEnv } from "@/config/env";
+
+const AUTH_SECRET = getEnv().AUTH_SECRET;
 
 function generateTestToken(payload: {
   userId: string;

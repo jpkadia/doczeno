@@ -5,6 +5,7 @@ import mongoose from "mongoose";
 import { createApp } from "@/app";
 import { UserRole } from "@/types";
 import { Organization, Doctor, Website, User, Appointment } from "@/models";
+import { getEnv } from "@/config/env";
 
 vi.mock("@/db/connection", () => ({
   connectToDatabase: vi.fn().mockResolvedValue({
@@ -18,7 +19,7 @@ vi.mock("@/services/audit.service", () => ({
   logAuditEvent: vi.fn().mockResolvedValue(undefined),
 }));
 
-const AUTH_SECRET = "doczeno-secure-default-auth-secret-key-32chars";
+const AUTH_SECRET = getEnv().AUTH_SECRET;
 
 function generateTestToken(payload: {
   userId: string;
