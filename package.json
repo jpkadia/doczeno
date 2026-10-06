@@ -18,8 +18,7 @@
     "typecheck:frontend": "npm run typecheck --workspace=frontend",
     "typecheck:backend": "npm run typecheck --workspace=backend",
     "typecheck": "npm run typecheck:backend && npm run typecheck:frontend",
-    "lint:frontend": "npm run lint --workspace=frontend",
-    "setup:env": "node scripts/setup-env.js"
+    "lint:frontend": "npm run lint --workspace=frontend"
   },
   "overrides": {
     "mongodb": "6.20.0"

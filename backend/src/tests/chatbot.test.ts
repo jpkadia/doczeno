@@ -28,10 +28,12 @@ vi.mock("@/db/connection", () => ({
 }));
 
 // Mock GoogleGenAI SDK
-const mockGenerateContent = vi.fn().mockResolvedValue({
-  text: "Dr. Parth Kadiya consults Monday to Saturday from 09:00 AM to 01:00 PM.",
-  functionCalls: [],
-});
+const { mockGenerateContent } = vi.hoisted(() => ({
+  mockGenerateContent: vi.fn().mockResolvedValue({
+    text: "Dr. Parth Kadiya consults Monday to Saturday from 09:00 AM to 01:00 PM.",
+    functionCalls: [],
+  }),
+}));
 
 vi.mock("@google/genai", () => ({
   GoogleGenAI: vi.fn().mockImplementation(() => ({

@@ -1,76 +1,10 @@
-import fs from "fs";
 import path from "path";
+import dotenv from "dotenv";
 import { z } from "zod";
 
-/**
- * Safely parse root env.txt if available during local development
- * without echoing secrets to stdout or stderr.
- */
-function loadRootEnvTxt(): void {
-  const rootEnvTxtPath = path.resolve(process.cwd(), "../env.txt");
-  const localEnvTxtPath = path.resolve(process.cwd(), "env.txt");
-  const targetPath = fs.existsSync(localEnvTxtPath)
-    ? localEnvTxtPath
-    : fs.existsSync(rootEnvTxtPath)
-    ? rootEnvTxtPath
-    : null;
-
-  if (!targetPath) return;
-
-  try {
-    const content = fs.readFileSync(targetPath, "utf8");
-    const lines = content.split("\n");
-    let inSuperadmin = false;
-
-    for (const rawLine of lines) {
-      const line = rawLine.trim();
-      if (!line) continue;
-
-      if (line.toLowerCase().startsWith("superadmin")) {
-        inSuperadmin = true;
-        continue;
-      }
-
-      const sepIndex = line.indexOf(":");
-      const eqIndex = line.indexOf("=");
-      let splitIndex = -1;
-      if (sepIndex !== -1 && eqIndex !== -1) splitIndex = Math.min(sepIndex, eqIndex);
-      else if (sepIndex !== -1) splitIndex = sepIndex;
-      else if (eqIndex !== -1) splitIndex = eqIndex;
-
-      if (splitIndex === -1) continue;
-
-      const key = line.slice(0, splitIndex).trim().toLowerCase();
-      const val = line.slice(splitIndex + 1).trim();
-
-      if ((key.includes("mongo uri") || key === "mongodb_uri") && !process.env.MONGODB_URI) {
-        process.env.MONGODB_URI = val;
-      } else if (key === "cloudinary_url" && !process.env.CLOUDINARY_URL) {
-        process.env.CLOUDINARY_URL = val;
-      } else if (key.includes("cloudinary key name") && !process.env.CLOUDINARY_CLOUD_NAME) {
-        process.env.CLOUDINARY_CLOUD_NAME = val;
-      } else if (key.includes("cloudinary api key") && !process.env.CLOUDINARY_API_KEY) {
-        process.env.CLOUDINARY_API_KEY = val;
-      } else if (key.includes("cloudinary api secret") && !process.env.CLOUDINARY_API_SECRET) {
-        process.env.CLOUDINARY_API_SECRET = val;
-      } else if (key.includes("brevo api") && !process.env.BREVO_API_KEY) {
-        process.env.BREVO_API_KEY = val;
-      } else if (key.includes("brevo sender") && !process.env.BREVO_SENDER_EMAIL) {
-        process.env.BREVO_SENDER_EMAIL = val;
-      } else if (inSuperadmin && key === "email" && !process.env.SUPERADMIN_EMAIL) {
-        process.env.SUPERADMIN_EMAIL = val;
-      } else if (inSuperadmin && key === "password" && !process.env.SUPERADMIN_PASSWORD) {
-        process.env.SUPERADMIN_PASSWORD = val;
-      } else if ((key.includes("gemini") || key.includes("google_api_key")) && !process.env.GEMINI_API_KEY) {
-        process.env.GEMINI_API_KEY = val;
-      }
-    }
-  } catch {
-    // Silently continue if reading fails
-  }
-}
-
-loadRootEnvTxt();
+// Load environment variables from standard .env files
+dotenv.config({ path: path.resolve(process.cwd(), ".env") });
+dotenv.config({ path: path.resolve(process.cwd(), "../.env") });
 
 const envSchema = z.object({
   PORT: z.coerce.number().default(5000),

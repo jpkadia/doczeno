@@ -29,10 +29,12 @@ vi.mock("@/db/connection", () => ({
 }));
 
 // Mock GoogleGenAI SDK to verify public website rendering NEVER invokes Gemini
-const mockGenerateContent = vi.fn().mockResolvedValue({
-  text: "Simulated AI response",
-  functionCalls: [],
-});
+const { mockGenerateContent } = vi.hoisted(() => ({
+  mockGenerateContent: vi.fn().mockResolvedValue({
+    text: "Simulated AI response",
+    functionCalls: [],
+  }),
+}));
 
 vi.mock("@google/genai", () => ({
   GoogleGenAI: vi.fn().mockImplementation(() => ({

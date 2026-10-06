@@ -30,8 +30,6 @@ yarn-error.log*
 .pnpm-debug.log*
 
 # Secrets and environment variables (CRITICAL: NEVER TRACK SECRETS)
-env.txt
-*/env.txt
 .env
 .env*
 *.env

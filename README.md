@@ -23,7 +23,7 @@ Doczeno/
 │   ├── src/services/             # Business Logic, RAG Knowledge Retrieval, AI Text Engine
 │   ├── src/routes/               # Versioned API Endpoints (/api/v1/...)
 │   └── src/tests/                # In-Process Automated Supertest & Vitest Suites (145+ tests)
-├── env.txt                       # Local Development Credentials (Strictly Untracked by Git)
+├── .env                          # Local Environment Configuration (Strictly Untracked by Git)
 ├── .gitignore                    # Robust Protection of Environment & Secret Artifacts
 └── package.json                  # Root Monorepo Workspace Configuration
 ```
