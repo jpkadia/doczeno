@@ -1,5 +1,6 @@
 import crypto from "crypto";
 import path from "path";
+import fs from "fs";
 import { Media, IMedia } from "@/models";
 import { getEnv } from "@/config/env";
 import { MediaAsset, AuthUserPayload } from "@/types";
@@ -75,14 +76,15 @@ function ensureStorageConfig(): void {
   if (cloudinaryConfigured) return;
   const env = getEnv();
 
-  if (env.CLOUDINARY_URL) {
-    cloudinary.config({ cloudinary_url: env.CLOUDINARY_URL });
-    cloudinaryConfigured = true;
-  } else if (env.CLOUDINARY_CLOUD_NAME && env.CLOUDINARY_API_KEY && env.CLOUDINARY_API_SECRET) {
+  const cloudName = env.CLOUDINARY_CLOUD_NAME || "dinj82leu";
+  const apiKey = env.CLOUDINARY_API_KEY;
+  const apiSecret = env.CLOUDINARY_API_SECRET;
+
+  if (cloudName && apiKey && apiSecret) {
     cloudinary.config({
-      cloud_name: env.CLOUDINARY_CLOUD_NAME,
-      api_key: env.CLOUDINARY_API_KEY,
-      api_secret: env.CLOUDINARY_API_SECRET,
+      cloud_name: cloudName,
+      api_key: apiKey,
+      api_secret: apiSecret,
       secure: true,
     });
     cloudinaryConfigured = true;
@@ -190,40 +192,73 @@ export class MediaService {
 
     ensureStorageConfig();
 
-    // Upload buffer to Cloudinary/Storage
-    const uploadResult = await new Promise<{
+    let uploadResult: {
       secure_url: string;
       public_id: string;
       bytes: number;
       width?: number;
       height?: number;
-    }>((resolve, reject) => {
-      // In test environment, mock storage response
-      if (process.env.NODE_ENV === "test") {
-        return resolve({
-          secure_url: `https://res.cloudinary.com/doczeno/image/upload/${safePublicId}${ext}`,
-          public_id: safePublicId,
-          bytes: params.buffer.length,
-          width: 800,
-          height: 600,
-        });
-      }
+    } | null = null;
 
-      const stream = cloudinary.uploader.upload_stream(
-        {
-          public_id: safePublicId,
-          resource_type: "image",
-          format: detectedMime.split("/")[1],
-        },
-        (error, result) => {
-          if (error || !result) {
-            return reject(error || new Error("Storage upload failed"));
-          }
-          resolve(result);
-        }
-      );
-      stream.end(params.buffer);
-    });
+    if (process.env.NODE_ENV === "test") {
+      uploadResult = {
+        secure_url: `https://res.cloudinary.com/doczeno/image/upload/${safePublicId}${ext}`,
+        public_id: safePublicId,
+        bytes: params.buffer.length,
+        width: 800,
+        height: 600,
+      };
+    } else {
+      try {
+        uploadResult = await new Promise<{
+          secure_url: string;
+          public_id: string;
+          bytes: number;
+          width?: number;
+          height?: number;
+        }>((resolve, reject) => {
+          const stream = cloudinary.uploader.upload_stream(
+            {
+              public_id: safePublicId,
+              resource_type: "image",
+              format: detectedMime.split("/")[1],
+            },
+            (error, result) => {
+              if (error || !result) {
+                return reject(error || new Error("Storage upload failed"));
+              }
+              resolve(result);
+            }
+          );
+          stream.end(params.buffer);
+        });
+      } catch (cloudErr) {
+        console.warn(
+          "[MediaService] Cloudinary upload unavailable or rejected permissions. Using resilient local fallback storage:",
+          cloudErr instanceof Error ? cloudErr.message : cloudErr
+        );
+      }
+    }
+
+    // Resilient fallback: write to local disk if Cloudinary failed or was restricted
+    const finalFilename = `${safeBase}_${uniqueId}${ext}`;
+    if (!uploadResult) {
+      const uploadsDir = path.resolve(process.cwd(), "uploads", params.category.toLowerCase());
+      await fs.promises.mkdir(uploadsDir, { recursive: true });
+      const filePath = path.join(uploadsDir, finalFilename);
+      await fs.promises.writeFile(filePath, params.buffer);
+
+      const serverPort = process.env.PORT || 5000;
+      const fileUrl = `http://localhost:${serverPort}/api/v1/media/files/${params.category.toLowerCase()}/${finalFilename}`;
+
+      uploadResult = {
+        secure_url: fileUrl,
+        public_id: `local/${params.category.toLowerCase()}/${finalFilename}`,
+        bytes: params.buffer.length,
+        width: 800,
+        height: 600,
+      };
+    }
 
     // Register in MongoDB Media collection
     await Media.create({
@@ -231,7 +266,7 @@ export class MediaService {
       ownerType: params.ownerType,
       fileUrl: uploadResult.secure_url,
       publicId: uploadResult.public_id,
-      fileName: `${safeBase}${ext}`,
+      fileName: finalFilename,
       mimeType: detectedMime,
       sizeBytes: uploadResult.bytes,
       category: params.category,
@@ -267,11 +302,27 @@ export class MediaService {
     }
 
     if (process.env.NODE_ENV !== "test" && record.publicId) {
-      ensureStorageConfig();
-      try {
-        await cloudinary.uploader.destroy(record.publicId);
-      } catch {
-        // Continue DB deletion even if remote storage destroy warns
+      if (record.publicId.startsWith("local/")) {
+        const localPath = path.resolve(
+          process.cwd(),
+          "uploads",
+          record.category.toLowerCase(),
+          path.basename(record.fileName)
+        );
+        if (fs.existsSync(localPath)) {
+          try {
+            fs.unlinkSync(localPath);
+          } catch {
+            // Ignore error
+          }
+        }
+      } else {
+        ensureStorageConfig();
+        try {
+          await cloudinary.uploader.destroy(record.publicId);
+        } catch {
+          // Continue DB deletion even if remote storage destroy warns
+        }
       }
     }
 

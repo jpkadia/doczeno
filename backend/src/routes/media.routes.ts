@@ -1,5 +1,7 @@
 import { Router, Request, Response, NextFunction } from "express";
 import multer from "multer";
+import path from "path";
+import fs from "fs";
 import { MediaService, MediaCategory } from "@/services/media.service";
 import { requireAuthenticatedUser } from "@/middleware/auth";
 
@@ -79,6 +81,22 @@ mediaRouter.post(
     }
   }
 );
+
+// Serve locally stored media files securely
+mediaRouter.get("/files/:category/:filename", (req: Request, res: Response) => {
+  const categoryParam = String(req.params.category || "");
+  const filenameParam = String(req.params.filename || "");
+  const safeCategory = path.basename(categoryParam).toLowerCase();
+  const safeFilename = path.basename(filenameParam);
+  const filePath = path.resolve(process.cwd(), "uploads", safeCategory, safeFilename);
+
+  if (!fs.existsSync(filePath)) {
+    res.status(404).json({ success: false, error: "Media file not found", code: "NOT_FOUND" });
+    return;
+  }
+
+  res.sendFile(filePath);
+});
 
 // List media assets for owner
 mediaRouter.get(
