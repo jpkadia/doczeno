@@ -71,6 +71,10 @@ const AppointmentSchema = new Schema<IAppointment>(
 
 AppointmentSchema.index({ doctorId: 1, appointmentDate: 1, timeSlot: 1 });
 AppointmentSchema.index({ organizationId: 1, appointmentDate: 1 });
+AppointmentSchema.index({ doctorId: 1, status: 1 });
+AppointmentSchema.index({ organizationId: 1, status: 1 });
+AppointmentSchema.index({ doctorId: 1, createdAt: -1 });
+AppointmentSchema.index({ organizationId: 1, createdAt: -1 });
 
 export const Appointment: Model<IAppointment> =
   mongoose.models.Appointment ||

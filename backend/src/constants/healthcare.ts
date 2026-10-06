@@ -165,6 +165,16 @@ export const RESERVED_SLUGS = [
   "doczeno",
   "register",
   "onboarding",
+  "robots",
+  "sitemap",
+  "favicon",
+  "public",
+  "uploads",
+  "media",
+  "webhook",
+  "system",
+  "null",
+  "undefined",
 ] as const;
 
 export interface WebsiteThemePreview {

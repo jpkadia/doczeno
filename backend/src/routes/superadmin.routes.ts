@@ -359,10 +359,11 @@ superadminRouter.get("/websites", async (req: Request, res: Response, next: Next
 superadminRouter.patch("/websites/:id/publish-status", async (req: Request, res: Response, next: NextFunction) => {
   try {
     const { publishStatus } = req.body;
-    if (!["PUBLISHED", "DRAFT"].includes(publishStatus)) {
+    const allowedStatuses = ["PUBLISHED", "DRAFT", "GENERATING", "REVIEW", "SUSPENDED"];
+    if (!allowedStatuses.includes(publishStatus)) {
       res.status(400).json({
         success: false,
-        error: "Invalid publish status. Must be PUBLISHED or DRAFT",
+        error: "Invalid publish status. Must be PUBLISHED, DRAFT, GENERATING, REVIEW, or SUSPENDED",
         code: "INVALID_STATUS",
       });
       return;

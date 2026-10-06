@@ -162,6 +162,7 @@ const DoctorSchema = new Schema<IDoctor>(
 );
 
 DoctorSchema.index({ organizationId: 1, status: 1 });
+DoctorSchema.index({ organizationId: 1, slug: 1 });
 DoctorSchema.index({ doctorName: "text", specialization: "text" });
 
 export const Doctor: Model<IDoctor> =

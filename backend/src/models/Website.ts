@@ -9,7 +9,7 @@ export interface IWebsite extends Document {
   doctorId?: mongoose.Types.ObjectId | null;
   slug: string;
   templateId: string;
-  publishStatus: "DRAFT" | "PUBLISHED";
+  publishStatus: "DRAFT" | "GENERATING" | "REVIEW" | "PUBLISHED" | "SUSPENDED";
   seoMetadata: {
     title?: string;
     description?: string;
@@ -67,7 +67,7 @@ const WebsiteSchema = new Schema<IWebsite>(
     },
     publishStatus: {
       type: String,
-      enum: ["DRAFT", "PUBLISHED"],
+      enum: ["DRAFT", "GENERATING", "REVIEW", "PUBLISHED", "SUSPENDED"],
       default: "DRAFT",
       index: true,
     },
@@ -96,6 +96,8 @@ const WebsiteSchema = new Schema<IWebsite>(
 
 WebsiteSchema.index({ ownerId: 1, ownerType: 1 });
 WebsiteSchema.index({ organizationId: 1, slug: 1 });
+WebsiteSchema.index({ slug: 1, publishStatus: 1 });
+WebsiteSchema.index({ doctorId: 1, organizationId: 1, publishStatus: 1 });
 
 export const Website: Model<IWebsite> =
   mongoose.models.Website || mongoose.model<IWebsite>("Website", WebsiteSchema);
