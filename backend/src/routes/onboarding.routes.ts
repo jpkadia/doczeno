@@ -6,9 +6,76 @@ import {
 } from "@/validations/onboarding";
 import { Organization, Doctor, Website, User } from "@/models";
 import { AuthService } from "@/services/auth.service";
+import { OtpService } from "@/services/otp.service";
 import { UserRole, WebsiteType } from "@/types";
 
 export const onboardingRouter = Router();
+
+/**
+ * Public: Send OTP verification code to applicant's email
+ */
+onboardingRouter.post(
+  "/send-otp",
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const { email, name } = req.body;
+      if (!email || typeof email !== "string" || !email.includes("@")) {
+        res.status(400).json({
+          success: false,
+          error: "Please enter a valid email address.",
+          code: "INVALID_EMAIL",
+        });
+        return;
+      }
+
+      const result = await OtpService.generateAndSendOtp({
+        email,
+        name,
+        purpose: "ONBOARDING",
+      });
+
+      res.status(200).json({
+        success: true,
+        message: result.message,
+      });
+    } catch (error) {
+      next(error);
+    }
+  }
+);
+
+/**
+ * Public: Verify entered 6-digit OTP code
+ */
+onboardingRouter.post(
+  "/verify-otp",
+  async (req: Request, res: Response, _next: NextFunction) => {
+    try {
+      const { email, otp } = req.body;
+      if (!email || !otp) {
+        res.status(400).json({
+          success: false,
+          error: "Email and 6-digit verification code are required.",
+          code: "MISSING_FIELDS",
+        });
+        return;
+      }
+
+      await OtpService.verifyOtp({ email, otp, purpose: "ONBOARDING" });
+
+      res.status(200).json({
+        success: true,
+        message: "Email verified successfully.",
+      });
+    } catch (error: any) {
+      res.status(400).json({
+        success: false,
+        error: error.message || "Invalid or expired verification code.",
+        code: "INVALID_OTP",
+      });
+    }
+  }
+);
 
 /**
  * Public: List active eligible hospitals for the hospital-doctor selection dropdown
@@ -37,6 +104,15 @@ onboardingRouter.post(
   async (req: Request, res: Response, next: NextFunction) => {
     try {
       const validated = independentDoctorOnboardingSchema.parse(req.body);
+
+      // Verify OTP if submitted during final publish
+      if (!validated.isDraft && validated.otp) {
+        await OtpService.verifyOtp({
+          email: validated.email,
+          otp: validated.otp,
+          purpose: "ONBOARDING",
+        });
+      }
 
       // Generate or validate slug
       const slugBase =
@@ -89,6 +165,32 @@ onboardingRouter.post(
       doctor.websiteId = website._id;
       await doctor.save();
 
+      // Create User account for independent doctor administration if password provided
+      let token: string | undefined;
+      let userRecord: any;
+
+      if (!validated.isDraft && validated.password) {
+        const passwordHash = await AuthService.hashPassword(validated.password);
+        const user = await User.create({
+          name: validated.doctorName,
+          email: validated.email.toLowerCase(),
+          passwordHash,
+          role: UserRole.INDEPENDENT_DOCTOR,
+          doctorProfileId: doctor._id,
+          isActive: true,
+        });
+
+        userRecord = user;
+        token = AuthService.generateToken(user);
+
+        res.cookie("doczeno_session", token, {
+          httpOnly: true,
+          secure: process.env.NODE_ENV === "production",
+          sameSite: "lax",
+          maxAge: 7 * 24 * 60 * 60 * 1000,
+        });
+      }
+
       res.status(201).json({
         success: true,
         message: validated.isDraft
@@ -97,6 +199,14 @@ onboardingRouter.post(
         data: {
           doctor,
           website,
+          user: userRecord
+            ? {
+                id: userRecord._id,
+                email: userRecord.email,
+                role: userRecord.role,
+              }
+            : undefined,
+          token,
           publicUrl: `doctorwebsite.in/${finalSlug}`,
         },
       });
@@ -114,6 +224,15 @@ onboardingRouter.post(
   async (req: Request, res: Response, next: NextFunction) => {
     try {
       const validated = hospitalOnboardingSchema.parse(req.body);
+
+      // Verify OTP if submitted during final publish
+      if (!validated.isDraft && validated.otp) {
+        await OtpService.verifyOtp({
+          email: validated.email,
+          otp: validated.otp,
+          purpose: "ONBOARDING",
+        });
+      }
 
       // Verify unique slug
       const existingOrg = await Organization.findOne({ slug: validated.slug });
@@ -147,10 +266,13 @@ onboardingRouter.post(
       });
 
       // Create Hospital Admin User
-      const passwordHash = await AuthService.hashPassword(validated.adminPassword);
+      const rawPassword = validated.password || validated.adminPassword || "SecureHospitalPassword123!";
+      const passwordHash = await AuthService.hashPassword(rawPassword);
+      const adminEmail = (validated.adminEmail || validated.email).toLowerCase();
+
       const adminUser = await User.create({
         name: validated.adminName,
-        email: validated.adminEmail.toLowerCase(),
+        email: adminEmail,
         passwordHash,
         role: UserRole.HOSPITAL_ADMIN,
         organizationId: organization._id,
@@ -173,6 +295,13 @@ onboardingRouter.post(
       });
 
       const token = AuthService.generateToken(adminUser);
+
+      res.cookie("doczeno_session", token, {
+        httpOnly: true,
+        secure: process.env.NODE_ENV === "production",
+        sameSite: "lax",
+        maxAge: 7 * 24 * 60 * 60 * 1000,
+      });
 
       res.status(201).json({
         success: true,
@@ -205,6 +334,15 @@ onboardingRouter.post(
   async (req: Request, res: Response, next: NextFunction) => {
     try {
       const validated = hospitalDoctorOnboardingSchema.parse(req.body);
+
+      // Verify OTP if submitted during final publish
+      if (!validated.isDraft && validated.otp) {
+        await OtpService.verifyOtp({
+          email: validated.email,
+          otp: validated.otp,
+          purpose: "ONBOARDING",
+        });
+      }
 
       // 1. Re-verify organization exists and is active
       const parentHospital = await Organization.findById(validated.organizationId);
@@ -272,6 +410,35 @@ onboardingRouter.post(
       doctor.websiteId = website._id;
       await doctor.save();
 
+      // Create User account for affiliated doctor if password provided
+      let docUserRecord: any;
+      let token: string | undefined;
+
+      if (!validated.isDraft && validated.password) {
+        const passwordHash = await AuthService.hashPassword(validated.password);
+        const docEmail = validated.email.toLowerCase();
+
+        const docUser = await User.create({
+          name: validated.doctorName,
+          email: docEmail,
+          passwordHash,
+          role: UserRole.HOSPITAL_DOCTOR,
+          organizationId: parentHospital._id,
+          doctorProfileId: doctor._id,
+          isActive: true,
+        });
+
+        docUserRecord = docUser;
+        token = AuthService.generateToken(docUser);
+
+        res.cookie("doczeno_session", token, {
+          httpOnly: true,
+          secure: process.env.NODE_ENV === "production",
+          sameSite: "lax",
+          maxAge: 7 * 24 * 60 * 60 * 1000,
+        });
+      }
+
       res.status(201).json({
         success: true,
         message: validated.isDraft
@@ -280,6 +447,14 @@ onboardingRouter.post(
         data: {
           doctor,
           website,
+          user: docUserRecord
+            ? {
+                id: docUserRecord._id,
+                email: docUserRecord.email,
+                role: docUserRecord.role,
+              }
+            : undefined,
+          token,
           publicUrl: `doctorwebsite.in/${parentHospital.slug}/${docSlugBase}`,
         },
       });

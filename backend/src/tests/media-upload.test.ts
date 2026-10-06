@@ -284,13 +284,21 @@ describe("Media Upload & Binary Security Verification", () => {
   });
 
   describe("Media API HTTP Endpoints (Supertest)", () => {
-    it("rejects unauthenticated upload request with 401", async () => {
+    it("allows unauthenticated onboarding visitors to upload valid image file via multipart form", async () => {
+      vi.spyOn(Media, "countDocuments").mockResolvedValue(0 as any);
+      vi.spyOn(Media, "create").mockResolvedValue({
+        _id: "media-onboarding-1",
+        ownerId: "onboarding-temp-123",
+        fileUrl: "https://res.cloudinary.com/doczeno/image/upload/sample.jpg",
+      } as any);
+
       const res = await request(app)
         .post("/api/v1/media/upload")
         .attach("file", validJpegBuffer, "test.jpg");
 
-      expect(res.status).toBe(401);
-      expect(res.body.success).toBe(false);
+      expect(res.status).toBe(201);
+      expect(res.body.success).toBe(true);
+      expect(res.body.data.asset.url).toBeDefined();
     });
 
     it("allows authenticated user to upload valid image file via multipart form", async () => {

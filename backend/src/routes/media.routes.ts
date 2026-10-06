@@ -43,12 +43,11 @@ mediaRouter.post(
 // Secure direct file upload with binary signature verification
 mediaRouter.post(
   "/upload",
-  requireAuthenticatedUser,
   upload.single("file"),
   async (req: Request, res: Response, next: NextFunction) => {
     try {
       if (!req.file) {
-        res.status(400).json({ success: false, error: "No file uploaded", code: "FILE_MISSING" });
+        res.status(400).json({ success: false, error: "Please select an image file to upload", code: "FILE_MISSING" });
         return;
       }
 
@@ -58,12 +57,8 @@ mediaRouter.post(
         req.body.ownerId ||
         req.user?.doctorProfileId ||
         req.user?.organizationId ||
-        req.user?.userId;
-
-      if (!ownerId) {
-        res.status(400).json({ success: false, error: "Owner ID is required", code: "OWNER_REQUIRED" });
-        return;
-      }
+        req.user?.userId ||
+        `onboarding-temp-${Date.now()}`;
 
       const asset = await MediaService.uploadMediaBuffer({
         buffer: req.file.buffer,

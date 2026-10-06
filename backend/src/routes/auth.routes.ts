@@ -3,6 +3,8 @@ import { AuthService } from "@/services/auth.service";
 import { registerSchema, loginSchema } from "@/validations";
 import { authRateLimiter } from "@/middleware/rate-limiter";
 import { requireAuthenticatedUser } from "@/middleware/auth";
+import { Website, Doctor } from "@/models";
+import { UserRole } from "@/types";
 
 export const authRouter = Router();
 
@@ -64,6 +66,41 @@ authRouter.post(
         validated.password,
         { ipAddress, userAgent }
       );
+
+      // Enforce strict tenant authorization if targetSlug is specified
+      if (validated.targetSlug && user.role !== UserRole.SUPERADMIN) {
+        const website = await Website.findOne({ slug: validated.targetSlug });
+        let authorized = false;
+
+        if (website) {
+          if (user.role === UserRole.INDEPENDENT_DOCTOR) {
+            authorized =
+              user.doctorProfileId?.toString() === website.doctorId?.toString() ||
+              user.doctorProfileId?.toString() === website.ownerId?.toString();
+          } else if (user.role === UserRole.HOSPITAL_ADMIN) {
+            authorized =
+              user.organizationId?.toString() === website.organizationId?.toString() ||
+              user.organizationId?.toString() === website.ownerId?.toString();
+          } else if (user.role === UserRole.HOSPITAL_DOCTOR) {
+            authorized = user.doctorProfileId?.toString() === website.doctorId?.toString();
+          }
+        } else {
+          // Check if targetSlug is a doctor slug
+          const doc = await Doctor.findOne({ slug: validated.targetSlug });
+          if (doc && user.doctorProfileId?.toString() === doc._id.toString()) {
+            authorized = true;
+          }
+        }
+
+        if (!authorized) {
+          res.status(403).json({
+            success: false,
+            error: "Aap is clinic/hospital ke admin panel ke liye authorized nahi hain. Kripya apne official clinic link par login karein.",
+            code: "TENANT_MISMATCH",
+          });
+          return;
+        }
+      }
 
       // Set secure HTTP-only cookie
       res.cookie("doczeno_session", token, {

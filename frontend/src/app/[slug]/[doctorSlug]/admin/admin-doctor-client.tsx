@@ -8,6 +8,7 @@ import {
   DoctorAppointmentItem,
 } from "@/components/admin/views/hospital-doctor-admin";
 import { apiClient } from "@/lib/api-client";
+import { useRouter } from "next/navigation";
 
 interface AdminDoctorClientProps {
   initialWebsite: EffectiveWebsiteData;
@@ -20,6 +21,21 @@ export function AdminDoctorClient({
   orgSlug,
   doctorSlug,
 }: AdminDoctorClientProps) {
+  const router = useRouter();
+
+  React.useEffect(() => {
+    async function verifyAuth() {
+      try {
+        await apiClient.get("/auth/me");
+      } catch (err: unknown) {
+        if ((err as { status?: number })?.status === 401) {
+          router.replace(`/${orgSlug}/${doctorSlug}/admin/login`);
+        }
+      }
+    }
+    verifyAuth();
+  }, [orgSlug, doctorSlug, router]);
+
   const doctorData: HospitalDoctorData = {
     id: doctorSlug,
     slug: doctorSlug,

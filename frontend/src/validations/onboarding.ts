@@ -129,8 +129,21 @@ export const independentDoctorOnboardingSchema = z.object({
   doctorPhoto: mediaAssetSchema,
   clinicLogo: mediaAssetSchema.optional(),
   clinicPhotos: z.array(mediaAssetSchema).max(6, "Maximum 6 clinic gallery photos allowed").default([]),
+  password: z
+    .string()
+    .min(6, "Password must be at least 6 characters")
+    .regex(/[A-Z]/, "Password must contain at least 1 uppercase letter")
+    .regex(/[0-9]/, "Password must contain at least 1 number")
+    .regex(/[^A-Za-z0-9]/, "Password must contain at least 1 special symbol (e.g. @, #, $, !)")
+    .optional(),
+  confirmPassword: z.string().optional(),
+  otp: z.string().length(6, "Verification code must be 6 digits").optional(),
   isDraft: z.boolean().default(false),
   customSlug: slugSchema.optional(),
+})
+.refine((data) => data.isDraft || !data.password || data.password === data.confirmPassword, {
+  message: "Confirm password does not match",
+  path: ["confirmPassword"],
 });
 
 export type IndependentDoctorFormValues = z.infer<typeof independentDoctorOnboardingSchema>;
@@ -153,39 +166,67 @@ export const hospitalOnboardingSchema = z
     selectedTheme: z.enum(["clinical-editorial", "modern-minimal", "vital-compact"]),
     adminName: z.string().min(2, "Admin name is required"),
     adminEmail: z.string().email("Valid admin login email is required"),
-    adminPassword: z.string().min(8, "Password must be at least 8 characters"),
-    confirmPassword: z.string().min(8, "Password confirmation is required"),
+    adminPassword: z.string().optional(),
+    password: z
+      .string()
+      .min(6, "Password must be at least 6 characters")
+      .regex(/[A-Z]/, "Password must contain at least 1 uppercase letter")
+      .regex(/[0-9]/, "Password must contain at least 1 number")
+      .regex(/[^A-Za-z0-9]/, "Password must contain at least 1 special symbol (e.g. @, #, $, !)")
+      .optional(),
+    confirmPassword: z.string().optional(),
+    otp: z.string().length(6, "Verification code must be 6 digits").optional(),
     isDraft: z.boolean().default(false),
   })
-  .refine((data) => data.adminPassword === data.confirmPassword, {
-    message: "Passwords do not match",
-    path: ["confirmPassword"],
-  });
+  .refine(
+    (data) => {
+      const pwd = data.password || data.adminPassword;
+      return data.isDraft || !pwd || pwd === data.confirmPassword;
+    },
+    {
+      message: "Confirm password does not match",
+      path: ["confirmPassword"],
+    }
+  );
 
 export type HospitalFormValues = z.infer<typeof hospitalOnboardingSchema>;
 
-export const hospitalDoctorOnboardingSchema = z.object({
-  organizationId: z.string().min(1, "A valid hospital organization must be selected"),
-  doctorName: z
-    .string()
-    .min(2, "Doctor name must be at least 2 characters")
-    .transform(normalizeDoctorName),
-  gender: z.enum(["MALE", "FEMALE", "OTHER"]),
-  degree: z.string().min(2, "Medical degree is required"),
-  specialization: z.enum(MEDICAL_SPECIALIZATIONS),
-  yearsOfExperience: z
-    .number()
-    .int("Years of experience must be an integer")
-    .min(0, "Experience cannot be negative")
-    .max(70, "Experience cannot exceed 70 years"),
-  whatsApp: phoneSchema,
-  email: z.string().email("Valid email address is required"),
-  consultationHours: consultationHoursSchema,
-  weeklyOff: z.array(z.enum(DAYS_OF_WEEK)).min(0),
-  appointmentRequired: z.boolean().default(true),
-  doctorPhoto: mediaAssetSchema,
-  isDraft: z.boolean().default(false),
-  customSlug: slugSchema.optional(),
-});
+export const hospitalDoctorOnboardingSchema = z
+  .object({
+    organizationId: z.string().min(1, "A valid hospital organization must be selected"),
+    doctorName: z
+      .string()
+      .min(2, "Doctor name must be at least 2 characters")
+      .transform(normalizeDoctorName),
+    gender: z.enum(["MALE", "FEMALE", "OTHER"]),
+    degree: z.string().min(2, "Medical degree is required"),
+    specialization: z.enum(MEDICAL_SPECIALIZATIONS),
+    yearsOfExperience: z
+      .number()
+      .int("Years of experience must be an integer")
+      .min(0, "Experience cannot be negative")
+      .max(70, "Experience cannot exceed 70 years"),
+    whatsApp: phoneSchema,
+    email: z.string().email("Valid email address is required"),
+    consultationHours: consultationHoursSchema,
+    weeklyOff: z.array(z.enum(DAYS_OF_WEEK)).min(0),
+    appointmentRequired: z.boolean().default(true),
+    doctorPhoto: mediaAssetSchema,
+    password: z
+      .string()
+      .min(6, "Password must be at least 6 characters")
+      .regex(/[A-Z]/, "Password must contain at least 1 uppercase letter")
+      .regex(/[0-9]/, "Password must contain at least 1 number")
+      .regex(/[^A-Za-z0-9]/, "Password must contain at least 1 special symbol (e.g. @, #, $, !)")
+      .optional(),
+    confirmPassword: z.string().optional(),
+    otp: z.string().length(6, "Verification code must be 6 digits").optional(),
+    isDraft: z.boolean().default(false),
+    customSlug: slugSchema.optional(),
+  })
+  .refine((data) => data.isDraft || !data.password || data.password === data.confirmPassword, {
+    message: "Confirm password does not match",
+    path: ["confirmPassword"],
+  });
 
 export type HospitalDoctorFormValues = z.infer<typeof hospitalDoctorOnboardingSchema>;

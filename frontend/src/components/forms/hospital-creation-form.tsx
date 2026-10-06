@@ -22,16 +22,19 @@ import { apiClient } from "@/lib/api-client";
 import { Building2, Save, CheckCircle, ExternalLink, Loader2 } from "lucide-react";
 import { toast } from "sonner";
 
+import { OtpVerificationDialog } from "./otp-verification-dialog";
+
 export function HospitalCreationForm() {
   const [isSubmitting, setIsSubmitting] = React.useState(false);
   const [publishedUrl, setPublishedUrl] = React.useState<string | null>(null);
+  const [showOtpDialog, setShowOtpDialog] = React.useState(false);
 
   const {
     register,
-    handleSubmit,
     control,
     watch,
     setValue,
+    trigger,
     formState: { errors },
   } = useForm<HospitalFormValues>({
     resolver: zodResolver(hospitalOnboardingSchema),
@@ -56,14 +59,30 @@ export function HospitalCreationForm() {
     }
   };
 
-  const onSubmit = async (data: HospitalFormValues) => {
+  const handleFormSubmit = async () => {
+    const isValid = await trigger();
+    if (!isValid) {
+      toast.error("Please fill all required hospital details and passwords correctly.");
+      return;
+    }
+    setShowOtpDialog(true);
+  };
+
+  const handleVerifyOtpAndCreate = async (otp: string) => {
     try {
       setIsSubmitting(true);
-      const res = await apiClient.post<{ publicUrl: string }>("/onboarding/hospital", data);
+      setValue("otp", otp);
+      const res = await apiClient.post<{ publicUrl: string }>("/onboarding/hospital", {
+        ...formValues,
+        otp,
+        isDraft: false,
+      });
       setPublishedUrl(res.publicUrl);
       toast.success("Hospital / Clinic Created Successfully!");
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : "Creation failed");
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : (err as { message?: string })?.message || "Hospital creation failed";
+      toast.error(msg);
+      throw err;
     } finally {
       setIsSubmitting(false);
     }
@@ -97,16 +116,23 @@ export function HospitalCreationForm() {
             {formValues.hospitalName} is Live!
           </h2>
           <p className="text-sm text-muted-foreground max-w-md mx-auto">
-            Your healthcare organization and hospital admin credentials have been configured. You can now add child doctors under this hospital.
+            Your healthcare organization and hospital admin credentials have been configured. You can now manage your hospital and add affiliated doctors.
           </p>
-          <div className="pt-2">
+          <div className="pt-4 flex flex-col sm:flex-row items-center justify-center gap-3">
             <a
-              href={`https://${publishedUrl}`}
+              href={`/${formValues.slug}`}
               target="_blank"
               rel="noreferrer"
-              className="inline-flex items-center gap-2 px-5 py-2.5 rounded-md bg-primary text-primary-foreground text-sm font-semibold shadow hover:bg-primary/90"
+              className="inline-flex items-center gap-2 px-5 py-2.5 rounded-md bg-primary text-primary-foreground text-sm font-semibold shadow hover:bg-primary/90 transition-colors"
             >
-              <span>Visit {publishedUrl}</span>
+              <span>View Public Website</span>
+              <ExternalLink className="h-4 w-4" />
+            </a>
+            <a
+              href={`/${formValues.slug}/admin/login`}
+              className="inline-flex items-center gap-2 px-5 py-2.5 rounded-md border bg-card text-foreground text-sm font-semibold shadow-sm hover:bg-accent transition-colors"
+            >
+              <span>Access Hospital Admin</span>
               <ExternalLink className="h-4 w-4" />
             </a>
           </div>
@@ -145,7 +171,7 @@ export function HospitalCreationForm() {
       </CardHeader>
 
       <CardContent className="p-6">
-        <form onSubmit={handleSubmit(onSubmit)} className="space-y-8">
+        <form onSubmit={(e) => { e.preventDefault(); handleFormSubmit(); }} className="space-y-8">
           {/* Section 1: Organization Identity */}
           <div className="space-y-4">
             <h3 className="text-base font-semibold text-foreground border-b pb-2">
@@ -411,7 +437,13 @@ export function HospitalCreationForm() {
             <p className="text-xs text-muted-foreground">
               Doctors will be created and affiliated under this hospital after registration.
             </p>
-            <Button type="submit" disabled={isSubmitting} size="lg" variant="success">
+            <Button
+              type="button"
+              onClick={handleFormSubmit}
+              disabled={isSubmitting}
+              size="lg"
+              className="bg-emerald-600 hover:bg-emerald-700 text-white font-semibold"
+            >
               {isSubmitting ? (
                 <>
                   <Loader2 className="h-4 w-4 mr-2 animate-spin" />
@@ -424,6 +456,14 @@ export function HospitalCreationForm() {
           </div>
         </form>
       </CardContent>
+
+      <OtpVerificationDialog
+        open={showOtpDialog}
+        onOpenChange={setShowOtpDialog}
+        email={formValues.adminEmail || formValues.email || ""}
+        name={formValues.adminName || formValues.hospitalName}
+        onVerified={handleVerifyOtpAndCreate}
+      />
     </Card>
   );
 }

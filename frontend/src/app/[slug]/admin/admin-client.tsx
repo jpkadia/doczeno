@@ -5,6 +5,7 @@ import { EffectiveWebsiteData } from "@/types";
 import { IndependentDoctorAdmin, IndependentDoctorData, AppointmentItem } from "@/components/admin/views/independent-doctor-admin";
 import { HospitalAdmin, HospitalData, HospitalDoctorItem, HospitalAppointmentItem } from "@/components/admin/views/hospital-admin";
 import { apiClient } from "@/lib/api-client";
+import { useRouter } from "next/navigation";
 
 interface AdminClientProps {
   initialWebsite: EffectiveWebsiteData;
@@ -12,7 +13,21 @@ interface AdminClientProps {
 }
 
 export function AdminClient({ initialWebsite, slug }: AdminClientProps) {
-  void slug;
+  const router = useRouter();
+
+  React.useEffect(() => {
+    async function verifyAuth() {
+      try {
+        await apiClient.get("/auth/me");
+      } catch (err: unknown) {
+        if ((err as { status?: number })?.status === 401) {
+          router.replace(`/${slug}/admin/login`);
+        }
+      }
+    }
+    verifyAuth();
+  }, [slug, router]);
+
   // 1. Determine if this is an Independent Doctor or Hospital/Clinic
   const isDoctor = initialWebsite.websiteType === "INDEPENDENT_DOCTOR";
 

@@ -19,6 +19,7 @@ import { FormField } from "./form-field";
 import { apiClient } from "@/lib/api-client";
 import { Users, Info, CheckCircle, ExternalLink, Loader2, Building2 } from "lucide-react";
 import { toast } from "sonner";
+import { OtpVerificationDialog } from "./otp-verification-dialog";
 
 interface EligibleHospital {
   _id: string;
@@ -44,13 +45,15 @@ export function HospitalDoctorForm({
   const [isLoadingHospitals, setIsLoadingHospitals] = React.useState(true);
   const [isSubmitting, setIsSubmitting] = React.useState(false);
   const [publishedUrl, setPublishedUrl] = React.useState<string | null>(null);
+  const [showOtpDialog, setShowOtpDialog] = React.useState(false);
+  const [createdDocSlug, setCreatedDocSlug] = React.useState<string | null>(null);
 
   const {
     register,
-    handleSubmit,
     control,
     watch,
     setValue,
+    trigger,
     formState: { errors },
   } = useForm<HospitalDoctorFormValues>({
     resolver: zodResolver(hospitalDoctorOnboardingSchema),
@@ -95,23 +98,44 @@ export function HospitalDoctorForm({
 
   const selectedHospital = hospitals.find((h) => h._id === formValues.organizationId);
 
-  const onSubmit = async (data: HospitalDoctorFormValues) => {
+  const handleFormSubmit = async () => {
+    const isValid = await trigger();
+    if (!isValid) {
+      toast.error("Please fill all required doctor details and credentials correctly.");
+      return;
+    }
+    setShowOtpDialog(true);
+  };
+
+  const handleVerifyOtpAndCreate = async (otp: string) => {
     try {
       setIsSubmitting(true);
+      setValue("otp", otp);
       const res = await apiClient.post<{ publicUrl: string }>(
         "/onboarding/hospital-doctor",
-        data
+        {
+          ...formValues,
+          otp,
+          isDraft: false,
+        }
       );
       setPublishedUrl(res.publicUrl);
+      const docSlug = res.publicUrl.split("/").pop() || "";
+      setCreatedDocSlug(docSlug);
       toast.success("Affiliated Doctor Registered Successfully!");
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : "Registration failed");
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : (err as { message?: string })?.message || "Registration failed";
+      toast.error(msg);
+      throw err;
     } finally {
       setIsSubmitting(false);
     }
   };
 
   if (publishedUrl) {
+    const orgSlug = selectedHospital?.slug || "hospital";
+    const doctorSlug = createdDocSlug || formValues.customSlug || ("dr-" + formValues.doctorName.toLowerCase().replace(/[^a-z0-9]/g, "-"));
+
     return (
       <Card className="max-w-2xl mx-auto border shadow-sm">
         <CardContent className="p-8 text-center space-y-4">
@@ -124,14 +148,21 @@ export function HospitalDoctorForm({
           <p className="text-sm text-muted-foreground max-w-md mx-auto">
             Doctor profile has been linked to {selectedHospital?.name || "the hospital"}. Branding, facility photos, and regional address are automatically inherited at runtime.
           </p>
-          <div className="pt-2">
+          <div className="pt-4 flex flex-col sm:flex-row items-center justify-center gap-3">
             <a
-              href={`https://${publishedUrl}`}
+              href={`/${orgSlug}/${doctorSlug}`}
               target="_blank"
               rel="noreferrer"
-              className="inline-flex items-center gap-2 px-5 py-2.5 rounded-md bg-primary text-primary-foreground text-sm font-semibold shadow hover:bg-primary/90"
+              className="inline-flex items-center gap-2 px-5 py-2.5 rounded-md bg-primary text-primary-foreground text-sm font-semibold shadow hover:bg-primary/90 transition-colors"
             >
-              <span>Visit {publishedUrl}</span>
+              <span>View Doctor Profile</span>
+              <ExternalLink className="h-4 w-4" />
+            </a>
+            <a
+              href={`/${orgSlug}/${doctorSlug}/admin/login`}
+              className="inline-flex items-center gap-2 px-5 py-2.5 rounded-md border bg-card text-foreground text-sm font-semibold shadow-sm hover:bg-accent transition-colors"
+            >
+              <span>Access Doctor Admin</span>
               <ExternalLink className="h-4 w-4" />
             </a>
           </div>
@@ -157,7 +188,7 @@ export function HospitalDoctorForm({
       </CardHeader>
 
       <CardContent className="p-6">
-        <form onSubmit={handleSubmit(onSubmit)} className="space-y-6">
+        <form onSubmit={(e) => { e.preventDefault(); handleFormSubmit(); }} className="space-y-6">
           {/* Hospital Selection */}
           <div className="space-y-2 p-4 rounded-lg border bg-muted/30">
             <div className="flex items-center justify-between">
@@ -363,12 +394,59 @@ export function HospitalDoctorForm({
             />
           </div>
 
+          {/* Security Credentials */}
+          <div className="space-y-4">
+            <h3 className="text-sm font-bold text-foreground uppercase tracking-wider">
+              Doctor Account & Credentials
+            </h3>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <FormField
+                id="password"
+                label="Create Password"
+                required
+                hint="Min 6 chars, 1 uppercase, 1 number, 1 symbol (@, #, $, !)"
+                error={errors.password?.message}
+              >
+                <Input
+                  id="password"
+                  type="password"
+                  autoComplete="new-password"
+                  {...register("password")}
+                  placeholder="••••••••"
+                />
+              </FormField>
+
+              <FormField
+                id="confirmPassword"
+                label="Confirm Password"
+                required
+                hint="Re-enter password to confirm"
+                error={errors.confirmPassword?.message}
+              >
+                <Input
+                  id="confirmPassword"
+                  type="password"
+                  autoComplete="new-password"
+                  {...register("confirmPassword")}
+                  placeholder="••••••••"
+                />
+              </FormField>
+            </div>
+          </div>
+
           <div className="pt-6 border-t flex justify-end">
-            <Button type="submit" disabled={isSubmitting} size="lg" variant="success">
+            <Button
+              type="button"
+              onClick={handleFormSubmit}
+              disabled={isSubmitting}
+              size="lg"
+              className="bg-emerald-600 hover:bg-emerald-700 text-white font-semibold"
+            >
               {isSubmitting ? (
                 <>
                   <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-                  Registering Hospital Doctor...
+                  Affiliating Doctor...
                 </>
               ) : (
                 "Affiliate Doctor to Hospital"
@@ -377,6 +455,14 @@ export function HospitalDoctorForm({
           </div>
         </form>
       </CardContent>
+
+      <OtpVerificationDialog
+        open={showOtpDialog}
+        onOpenChange={setShowOtpDialog}
+        email={formValues.email || ""}
+        name={formValues.doctorName}
+        onVerified={handleVerifyOtpAndCreate}
+      />
     </Card>
   );
 }

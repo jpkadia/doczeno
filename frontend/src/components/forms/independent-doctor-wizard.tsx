@@ -23,10 +23,11 @@ import { FormField } from "./form-field";
 import { apiClient } from "@/lib/api-client";
 import { ArrowLeft, ArrowRight, Save, CheckCircle, ExternalLink, Loader2 } from "lucide-react";
 import { toast } from "sonner";
+import { OtpVerificationDialog } from "./otp-verification-dialog";
 
 const WIZARD_STEPS: StepItem[] = [
   { id: 1, label: "Basic Info" },
-  { id: 2, label: "Contact" },
+  { id: 2, label: "Contact & Security" },
   { id: 3, label: "Schedule" },
   { id: 4, label: "Clinic Data" },
   { id: 5, label: "Media" },
@@ -39,10 +40,11 @@ export function IndependentDoctorWizard() {
   const [currentStep, setCurrentStep] = React.useState(1);
   const [isSubmitting, setIsSubmitting] = React.useState(false);
   const [publishedUrl, setPublishedUrl] = React.useState<string | null>(null);
+  const [showOtpDialog, setShowOtpDialog] = React.useState(false);
+  const [createdSlug, setCreatedSlug] = React.useState<string | null>(null);
 
   const {
     register,
-    handleSubmit,
     control,
     watch,
     setValue,
@@ -73,7 +75,7 @@ export function IndependentDoctorWizard() {
         fieldsToValidate = ["doctorName", "gender", "degree", "yearsOfExperience"];
         break;
       case 2:
-        fieldsToValidate = ["email", "whatsApp"];
+        fieldsToValidate = ["email", "whatsApp", "password", "confirmPassword"];
         break;
       case 3:
         fieldsToValidate = ["consultationHours", "weeklyOff", "appointmentRequired"];
@@ -126,21 +128,35 @@ export function IndependentDoctorWizard() {
     }
   };
 
-  const onFinalSubmit = async (data: IndependentDoctorFormValues) => {
+  const handleVerifyOtpAndPublish = async (otp: string) => {
     try {
       setIsSubmitting(true);
-      const res = await apiClient.post<{ publicUrl: string }>(
+      setValue("otp", otp);
+      const res = await apiClient.post<{ publicUrl: string; data?: unknown }>(
         "/onboarding/independent-doctor",
-        { ...data, isDraft: false }
+        { ...formValues, otp, isDraft: false }
       );
       setPublishedUrl(res.publicUrl);
+      const cleanSlug = res.publicUrl.split("/").pop() || "";
+      setCreatedSlug(cleanSlug);
       toast.success("Independent Doctor Website Published Successfully!");
       setCurrentStep(8);
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : "Submission failed");
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : (err as { message?: string })?.message || "Failed to publish website";
+      toast.error(msg);
+      throw err;
     } finally {
       setIsSubmitting(false);
     }
+  };
+
+  const handlePublishClick = async () => {
+    const isValid = await trigger();
+    if (!isValid) {
+      toast.error("Please fill all required fields correctly before verifying.");
+      return;
+    }
+    setShowOtpDialog(true);
   };
 
   return (
@@ -200,7 +216,7 @@ export function IndependentDoctorWizard() {
         </CardHeader>
 
         <CardContent className="p-6">
-          <form onSubmit={handleSubmit(onFinalSubmit)} className="space-y-6">
+          <form onSubmit={(e) => { e.preventDefault(); handlePublishClick(); }} className="space-y-6">
             {/* STEP 1: Basic Information */}
             {currentStep === 1 && (
               <div className="space-y-5">
@@ -298,6 +314,40 @@ export function IndependentDoctorWizard() {
                 >
                   <Input id="whatsApp" {...register("whatsApp")} placeholder="+91 9876543210" />
                 </FormField>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 pt-3 border-t">
+                  <FormField
+                    id="password"
+                    label="Create Admin Password"
+                    required
+                    hint="Min 6 chars, 1 uppercase, 1 number, 1 symbol (@, #, $, !)"
+                    error={errors.password?.message}
+                  >
+                    <Input
+                      id="password"
+                      type="password"
+                      autoComplete="new-password"
+                      {...register("password")}
+                      placeholder="••••••••"
+                    />
+                  </FormField>
+
+                  <FormField
+                    id="confirmPassword"
+                    label="Confirm Password"
+                    required
+                    hint="Re-enter your password to confirm"
+                    error={errors.confirmPassword?.message}
+                  >
+                    <Input
+                      id="confirmPassword"
+                      type="password"
+                      autoComplete="new-password"
+                      {...register("confirmPassword")}
+                      placeholder="••••••••"
+                    />
+                  </FormField>
+                </div>
               </div>
             )}
 
@@ -557,15 +607,22 @@ export function IndependentDoctorWizard() {
                 </p>
 
                 {publishedUrl && (
-                  <div className="pt-2">
+                  <div className="pt-4 flex flex-col sm:flex-row items-center justify-center gap-3">
                     <a
-                      href={`https://${publishedUrl}`}
+                      href={`/${createdSlug || publishedUrl.split("/").pop()}`}
                       target="_blank"
                       rel="noreferrer"
-                      className="inline-flex items-center gap-2 px-4 py-2 rounded-md bg-primary text-primary-foreground text-sm font-semibold shadow hover:bg-primary/90"
+                      className="inline-flex items-center gap-2 px-5 py-2.5 rounded-md bg-primary text-primary-foreground text-sm font-semibold shadow hover:bg-primary/90 transition-colors"
                     >
-                      <span>Visit {publishedUrl}</span>
+                      <span>View Public Website</span>
                       <ExternalLink className="h-4 w-4" />
+                    </a>
+                    <a
+                      href={`/${createdSlug || publishedUrl.split("/").pop()}/admin/login`}
+                      className="inline-flex items-center gap-2 px-5 py-2.5 rounded-md border bg-card text-foreground text-sm font-semibold shadow-sm hover:bg-accent transition-colors"
+                    >
+                      <span>Access Admin Console</span>
+                      <ArrowRight className="h-4 w-4" />
                     </a>
                   </div>
                 )}
@@ -591,11 +648,16 @@ export function IndependentDoctorWizard() {
                     <ArrowRight className="h-4 w-4 ml-2" />
                   </Button>
                 ) : (
-                  <Button type="submit" disabled={isSubmitting} variant="success">
+                  <Button
+                    type="button"
+                    onClick={handlePublishClick}
+                    disabled={isSubmitting}
+                    className="bg-emerald-600 hover:bg-emerald-700 text-white font-semibold"
+                  >
                     {isSubmitting ? (
                       <>
                         <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-                        Publishing Website...
+                        Please wait...
                       </>
                     ) : (
                       "Publish Website"
@@ -607,6 +669,14 @@ export function IndependentDoctorWizard() {
           </form>
         </CardContent>
       </Card>
+
+      <OtpVerificationDialog
+        open={showOtpDialog}
+        onOpenChange={setShowOtpDialog}
+        email={formValues.email || ""}
+        name={formValues.doctorName}
+        onVerified={handleVerifyOtpAndPublish}
+      />
     </div>
   );
 }

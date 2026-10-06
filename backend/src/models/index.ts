@@ -12,3 +12,4 @@ export * from "./AIContent";
 export * from "./ChatbotKnowledge";
 export * from "./ChatbotConversation";
 export * from "./AuditLog";
+export * from "./Otp";
