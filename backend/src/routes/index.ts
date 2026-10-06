@@ -8,6 +8,7 @@ import { appointmentRouter } from "./appointment.routes";
 import { auditRouter } from "./audit.routes";
 import { mediaRouter } from "./media.routes";
 import { onboardingRouter } from "./onboarding.routes";
+import { superadminRouter } from "./superadmin.routes";
 
 export const apiV1Router = Router();
 
@@ -20,3 +21,4 @@ apiV1Router.use("/appointments", appointmentRouter);
 apiV1Router.use("/audit-logs", auditRouter);
 apiV1Router.use("/media", mediaRouter);
 apiV1Router.use("/onboarding", onboardingRouter);
+apiV1Router.use("/superadmin", superadminRouter);

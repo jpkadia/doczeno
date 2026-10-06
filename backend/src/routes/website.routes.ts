@@ -3,6 +3,7 @@ import { WebsiteService } from "@/services/website.service";
 import { requireAuthenticatedUser } from "@/middleware/auth";
 import { requireWebsiteAccess, requireRole } from "@/middleware/rbac";
 import { UserRole } from "@/types";
+import { Website } from "@/models";
 
 export const websiteRouter = Router();
 
@@ -54,6 +55,35 @@ websiteRouter.get(
         return;
       }
       res.status(200).json({ success: true, data });
+    } catch (error) {
+      next(error);
+    }
+  }
+);
+
+/**
+ * Authenticated: Resolves the website belonging to the current authenticated actor
+ */
+websiteRouter.get(
+  "/me",
+  requireAuthenticatedUser,
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const user = req.user!;
+      let website = null;
+
+      if (user.role === UserRole.HOSPITAL_ADMIN && user.organizationId) {
+        website = await Website.findOne({ organizationId: user.organizationId, websiteType: "HOSPITAL_CLINIC" });
+      } else if (user.doctorProfileId) {
+        website = await Website.findOne({ doctorId: user.doctorProfileId });
+      }
+
+      if (!website) {
+        res.status(404).json({ success: false, error: "Website not found for current actor", code: "NOT_FOUND" });
+        return;
+      }
+
+      res.status(200).json({ success: true, data: { website } });
     } catch (error) {
       next(error);
     }

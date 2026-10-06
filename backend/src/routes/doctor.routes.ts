@@ -8,10 +8,78 @@ import {
   preventHospitalDoctorInheritedFieldMutation,
 } from "@/middleware/rbac";
 import { UserRole } from "@/types";
+import { Organization, Website, Doctor } from "@/models";
+import { logAuditEvent } from "@/services/audit.service";
 
 export const doctorRouter = Router();
 
-// Public: Get doctor by slug
+/**
+ * GET /api/v1/doctors/me
+ * Authenticated: Resolves the current doctor's full profile and any inherited hospital branding
+ */
+doctorRouter.get(
+  "/me",
+  requireAuthenticatedUser,
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const user = req.user!;
+      if (!user.doctorProfileId) {
+        res.status(404).json({
+          success: false,
+          error: "No doctor profile associated with current user",
+          code: "DOCTOR_PROFILE_NOT_FOUND",
+        });
+        return;
+      }
+
+      const doctor = await Doctor.findById(user.doctorProfileId);
+      if (!doctor) {
+        res.status(404).json({ success: false, error: "Doctor profile not found", code: "NOT_FOUND" });
+        return;
+      }
+
+      // Check if this doctor is affiliated with a parent hospital
+      let inheritedHospitalData = null;
+      if (doctor.organizationId) {
+        const parentOrg = await Organization.findById(doctor.organizationId);
+        if (parentOrg) {
+          inheritedHospitalData = {
+            organizationId: parentOrg._id,
+            organizationName: parentOrg.name,
+            organizationSlug: parentOrg.slug,
+            organizationType: parentOrg.type,
+            address: parentOrg.address,
+            logo: parentOrg.logo,
+            galleryPhotos: parentOrg.galleryPhotos || [],
+            selectedTheme: parentOrg.selectedTheme,
+            faviconUrl: parentOrg.faviconUrl,
+            browserTabTitle: parentOrg.browserTabTitle,
+            isLocked: true,
+            lockMessage: "Managed by Hospital Admin",
+          };
+        }
+      }
+
+      // Fetch the website record for this doctor
+      const website = await Website.findOne({ doctorId: doctor._id });
+
+      res.status(200).json({
+        success: true,
+        data: {
+          doctor,
+          inheritedHospitalData,
+          website,
+        },
+      });
+    } catch (error) {
+      next(error);
+    }
+  }
+);
+
+/**
+ * Public: Get doctor by slug
+ */
 doctorRouter.get(
   "/slug/:slug",
   async (req: Request, res: Response, next: NextFunction) => {
@@ -28,7 +96,9 @@ doctorRouter.get(
   }
 );
 
-// Public / Authenticated: List doctors
+/**
+ * Public / Authenticated: List doctors with filters and pagination
+ */
 doctorRouter.get(
   "/",
   async (req: Request, res: Response, next: NextFunction) => {
@@ -47,10 +117,13 @@ doctorRouter.get(
   }
 );
 
-// Authenticated: Get doctor by ID
+/**
+ * Authenticated: Get doctor by ID
+ */
 doctorRouter.get(
   "/:id",
   requireAuthenticatedUser,
+  requireDoctorAccess,
   async (req: Request, res: Response, next: NextFunction) => {
     try {
       const doctor = await DoctorService.getById(req.params.id as string);
@@ -58,14 +131,37 @@ doctorRouter.get(
         res.status(404).json({ success: false, error: "Doctor not found", code: "NOT_FOUND" });
         return;
       }
-      res.status(200).json({ success: true, data: { doctor } });
+
+      // Check for inherited hospital details
+      let inheritedHospitalData = null;
+      if (doctor.organizationId) {
+        const parentOrg = await Organization.findById(doctor.organizationId);
+        if (parentOrg) {
+          inheritedHospitalData = {
+            organizationName: parentOrg.name,
+            organizationSlug: parentOrg.slug,
+            address: parentOrg.address,
+            logo: parentOrg.logo,
+            galleryPhotos: parentOrg.galleryPhotos || [],
+            selectedTheme: parentOrg.selectedTheme,
+            faviconUrl: parentOrg.faviconUrl,
+            browserTabTitle: parentOrg.browserTabTitle,
+            isLocked: true,
+          };
+        }
+      }
+
+      res.status(200).json({ success: true, data: { doctor, inheritedHospitalData } });
     } catch (error) {
       next(error);
     }
   }
 );
 
-// Protected: Create doctor (SUPERADMIN or HOSPITAL_ADMIN for their organization)
+/**
+ * Protected: Register doctor under a hospital or independently
+ * Guard: SUPERADMIN or HOSPITAL_ADMIN for their organization
+ */
 doctorRouter.post(
   "/",
   requireAuthenticatedUser,
@@ -87,15 +183,33 @@ doctorRouter.post(
       }
 
       const doctor = await DoctorService.createDoctor(validated, req.user);
-      res.status(201).json({ success: true, message: "Doctor registered", data: { doctor } });
+
+      // Automatically initialize website record if under hospital
+      if (doctor.organizationId) {
+        const parentOrg = await Organization.findById(doctor.organizationId);
+        if (parentOrg) {
+          await Website.create({
+            slug: `${parentOrg.slug}-${doctor.slug}`,
+            websiteType: "HOSPITAL_DOCTOR",
+            doctorId: doctor._id,
+            organizationId: parentOrg._id,
+            templateId: parentOrg.selectedTheme,
+            publishStatus: "PUBLISHED",
+          });
+        }
+      }
+
+      res.status(201).json({ success: true, message: "Doctor registered successfully", data: { doctor } });
     } catch (error) {
       next(error);
     }
   }
 );
 
-// Protected: Update doctor profile
-// Guarded by requireDoctorAccess and preventHospitalDoctorInheritedFieldMutation
+/**
+ * Protected: Update doctor profile
+ * Guard: requireDoctorAccess + preventHospitalDoctorInheritedFieldMutation
+ */
 doctorRouter.put(
   "/:id",
   requireAuthenticatedUser,
@@ -114,6 +228,108 @@ doctorRouter.put(
         return;
       }
       res.status(200).json({ success: true, message: "Doctor profile updated", data: { doctor } });
+    } catch (error) {
+      next(error);
+    }
+  }
+);
+
+/**
+ * PATCH /api/v1/doctors/:id/status
+ * Protected: Activate or Deactivate doctor (Hospital Admin for their doctors or Superadmin)
+ */
+doctorRouter.patch(
+  "/:id/status",
+  requireAuthenticatedUser,
+  requireDoctorAccess,
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const { status } = req.body;
+      if (!["ACTIVE", "INACTIVE", "SUSPENDED"].includes(status)) {
+        res.status(400).json({
+          success: false,
+          error: "Invalid status. Must be ACTIVE, INACTIVE, or SUSPENDED",
+          code: "INVALID_STATUS",
+        });
+        return;
+      }
+
+      const doctor = await Doctor.findById(req.params.id);
+      if (!doctor) {
+        res.status(404).json({ success: false, error: "Doctor not found", code: "NOT_FOUND" });
+        return;
+      }
+
+      doctor.status = status;
+      await doctor.save();
+
+      // Sync website publish status
+      const publishStatus = status === "ACTIVE" ? "PUBLISHED" : "DRAFT";
+      await Website.updateMany({ doctorId: doctor._id }, { $set: { publishStatus } });
+
+      await logAuditEvent({
+        userId: req.user!.userId,
+        userEmail: req.user!.email,
+        userRole: req.user!.role,
+        action: "DOCTOR_STATUS_TOGGLED",
+        entityType: "Doctor",
+        entityId: doctor._id.toString(),
+        organizationId: doctor.organizationId ? doctor.organizationId.toString() : null,
+        doctorId: doctor._id.toString(),
+        details: { newStatus: status, doctorName: doctor.doctorName },
+      });
+
+      res.status(200).json({
+        success: true,
+        message: `Doctor status updated to ${status}`,
+        data: { doctor },
+      });
+    } catch (error) {
+      next(error);
+    }
+  }
+);
+
+/**
+ * DELETE /api/v1/doctors/:id
+ * Protected: Safe soft delete / deactivate doctor
+ */
+doctorRouter.delete(
+  "/:id",
+  requireAuthenticatedUser,
+  requireDoctorAccess,
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const doctor = await Doctor.findById(req.params.id);
+      if (!doctor) {
+        res.status(404).json({ success: false, error: "Doctor not found", code: "NOT_FOUND" });
+        return;
+      }
+
+      // Safe deactivation
+      doctor.status = "INACTIVE";
+      await doctor.save();
+
+      // Unpublish website
+      await Website.updateMany({ doctorId: doctor._id }, { $set: { publishStatus: "DRAFT" } });
+
+      await logAuditEvent({
+        userId: req.user!.userId,
+        userEmail: req.user!.email,
+        userRole: req.user!.role,
+        action: "DOCTOR_DEACTIVATED",
+        entityType: "Doctor",
+        entityId: doctor._id.toString(),
+        organizationId: doctor.organizationId ? doctor.organizationId.toString() : null,
+        doctorId: doctor._id.toString(),
+        details: { doctorName: doctor.doctorName },
+      });
+
+      res.status(200).json({
+        success: true,
+        message: "Doctor deactivated and public website unpublished",
+        data: { doctorId: doctor._id },
+      });
     } catch (error) {
       next(error);
     }

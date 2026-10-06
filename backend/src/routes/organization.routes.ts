@@ -4,10 +4,57 @@ import { organizationCreateSchema, organizationUpdateSchema } from "@/validation
 import { requireAuthenticatedUser } from "@/middleware/auth";
 import { requireRole, requireOrganizationAccess } from "@/middleware/rbac";
 import { UserRole } from "@/types";
+import { Organization, Website, Doctor } from "@/models";
 
 export const organizationRouter = Router();
 
-// Public: Get organization by slug
+/**
+ * GET /api/v1/organizations/me
+ * Authenticated: Resolves the current hospital admin's organization and website
+ */
+organizationRouter.get(
+  "/me",
+  requireAuthenticatedUser,
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const user = req.user!;
+      if (!user.organizationId) {
+        res.status(404).json({
+          success: false,
+          error: "No organization associated with current user",
+          code: "ORGANIZATION_NOT_FOUND",
+        });
+        return;
+      }
+
+      const organization = await Organization.findById(user.organizationId);
+      if (!organization) {
+        res.status(404).json({ success: false, error: "Organization not found", code: "NOT_FOUND" });
+        return;
+      }
+
+      const website = await Website.findOne({ organizationId: organization._id, websiteType: "HOSPITAL_CLINIC" });
+      const doctorCount = await Doctor.countDocuments({ organizationId: organization._id, status: "ACTIVE" });
+
+      res.status(200).json({
+        success: true,
+        data: {
+          organization,
+          website,
+          stats: {
+            activeDoctors: doctorCount,
+          },
+        },
+      });
+    } catch (error) {
+      next(error);
+    }
+  }
+);
+
+/**
+ * Public: Get organization by slug
+ */
 organizationRouter.get(
   "/slug/:slug",
   async (req: Request, res: Response, next: NextFunction) => {
@@ -24,7 +71,9 @@ organizationRouter.get(
   }
 );
 
-// Public or Authenticated: List organizations
+/**
+ * Public or Authenticated: List organizations
+ */
 organizationRouter.get(
   "/",
   async (req: Request, res: Response, next: NextFunction) => {
@@ -42,7 +91,9 @@ organizationRouter.get(
   }
 );
 
-// Authenticated: Get organization by ID (with tenant isolation check)
+/**
+ * Authenticated: Get organization by ID (with tenant isolation check)
+ */
 organizationRouter.get(
   "/:id",
   requireAuthenticatedUser,
@@ -61,7 +112,9 @@ organizationRouter.get(
   }
 );
 
-// Protected: Create organization (SUPERADMIN only)
+/**
+ * Protected: Create organization (SUPERADMIN only)
+ */
 organizationRouter.post(
   "/",
   requireAuthenticatedUser,
@@ -77,7 +130,10 @@ organizationRouter.post(
   }
 );
 
-// Protected: Update organization (SUPERADMIN or assigned HOSPITAL_ADMIN)
+/**
+ * Protected: Update organization (SUPERADMIN or assigned HOSPITAL_ADMIN)
+ * Handles updating hospital profile, contact, working hours, theme, branding, favicon, tab title.
+ */
 organizationRouter.put(
   "/:id",
   requireAuthenticatedUser,
@@ -94,7 +150,90 @@ organizationRouter.put(
         res.status(404).json({ success: false, error: "Organization not found", code: "NOT_FOUND" });
         return;
       }
-      res.status(200).json({ success: true, message: "Organization updated", data: { organization: org } });
+
+      // If theme was updated, update the Website record templateId
+      if (validated.selectedTheme) {
+        await Website.updateMany(
+          { organizationId: org._id },
+          { $set: { templateId: validated.selectedTheme } }
+        );
+      }
+
+      res.status(200).json({ success: true, message: "Organization updated successfully", data: { organization: org } });
+    } catch (error) {
+      next(error);
+    }
+  }
+);
+
+/**
+ * POST /api/v1/organizations/:id/departments
+ * Protected: Add department to hospital
+ */
+organizationRouter.post(
+  "/:id/departments",
+  requireAuthenticatedUser,
+  requireOrganizationAccess,
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const { departmentName } = req.body;
+      if (!departmentName || typeof departmentName !== "string" || !departmentName.trim()) {
+        res.status(400).json({ success: false, error: "Department name is required", code: "BAD_REQUEST" });
+        return;
+      }
+
+      const org = await Organization.findById(req.params.id);
+      if (!org) {
+        res.status(404).json({ success: false, error: "Organization not found", code: "NOT_FOUND" });
+        return;
+      }
+
+      const cleanDept = departmentName.trim();
+      const currentDepts = (org as any).departments || [];
+      if (!currentDepts.includes(cleanDept)) {
+        currentDepts.push(cleanDept);
+        (org as any).departments = currentDepts;
+        await org.save();
+      }
+
+      res.status(200).json({
+        success: true,
+        message: `Department '${cleanDept}' added`,
+        data: { departments: (org as any).departments },
+      });
+    } catch (error) {
+      next(error);
+    }
+  }
+);
+
+/**
+ * DELETE /api/v1/organizations/:id/departments/:deptName
+ * Protected: Remove department from hospital
+ */
+organizationRouter.delete(
+  "/:id/departments/:deptName",
+  requireAuthenticatedUser,
+  requireOrganizationAccess,
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const rawDept = (req.params.deptName as string) || "";
+      const deptName = decodeURIComponent(rawDept);
+      const org = await Organization.findById(req.params.id);
+      if (!org) {
+        res.status(404).json({ success: false, error: "Organization not found", code: "NOT_FOUND" });
+        return;
+      }
+
+      const currentDepts = (org as any).departments || [];
+      (org as any).departments = currentDepts.filter((d: string) => d !== deptName);
+      await org.save();
+
+      res.status(200).json({
+        success: true,
+        message: `Department '${deptName}' removed`,
+        data: { departments: (org as any).departments },
+      });
     } catch (error) {
       next(error);
     }
