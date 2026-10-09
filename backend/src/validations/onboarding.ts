@@ -86,7 +86,7 @@ export const slugSchema = z
   });
 
 export const mediaAssetSchema = z.object({
-  url: z.string().url("Valid URL is required"),
+  url: z.string().min(1, "Valid URL or path is required"),
   publicId: z.string().optional(),
   altText: z.string().optional(),
   width: z.number().optional(),
@@ -144,7 +144,7 @@ export const independentDoctorOnboardingSchema = z
     clinicName: z.string().min(2, "Clinic or Hospital name is required"),
     address: addressSchema,
     selectedTheme: z.enum(["clinical-editorial", "modern-minimal", "vital-compact"]),
-    doctorPhoto: mediaAssetSchema,
+    doctorPhoto: mediaAssetSchema.optional(),
     clinicLogo: mediaAssetSchema.optional(),
     clinicPhotos: z.array(mediaAssetSchema).max(6, "Maximum 6 clinic gallery photos allowed").default([]),
     password: securePasswordSchema.optional(),
@@ -152,6 +152,10 @@ export const independentDoctorOnboardingSchema = z
     otp: z.string().length(6, "Verification code must be 6 digits").optional(),
     isDraft: z.boolean().default(false),
     customSlug: slugSchema.optional(),
+  })
+  .refine((data) => data.isDraft || !!data.doctorPhoto, {
+    message: "Doctor profile photo is required before publishing",
+    path: ["doctorPhoto"],
   })
   .refine((data) => data.isDraft || !data.password || data.password === data.confirmPassword, {
     message: "Confirm password does not match",

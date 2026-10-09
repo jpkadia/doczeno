@@ -62,8 +62,11 @@ export function ImageUploader({
       formData.append("category", category);
       formData.append("ownerType", category === "DOCTOR_PHOTO" ? "DOCTOR" : "ORGANIZATION");
 
-      const res = await apiClient.post<{ asset: MediaAsset }>("/media/upload", formData);
-      onChange(res.asset);
+      const res = await apiClient.post<{ asset?: MediaAsset; data?: { asset: MediaAsset } }>("/media/upload", formData);
+      const uploadedAsset = res.asset || res.data?.asset;
+      if (uploadedAsset) {
+        onChange(uploadedAsset);
+      }
     } catch (err) {
       setUploadError(err instanceof Error ? err.message : "Upload failed");
     } finally {

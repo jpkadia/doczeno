@@ -111,7 +111,7 @@ export function HospitalDoctorForm({
     try {
       setIsSubmitting(true);
       setValue("otp", otp);
-      const res = await apiClient.post<{ publicUrl: string }>(
+      const res = await apiClient.post<{ publicUrl?: string; data?: { publicUrl?: string } }>(
         "/onboarding/hospital-doctor",
         {
           ...formValues,
@@ -119,8 +119,9 @@ export function HospitalDoctorForm({
           isDraft: false,
         }
       );
-      setPublishedUrl(res.publicUrl);
-      const docSlug = res.publicUrl.split("/").pop() || "";
+      const url = res.publicUrl || res.data?.publicUrl || "";
+      setPublishedUrl(url);
+      const docSlug = url.split("/").pop() || "";
       setCreatedDocSlug(docSlug);
       toast.success("Affiliated Doctor Registered Successfully!");
     } catch (err: unknown) {

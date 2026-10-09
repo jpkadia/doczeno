@@ -165,23 +165,42 @@ onboardingRouter.post(
       doctor.websiteId = website._id;
       await doctor.save();
 
-      // Create User account for independent doctor administration if password provided
+      // Create or update User account for independent doctor administration if password provided
       let token: string | undefined;
       let userRecord: any;
 
       if (!validated.isDraft && validated.password) {
+        const docEmail = validated.email.toLowerCase();
         const passwordHash = await AuthService.hashPassword(validated.password);
-        const user = await User.create({
-          name: validated.doctorName,
-          email: validated.email.toLowerCase(),
-          passwordHash,
-          role: UserRole.INDEPENDENT_DOCTOR,
-          doctorProfileId: doctor._id,
-          isActive: true,
-        });
 
-        userRecord = user;
-        token = AuthService.generateToken(user);
+        try {
+          userRecord = await User.create({
+            name: validated.doctorName,
+            email: docEmail,
+            passwordHash,
+            role: UserRole.INDEPENDENT_DOCTOR,
+            doctorProfileId: doctor._id,
+            isActive: true,
+          });
+        } catch (err: any) {
+          if (err?.code === 11000) {
+            userRecord = await User.findOneAndUpdate(
+              { email: docEmail },
+              {
+                name: validated.doctorName,
+                passwordHash,
+                role: UserRole.INDEPENDENT_DOCTOR,
+                doctorProfileId: doctor._id,
+                isActive: true,
+              },
+              { new: true }
+            );
+          } else {
+            throw err;
+          }
+        }
+
+        token = AuthService.generateToken(userRecord);
 
         res.cookie("doczeno_session", token, {
           httpOnly: true,
@@ -191,11 +210,14 @@ onboardingRouter.post(
         });
       }
 
+      const publicUrl = `doctorwebsite.in/${finalSlug}`;
+
       res.status(201).json({
         success: true,
         message: validated.isDraft
           ? "Independent doctor profile saved as draft"
           : "Independent doctor website published successfully",
+        publicUrl,
         data: {
           doctor,
           website,
@@ -207,7 +229,7 @@ onboardingRouter.post(
               }
             : undefined,
           token,
-          publicUrl: `doctorwebsite.in/${finalSlug}`,
+          publicUrl,
         },
       });
     } catch (error) {
@@ -270,14 +292,33 @@ onboardingRouter.post(
       const passwordHash = await AuthService.hashPassword(rawPassword);
       const adminEmail = (validated.adminEmail || validated.email).toLowerCase();
 
-      const adminUser = await User.create({
-        name: validated.adminName,
-        email: adminEmail,
-        passwordHash,
-        role: UserRole.HOSPITAL_ADMIN,
-        organizationId: organization._id,
-        isActive: true,
-      });
+      let adminUser: any;
+      try {
+        adminUser = await User.create({
+          name: validated.adminName,
+          email: adminEmail,
+          passwordHash,
+          role: UserRole.HOSPITAL_ADMIN,
+          organizationId: organization._id,
+          isActive: true,
+        });
+      } catch (err: any) {
+        if (err?.code === 11000) {
+          adminUser = await User.findOneAndUpdate(
+            { email: adminEmail },
+            {
+              name: validated.adminName,
+              passwordHash,
+              role: UserRole.HOSPITAL_ADMIN,
+              organizationId: organization._id,
+              isActive: true,
+            },
+            { new: true }
+          );
+        } else {
+          throw err;
+        }
+      }
 
       // Create Hospital Website
       const website = await Website.create({
@@ -303,11 +344,14 @@ onboardingRouter.post(
         maxAge: 7 * 24 * 60 * 60 * 1000,
       });
 
+      const publicUrl = `doctorwebsite.in/${organization.slug}`;
+
       res.status(201).json({
         success: true,
         message: validated.isDraft
           ? "Hospital profile saved as draft"
           : "Hospital website created successfully",
+        publicUrl,
         data: {
           organization,
           website,
@@ -317,7 +361,7 @@ onboardingRouter.post(
             role: adminUser.role,
           },
           token,
-          publicUrl: `doctorwebsite.in/${organization.slug}`,
+          publicUrl,
         },
       });
     } catch (error) {
@@ -410,7 +454,7 @@ onboardingRouter.post(
       doctor.websiteId = website._id;
       await doctor.save();
 
-      // Create User account for affiliated doctor if password provided
+      // Create or update User account for affiliated doctor if password provided
       let docUserRecord: any;
       let token: string | undefined;
 
@@ -418,18 +462,36 @@ onboardingRouter.post(
         const passwordHash = await AuthService.hashPassword(validated.password);
         const docEmail = validated.email.toLowerCase();
 
-        const docUser = await User.create({
-          name: validated.doctorName,
-          email: docEmail,
-          passwordHash,
-          role: UserRole.HOSPITAL_DOCTOR,
-          organizationId: parentHospital._id,
-          doctorProfileId: doctor._id,
-          isActive: true,
-        });
+        try {
+          docUserRecord = await User.create({
+            name: validated.doctorName,
+            email: docEmail,
+            passwordHash,
+            role: UserRole.HOSPITAL_DOCTOR,
+            organizationId: parentHospital._id,
+            doctorProfileId: doctor._id,
+            isActive: true,
+          });
+        } catch (err: any) {
+          if (err?.code === 11000) {
+            docUserRecord = await User.findOneAndUpdate(
+              { email: docEmail },
+              {
+                name: validated.doctorName,
+                passwordHash,
+                role: UserRole.HOSPITAL_DOCTOR,
+                organizationId: parentHospital._id,
+                doctorProfileId: doctor._id,
+                isActive: true,
+              },
+              { new: true }
+            );
+          } else {
+            throw err;
+          }
+        }
 
-        docUserRecord = docUser;
-        token = AuthService.generateToken(docUser);
+        token = AuthService.generateToken(docUserRecord);
 
         res.cookie("doczeno_session", token, {
           httpOnly: true,
@@ -439,11 +501,14 @@ onboardingRouter.post(
         });
       }
 
+      const publicUrl = `doctorwebsite.in/${parentHospital.slug}/${docSlugBase}`;
+
       res.status(201).json({
         success: true,
         message: validated.isDraft
           ? "Hospital doctor profile saved as draft"
           : "Hospital doctor profile published successfully",
+        publicUrl,
         data: {
           doctor,
           website,
@@ -455,7 +520,7 @@ onboardingRouter.post(
               }
             : undefined,
           token,
-          publicUrl: `doctorwebsite.in/${parentHospital.slug}/${docSlugBase}`,
+          publicUrl,
         },
       });
     } catch (error) {

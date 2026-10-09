@@ -115,12 +115,13 @@ export function IndependentDoctorWizard() {
     try {
       setIsSubmitting(true);
       setValue("isDraft", true);
-      const res = await apiClient.post<{ publicUrl: string }>(
+      const res = await apiClient.post<{ publicUrl?: string; data?: { publicUrl?: string } }>(
         "/onboarding/independent-doctor",
         { ...formValues, isDraft: true }
       );
       toast.success("Onboarding progress saved as draft!");
-      if (res.publicUrl) setPublishedUrl(res.publicUrl);
+      const url = res.publicUrl || res.data?.publicUrl;
+      if (url) setPublishedUrl(url);
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Failed to save draft");
     } finally {
@@ -132,12 +133,13 @@ export function IndependentDoctorWizard() {
     try {
       setIsSubmitting(true);
       setValue("otp", otp);
-      const res = await apiClient.post<{ publicUrl: string; data?: unknown }>(
+      const res = await apiClient.post<{ publicUrl?: string; data?: { publicUrl?: string } }>(
         "/onboarding/independent-doctor",
         { ...formValues, otp, isDraft: false }
       );
-      setPublishedUrl(res.publicUrl);
-      const cleanSlug = res.publicUrl.split("/").pop() || "";
+      const url = res.publicUrl || res.data?.publicUrl || "";
+      setPublishedUrl(url);
+      const cleanSlug = url.split("/").pop() || "";
       setCreatedSlug(cleanSlug);
       toast.success("Independent Doctor Website Published Successfully!");
       setCurrentStep(8);

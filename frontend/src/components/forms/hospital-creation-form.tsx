@@ -72,12 +72,13 @@ export function HospitalCreationForm() {
     try {
       setIsSubmitting(true);
       setValue("otp", otp);
-      const res = await apiClient.post<{ publicUrl: string }>("/onboarding/hospital", {
+      const res = await apiClient.post<{ publicUrl?: string; data?: { publicUrl?: string } }>("/onboarding/hospital", {
         ...formValues,
         otp,
         isDraft: false,
       });
-      setPublishedUrl(res.publicUrl);
+      const url = res.publicUrl || res.data?.publicUrl || "";
+      setPublishedUrl(url);
       toast.success("Hospital / Clinic Created Successfully!");
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : (err as { message?: string })?.message || "Hospital creation failed";
@@ -92,12 +93,13 @@ export function HospitalCreationForm() {
     try {
       setIsSubmitting(true);
       setValue("isDraft", true);
-      const res = await apiClient.post<{ publicUrl: string }>("/onboarding/hospital", {
+      const res = await apiClient.post<{ publicUrl?: string; data?: { publicUrl?: string } }>("/onboarding/hospital", {
         ...formValues,
         isDraft: true,
       });
       toast.success("Hospital profile saved as draft!");
-      if (res.publicUrl) setPublishedUrl(res.publicUrl);
+      const url = res.publicUrl || res.data?.publicUrl;
+      if (url) setPublishedUrl(url);
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Failed to save draft");
     } finally {

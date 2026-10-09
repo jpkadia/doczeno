@@ -74,13 +74,26 @@ async function request<T>(endpoint: string, options: RequestOptions = {}): Promi
         errorData = await response.text();
       }
 
-      const errorMessage =
-        (typeof errorData === "object" &&
-          errorData !== null &&
-          "message" in errorData &&
-          typeof (errorData as { message: unknown }).message === "string" &&
-          (errorData as { message: string }).message) ||
-        `Request failed with status ${response.status}`;
+      let errorMessage = `Request failed with status ${response.status}`;
+
+      if (typeof errorData === "object" && errorData !== null) {
+        const errObj = errorData as Record<string, unknown>;
+        if (typeof errObj.error === "string" && errObj.error) {
+          errorMessage = errObj.error;
+        } else if (typeof errObj.message === "string" && errObj.message) {
+          errorMessage = errObj.message;
+        }
+
+        // If validation details exist, extract the specific human-friendly message
+        if (Array.isArray(errObj.details) && errObj.details.length > 0) {
+          const firstDetail = errObj.details[0] as { message?: string };
+          if (firstDetail && typeof firstDetail.message === "string") {
+            errorMessage = firstDetail.message;
+          }
+        }
+      } else if (typeof errorData === "string" && errorData.trim()) {
+        errorMessage = errorData;
+      }
 
       throw new ApiError(errorMessage, response.status, errorData);
     }

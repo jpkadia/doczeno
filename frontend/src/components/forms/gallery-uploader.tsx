@@ -63,8 +63,11 @@ export function GalleryUploader({
         formData.append("category", "GALLERY");
         formData.append("ownerType", "ORGANIZATION");
 
-        const res = await apiClient.post<{ asset: MediaAsset }>("/media/upload", formData);
-        newAssets.push(res.asset);
+        const res = await apiClient.post<{ asset?: MediaAsset; data?: { asset: MediaAsset } }>("/media/upload", formData);
+        const uploadedAsset = res.asset || res.data?.asset;
+        if (uploadedAsset) {
+          newAssets.push(uploadedAsset);
+        }
       }
 
       onChange([...value, ...newAssets]);

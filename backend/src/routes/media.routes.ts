@@ -75,6 +75,7 @@ mediaRouter.post(
       res.status(201).json({
         success: true,
         message: "File uploaded successfully",
+        asset,
         data: { asset },
       });
     } catch (error) {
