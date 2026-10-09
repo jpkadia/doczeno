@@ -43,6 +43,9 @@ export function ModernMinimalTheme({ data }: ModernMinimalThemeProps) {
                 src={data.logo.url}
                 alt={data.organizationName}
                 className="h-9 w-9 rounded-full object-cover border border-neutral-200"
+                onError={(e) => {
+                  e.currentTarget.style.display = "none";
+                }}
               />
             )}
             <Link href={`/${data.slug}`} className="hover:opacity-80 transition-opacity">
@@ -108,6 +111,9 @@ export function ModernMinimalTheme({ data }: ModernMinimalThemeProps) {
                 }
                 alt={isDoctor ? `Dr. ${data.doctorName}` : data.organizationName}
                 className="h-full w-full object-cover"
+                onError={(e) => {
+                  e.currentTarget.src = "https://images.unsplash.com/photo-1559839734-2b71ea197ec2?auto=format&fit=crop&w=400&q=80";
+                }}
               />
             </div>
             {isDoctor && (

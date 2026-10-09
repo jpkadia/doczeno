@@ -90,13 +90,27 @@ mediaRouter.get("/files/:category/:filename", (req: Request, res: Response) => {
   const filenameParam = String(req.params.filename || "");
   const safeCategory = path.basename(categoryParam).toLowerCase();
   const safeFilename = path.basename(filenameParam);
-  const filePath = path.resolve(process.cwd(), "uploads", safeCategory, safeFilename);
 
-  if (!fs.existsSync(filePath)) {
+  // Check all possible candidate locations regardless of cwd
+  const candidates = [
+    path.resolve(process.cwd(), "uploads", safeCategory, safeFilename),
+    path.resolve(process.cwd(), "backend", "uploads", safeCategory, safeFilename),
+    path.resolve(__dirname, "../../../uploads", safeCategory, safeFilename),
+    path.resolve(__dirname, "../../uploads", safeCategory, safeFilename),
+    path.resolve(__dirname, "../uploads", safeCategory, safeFilename),
+  ];
+
+  const filePath = candidates.find((candidate) => fs.existsSync(candidate));
+
+  if (!filePath) {
     res.status(404).json({ success: false, error: "Media file not found", code: "NOT_FOUND" });
     return;
   }
 
+  // Explicitly allow cross-origin embedding for all browsers & origins
+  res.setHeader("Cross-Origin-Resource-Policy", "cross-origin");
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Cache-Control", "public, max-age=86400");
   res.sendFile(filePath);
 });
 

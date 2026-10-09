@@ -31,6 +31,7 @@ export function ImageUploader({
 }: ImageUploaderProps) {
   const [isUploading, setIsUploading] = React.useState(false);
   const [uploadError, setUploadError] = React.useState<string | null>(null);
+  const [localPreview, setLocalPreview] = React.useState<string | null>(null);
   const fileInputRef = React.useRef<HTMLInputElement>(null);
 
   const maxMb = (maxSizeBytes / (1024 * 1024)).toFixed(0);
@@ -53,6 +54,10 @@ export function ImageUploader({
       setUploadError(`Unsupported format (${ext}). Allowed: JPG, PNG, WebP.`);
       return;
     }
+
+    // Instant local preview for zero-friction user feedback
+    const objUrl = URL.createObjectURL(file);
+    setLocalPreview(objUrl);
 
     // Direct upload flow via backend
     try {
@@ -78,9 +83,19 @@ export function ImageUploader({
   };
 
   const handleRemove = () => {
+    if (localPreview) {
+      try {
+        URL.revokeObjectURL(localPreview);
+      } catch {
+        // Safe ignore
+      }
+      setLocalPreview(null);
+    }
     onChange(undefined);
     setUploadError(null);
   };
+
+  const displayImageSrc = localPreview || value?.url;
 
   return (
     <div className="space-y-1.5">
@@ -93,23 +108,42 @@ export function ImageUploader({
         </span>
       </div>
 
-      {value?.url ? (
+      {displayImageSrc ? (
         <div className="relative group rounded-lg border border-border bg-card p-2 flex items-center gap-3">
           <div className="relative h-16 w-16 rounded-md overflow-hidden bg-muted border">
             {/* eslint-disable-next-line @next/next/no-img-element */}
             <img
-              src={value.url}
-              alt={value.altText || label}
+              src={displayImageSrc}
+              alt={value?.altText || label}
               className="h-full w-full object-cover"
+              onError={(e) => {
+                if (localPreview && e.currentTarget.src !== localPreview) {
+                  e.currentTarget.src = localPreview;
+                }
+              }}
             />
+            {isUploading && (
+              <div className="absolute inset-0 bg-black/40 flex items-center justify-center">
+                <Loader2 className="h-4 w-4 text-white animate-spin" />
+              </div>
+            )}
           </div>
           <div className="flex-1 min-w-0">
             <p className="text-xs font-semibold text-foreground truncate">
-              {value.publicId?.split("/").pop() || "Uploaded Asset"}
+              {value?.publicId?.split("/").pop() || (isUploading ? "Uploading..." : "Selected Photo")}
             </p>
             <p className="text-[11px] text-muted-foreground flex items-center gap-1 mt-0.5">
-              <CheckCircle2 className="h-3 w-3 text-emerald-600" />
-              Verified & Uploaded
+              {isUploading ? (
+                <>
+                  <Loader2 className="h-3 w-3 text-primary animate-spin" />
+                  Uploading & Verifying...
+                </>
+              ) : (
+                <>
+                  <CheckCircle2 className="h-3 w-3 text-emerald-600" />
+                  Verified & Ready
+                </>
+              )}
             </p>
           </div>
           <Button

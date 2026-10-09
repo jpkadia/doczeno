@@ -12,8 +12,12 @@ export function createApp(): Application {
   const app = express();
   const env = getEnv();
 
-  // Helmet Security Headers
-  app.use(helmet());
+  // Helmet Security Headers (allow cross-origin embedding for media assets like images/logos)
+  app.use(
+    helmet({
+      crossOriginResourcePolicy: { policy: "cross-origin" },
+    })
+  );
 
   // Strict CORS Configuration
   const allowedOrigins = [env.FRONTEND_URL, "http://localhost:3000"];

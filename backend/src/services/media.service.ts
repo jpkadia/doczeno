@@ -243,7 +243,10 @@ export class MediaService {
     // Resilient fallback: write to local disk if Cloudinary failed or was restricted
     const finalFilename = `${safeBase}_${uniqueId}${ext}`;
     if (!uploadResult) {
-      const uploadsDir = path.resolve(process.cwd(), "uploads", params.category.toLowerCase());
+      const primaryUploadsBase = fs.existsSync(path.resolve(process.cwd(), "backend", "uploads"))
+        ? path.resolve(process.cwd(), "backend", "uploads")
+        : path.resolve(process.cwd(), "uploads");
+      const uploadsDir = path.join(primaryUploadsBase, params.category.toLowerCase());
       await fs.promises.mkdir(uploadsDir, { recursive: true });
       const filePath = path.join(uploadsDir, finalFilename);
       await fs.promises.writeFile(filePath, params.buffer);

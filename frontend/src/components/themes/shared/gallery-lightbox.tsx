@@ -49,6 +49,9 @@ export function GalleryLightbox({
                 alt={photo.altText || `Facility photo ${index + 1}`}
                 className="h-full w-full object-cover transition-transform duration-500 group-hover:scale-105"
                 loading="lazy"
+                onError={(e) => {
+                  e.currentTarget.src = "https://images.unsplash.com/photo-1519494026892-80bbd2d6fd0d?auto=format&fit=crop&w=800&q=80";
+                }}
               />
             ) : (
               <div className="flex h-full w-full items-center justify-center text-muted-foreground">
@@ -95,6 +98,9 @@ export function GalleryLightbox({
                 src={photos[selectedIndex]?.url}
                 alt={photos[selectedIndex]?.altText || "Facility preview"}
                 className="max-h-[80vh] w-auto max-w-full object-contain rounded"
+                onError={(e) => {
+                  e.currentTarget.src = "https://images.unsplash.com/photo-1519494026892-80bbd2d6fd0d?auto=format&fit=crop&w=800&q=80";
+                }}
               />
 
               {/* Next Button */}
