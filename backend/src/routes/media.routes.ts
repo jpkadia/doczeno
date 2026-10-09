@@ -2,6 +2,7 @@ import { Router, Request, Response, NextFunction } from "express";
 import multer from "multer";
 import path from "path";
 import fs from "fs";
+import mongoose from "mongoose";
 import { MediaService, MediaCategory } from "@/services/media.service";
 import { requireAuthenticatedUser } from "@/middleware/auth";
 
@@ -60,7 +61,7 @@ mediaRouter.post(
         req.user?.doctorProfileId ||
         req.user?.organizationId ||
         req.user?.userId ||
-        `onboarding-temp-${Date.now()}`;
+        new mongoose.Types.ObjectId().toString();
 
       const asset = await MediaService.uploadMediaBuffer({
         buffer: req.file.buffer,

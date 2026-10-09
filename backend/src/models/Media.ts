@@ -1,7 +1,7 @@
 import mongoose, { Document, Schema, Model } from "mongoose";
 
 export interface IMedia extends Document {
-  ownerId: mongoose.Types.ObjectId;
+  ownerId: mongoose.Types.ObjectId | string;
   ownerType: "DOCTOR" | "ORGANIZATION";
   fileUrl: string;
   publicId?: string;
@@ -16,7 +16,7 @@ export interface IMedia extends Document {
 const MediaSchema = new Schema<IMedia>(
   {
     ownerId: {
-      type: Schema.Types.ObjectId,
+      type: Schema.Types.Mixed,
       required: true,
       index: true,
     },
