@@ -112,9 +112,6 @@ export function ClinicalEditorialTheme({ data }: ClinicalEditorialThemeProps) {
                 src={data.logo.url}
                 alt={data.organizationName}
                 className="h-12 w-12 rounded-lg object-cover border border-slate-200 shadow-xs"
-                onError={(e) => {
-                  e.currentTarget.style.display = "none";
-                }}
               />
             )}
             <div>
@@ -279,9 +276,6 @@ export function ClinicalEditorialTheme({ data }: ClinicalEditorialThemeProps) {
                   }
                   alt={isDoctor ? `Dr. ${data.doctorName}` : data.organizationName}
                   className="w-full aspect-[4/5] object-cover rounded-xl"
-                  onError={(e) => {
-                    e.currentTarget.src = "https://images.unsplash.com/photo-1622253692010-333f2da6031d?auto=format&fit=crop&w=800&q=80";
-                  }}
                 />
 
                 {/* Overlaid Credential Badge */}

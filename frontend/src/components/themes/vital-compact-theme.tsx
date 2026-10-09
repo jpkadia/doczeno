@@ -51,9 +51,6 @@ export function VitalCompactTheme({ data }: VitalCompactThemeProps) {
                 src={data.logo.url}
                 alt={data.organizationName}
                 className="h-8 w-8 rounded-md object-cover border border-slate-200"
-                onError={(e) => {
-                  e.currentTarget.style.display = "none";
-                }}
               />
             )}
             <div className="truncate">
@@ -91,9 +88,6 @@ export function VitalCompactTheme({ data }: VitalCompactThemeProps) {
                   }
                   alt={isDoctor ? `Dr. ${data.doctorName}` : data.organizationName}
                   className="h-20 w-20 sm:h-24 sm:w-24 rounded-xl object-cover border border-slate-200 shadow-xs"
-                  onError={(e) => {
-                    e.currentTarget.src = "https://images.unsplash.com/photo-1559839734-2b71ea197ec2?auto=format&fit=crop&w=300&q=80";
-                  }}
                 />
               </div>
 
