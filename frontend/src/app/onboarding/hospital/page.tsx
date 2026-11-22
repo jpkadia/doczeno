@@ -5,25 +5,25 @@ import { ArrowLeft, Building2 } from "lucide-react";
 
 export const metadata: Metadata = {
   title: "Hospital & Clinic Onboarding | Doczeno",
-  description: "Register your healthcare facility, configure departments, and establish a digital presence with zero-drift clinician inheritance.",
+  description: "Register your healthcare facility, configure departments, and establish a modern verified online presence.",
 };
 
 export default function HospitalOnboardingPage() {
   return (
-    <div className="min-h-screen bg-gradient-to-b from-background via-secondary/20 to-secondary/40 py-8 px-4 sm:px-6 lg:px-8">
-      <div className="max-w-4xl mx-auto space-y-6">
+    <div className="min-h-screen bg-[#eaf4fd] bg-[url('/images/mobile.png')] md:bg-[url('/images/bg.png')] bg-cover bg-top md:bg-center bg-no-repeat bg-fixed py-6 sm:py-10 px-3 sm:px-6 lg:px-8 font-sans text-slate-900">
+      <div className="max-w-4xl mx-auto space-y-4 sm:space-y-6">
         <div className="flex items-center justify-between">
           <Link
-            href="/onboarding"
-            className="inline-flex items-center text-sm font-medium text-muted-foreground hover:text-foreground transition-colors"
+            href="/"
+            className="inline-flex items-center text-xs sm:text-sm font-semibold text-slate-700 hover:text-[#1a76d1] transition-colors bg-white/80 backdrop-blur-xs px-3 py-1.5 rounded-full border border-blue-100 shadow-2xs"
           >
             <ArrowLeft className="h-4 w-4 mr-1.5" />
-            Back to Onboarding Options
+            Back to Options
           </Link>
 
-          <div className="flex items-center gap-2 text-sm text-muted-foreground">
-            <Building2 className="h-4 w-4 text-primary" />
-            <span>Healthcare Facility</span>
+          <div className="flex items-center gap-2 px-3 py-1.5 rounded-full bg-white/85 backdrop-blur-xs border border-blue-200 text-xs font-semibold text-[#1560aa] shadow-2xs">
+            <Building2 className="h-3.5 w-3.5 text-[#1a76d1]" />
+            <span>Healthcare Facility Setup</span>
           </div>
         </div>
 

@@ -12,7 +12,7 @@ export interface IAIContentHistory {
 }
 
 export interface IAIContent extends Document {
-  targetType: "INDEPENDENT_DOCTOR" | "HOSPITAL" | "HOSPITAL_DOCTOR" | "DOCTOR_BIO" | "HOSPITAL_ABOUT" | "SERVICE_DESCRIPTION" | "FAQ";
+  targetType: "ONLY_DOCTOR" | "HOSPITAL" | "HOSPITAL_DOCTOR" | "DOCTOR_BIO" | "HOSPITAL_ABOUT" | "SERVICE_DESCRIPTION" | "FAQ";
   targetId: mongoose.Types.ObjectId;
   organizationId?: mongoose.Types.ObjectId | null;
   doctorId?: mongoose.Types.ObjectId | null;
@@ -53,7 +53,7 @@ const AIContentSchema = new Schema<IAIContent>(
     targetType: {
       type: String,
       enum: [
-        "INDEPENDENT_DOCTOR",
+        "ONLY_DOCTOR",
         "HOSPITAL",
         "HOSPITAL_DOCTOR",
         "DOCTOR_BIO",

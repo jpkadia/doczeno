@@ -1,237 +1,181 @@
+import { Metadata } from "next";
 import Link from "next/link";
+import { DoczenoLogo } from "@/components/brand/doczeno-logo";
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import {
-  ShieldCheck,
+  Stethoscope,
   Building2,
   UserCheck,
-  Users,
-  Activity,
-  Layers,
-  Database,
-  Lock,
-  Sparkles,
+  ArrowRight,
+  CheckCircle2,
 } from "lucide-react";
+
+export const metadata: Metadata = {
+  title: "Healthcare Setup & Onboarding | Doczeno",
+  description: "Select your healthcare entity type to launch your verified digital presence.",
+  icons: {
+    icon: [
+      { url: "/favicon.svg", type: "image/svg+xml" },
+      { url: "/icon-round.png", type: "image/png" },
+      { url: "/favicon.ico", sizes: "any" },
+    ],
+    shortcut: "/favicon.svg",
+    apple: "/icon-round.png",
+  },
+};
+
+const ONBOARDING_FLOWS = [
+  {
+    id: "doctor",
+    title: "Only Doctor",
+    badge: "Solo Doctor",
+    description: "For individual medical practitioners operating their private clinic.",
+    icon: Stethoscope,
+    href: "/onboarding/doctor",
+    features: [
+      "Dedicated Doctor Website (/dr-name)",
+      "OPD Timings & Online Appointment Booking",
+      "Private Doctor Admin Dashboard",
+    ],
+    cta: "Start Doctor Setup",
+  },
+  {
+    id: "hospital",
+    title: "Hospital or Clinic",
+    badge: "Healthcare Facility",
+    description: "For multi-specialty hospitals and clinics managing departments & doctors.",
+    icon: Building2,
+    href: "/onboarding/hospital",
+    features: [
+      "Official Hospital Website (/hospital-name)",
+      "Departments, Specialties & Doctor Management",
+      "Dedicated Hospital Admin Portal",
+    ],
+    cta: "Register Facility",
+  },
+  {
+    id: "hospital-doctor",
+    title: "Hospital-Affiliated Doctor",
+    badge: "Affiliated Doctor",
+    description: "For doctors practicing under an existing registered hospital or clinic.",
+    icon: UserCheck,
+    href: "/onboarding/hospital-doctor",
+    features: [
+      "Direct Link to Registered Hospital",
+      "Personal Clinical Profile (/hospital/dr-name)",
+      "OPD Consultation Hours & Schedule Control",
+    ],
+    cta: "Join Facility",
+  },
+];
 
 export default function HomePage() {
   return (
-    <div className="min-h-screen bg-gradient-to-b from-background to-secondary/30">
-      {/* Top Navigation Bar */}
-      <header className="border-b bg-card/80 backdrop-blur-md sticky top-0 z-50">
-        <div className="container flex h-16 items-center justify-between px-4 sm:px-8">
-          <div className="flex items-center gap-3">
-            <div className="h-9 w-9 rounded-lg bg-primary flex items-center justify-center text-primary-foreground font-bold shadow-md">
-              <Activity className="h-5 w-5" />
-            </div>
-            <div>
-              <span className="text-xl font-bold tracking-tight text-foreground">Doczeno</span>
-              <span className="ml-2 text-xs font-semibold px-2 py-0.5 rounded-full bg-accent text-accent-foreground border border-primary/20">
-                Core Engine v1.0
-              </span>
-            </div>
-          </div>
+    <div className="min-h-screen lg:h-screen lg:max-h-screen lg:overflow-hidden bg-[#eaf4fd] bg-[url('/images/mobile.png')] md:bg-[url('/images/bg.png')] bg-cover bg-top md:bg-center bg-no-repeat text-slate-900 flex flex-col justify-between font-sans">
+      {/* Top Navigation Bar - Transparent Glassmorphism with Rounded Angles */}
+      <header className="border-b border-x border-white/40 bg-white/20 backdrop-blur-xs sticky top-0 z-50 shrink-0 mx-2 sm:mx-6 lg:mx-8 rounded-b-2xl sm:rounded-b-3xl shadow-2xs">
+        <div className="container max-w-7xl mx-auto flex h-14 lg:h-15 items-center justify-between px-4 sm:px-6 lg:px-8">
+          <DoczenoLogo
+            variant="horizontal"
+            size="sm"
+            subtitle="Healthcare Platform"
+            href="/"
+          />
 
           <div className="flex items-center gap-3">
-            <Button asChild size="sm" variant="default">
-              <Link href="/onboarding">Get Started / Onboarding</Link>
-            </Button>
-            <Badge variant="outline" className="border-emerald-500/30 text-emerald-600 bg-emerald-50 dark:bg-emerald-950/30 hidden sm:flex">
-              <span className="h-2 w-2 rounded-full bg-emerald-500 mr-1.5 animate-pulse" />
-              Multi-Tenant Architecture
+            <Badge
+              variant="outline"
+              className="border-blue-200/60 bg-white/70 backdrop-blur-xs text-[#1560aa] font-medium text-xs hidden sm:flex items-center gap-1.5 px-3 py-1 rounded-full shadow-2xs"
+            >
+              <span className="h-2 w-2 rounded-full bg-[#1a76d1] animate-pulse" />
+              Verified Healthcare Platform
             </Badge>
           </div>
         </div>
       </header>
 
-      {/* Hero Section */}
-      <main className="container px-4 sm:px-8 py-12 max-w-6xl space-y-12">
-        <div className="text-center space-y-4 max-w-3xl mx-auto">
-          <Badge variant="secondary" className="px-3 py-1 text-xs uppercase tracking-wider font-semibold">
-            Production Foundation Ready
-          </Badge>
-          <h1 className="text-4xl sm:text-5xl font-extrabold tracking-tight text-foreground">
-            Multi-Tenant Healthcare Website Platform
+      {/* Main Content */}
+      <main className="container flex-1 flex flex-col justify-center py-3 sm:py-5 lg:py-2 px-4 sm:px-6 lg:px-8 max-w-6xl mx-auto w-full">
+        {/* Header Section */}
+        <div className="text-center space-y-1 lg:space-y-1 max-w-2xl mx-auto mb-3 sm:mb-4 lg:mb-4">
+          <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-[11px] font-semibold uppercase tracking-wider bg-white/80 backdrop-blur-xs text-[#1560aa] border border-blue-200/80 shadow-2xs">
+            Doczeno Healthcare Onboarding
+          </span>
+          <h1 className="text-2xl sm:text-3xl lg:text-3xl xl:text-4xl font-extrabold tracking-tight text-slate-900 drop-shadow-2xs">
+            Choose Your Healthcare Setup
           </h1>
-          <p className="text-lg text-muted-foreground leading-relaxed">
-            Scalable digital presence for independent medical practices, multi-specialty hospitals,
-            and affiliated clinicians with zero-drift data inheritance.
+          <p className="text-slate-600 text-xs sm:text-sm leading-relaxed max-w-xl mx-auto">
+            Select the profile that best matches your practice to launch your verified digital presence.
           </p>
-
-          <div className="flex flex-wrap justify-center gap-3 pt-2">
-            <Button asChild size="lg">
-              <Link href="/onboarding/doctor">Create Doctor Website</Link>
-            </Button>
-            <Button asChild size="lg" variant="outline">
-              <Link href="/onboarding/hospital">Register Hospital/Clinic</Link>
-            </Button>
-            <Button asChild size="lg" variant="ghost">
-              <Link href="/onboarding/hospital-doctor">Join as Hospital Doctor</Link>
-            </Button>
-          </div>
         </div>
 
-        {/* Multi-Tenant Models Grid */}
-        <div className="space-y-4">
-          <div className="flex items-center gap-2">
-            <Layers className="h-5 w-5 text-primary" />
-            <h2 className="text-xl font-bold tracking-tight">Multi-Tenant Website Archetypes</h2>
-          </div>
+        {/* Pathways Grid */}
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-3.5 sm:gap-4 lg:gap-5">
+          {ONBOARDING_FLOWS.map((flow) => {
+            const Icon = flow.icon;
+            return (
+              <Card
+                key={flow.id}
+                className="flex flex-col justify-between border border-white/80 rounded-2xl bg-white/90 backdrop-blur-md hover:border-[#1a76d1]/60 hover:bg-white/95 transition-all duration-200 hover:shadow-xl shadow-md"
+              >
+                <div>
+                  <CardHeader className="space-y-1.5 sm:space-y-2 p-4 sm:p-5 pb-1 lg:pb-1.5">
+                    <div className="flex items-center justify-between">
+                      <div className="h-9 w-9 sm:h-10 sm:w-10 lg:h-11 lg:w-11 rounded-xl bg-blue-50 text-[#1a76d1] border border-blue-100 flex items-center justify-center shadow-2xs shrink-0">
+                        <Icon className="h-5 w-5 lg:h-5.5 lg:w-5.5" />
+                      </div>
+                      <Badge className="bg-blue-50/90 text-[#1560aa] border border-blue-200/80 hover:bg-blue-100 text-[10px] sm:text-[11px] font-semibold px-2 py-0.5">
+                        {flow.badge}
+                      </Badge>
+                    </div>
+                    <CardTitle className="text-base sm:text-lg lg:text-xl font-bold text-slate-900 pt-0.5">
+                      {flow.title}
+                    </CardTitle>
+                    <CardDescription className="text-xs text-slate-600 leading-snug line-clamp-2 min-h-[30px]">
+                      {flow.description}
+                    </CardDescription>
+                  </CardHeader>
 
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-            {/* Type A: Independent Doctor */}
-            <Card className="hover:shadow-md transition-shadow border-t-4 border-t-primary">
-              <CardHeader>
-                <div className="flex items-center justify-between">
-                  <Badge variant="default" className="text-xs">Type A</Badge>
-                  <UserCheck className="h-5 w-5 text-primary" />
+                  <CardContent className="space-y-1.5 sm:space-y-2 px-4 sm:px-5 pt-1 pb-2 lg:pb-2.5">
+                    <div className="text-[10px] font-bold uppercase tracking-wider text-slate-400">
+                      Key Highlights
+                    </div>
+                    <ul className="space-y-1 sm:space-y-1.5 text-xs text-slate-700">
+                      {flow.features.map((feature, idx) => (
+                        <li key={idx} className="flex items-start gap-2 font-medium leading-tight">
+                          <CheckCircle2 className="h-3.5 w-3.5 text-[#1a76d1] shrink-0 mt-0.5" />
+                          <span>{feature}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  </CardContent>
                 </div>
-                <CardTitle className="mt-2">Independent Doctor</CardTitle>
-                <CardDescription>Autonomous medical practitioners</CardDescription>
-              </CardHeader>
-              <CardContent className="space-y-3 text-sm">
-                <p className="text-muted-foreground">
-                  The doctor controls branding, domain routing, clinic profile, and appointments.
-                </p>
-                <div className="rounded-md bg-muted p-2.5 font-mono text-xs text-foreground/80 break-all">
-                  doctorwebsite.in/dr-parth-kadiya
-                </div>
-                <div className="text-xs text-muted-foreground flex items-center gap-1">
-                  <Lock className="h-3.5 w-3.5 text-muted-foreground" />
-                  Admin: /dr-parth-kadiya/admin/login
-                </div>
-              </CardContent>
-            </Card>
 
-            {/* Type B: Hospital / Clinic */}
-            <Card className="hover:shadow-md transition-shadow border-t-4 border-t-emerald-600">
-              <CardHeader>
-                <div className="flex items-center justify-between">
-                  <Badge variant="success" className="text-xs">Type B</Badge>
-                  <Building2 className="h-5 w-5 text-emerald-600" />
+                <div className="p-4 sm:p-5 pt-0">
+                  <Button
+                    asChild
+                    className="w-full group bg-[#1a76d1] hover:bg-[#1560aa] text-white font-semibold text-xs sm:text-sm h-9 sm:h-9.5 lg:h-10 rounded-xl shadow-xs transition-all"
+                  >
+                    <Link href={flow.href}>
+                      <span>{flow.cta}</span>
+                      <ArrowRight className="h-3.5 w-3.5 ml-1.5 group-hover:translate-x-1 transition-transform" />
+                    </Link>
+                  </Button>
                 </div>
-                <CardTitle className="mt-2">Hospital / Clinic</CardTitle>
-                <CardDescription>Parent healthcare organizations</CardDescription>
-              </CardHeader>
-              <CardContent className="space-y-3 text-sm">
-                <p className="text-muted-foreground">
-                  Source of truth for branding, facilities, address, theme, and doctor directories.
-                </p>
-                <div className="rounded-md bg-muted p-2.5 font-mono text-xs text-foreground/80 break-all">
-                  doctorwebsite.in/apollo
-                </div>
-                <div className="text-xs text-muted-foreground flex items-center gap-1">
-                  <Lock className="h-3.5 w-3.5 text-muted-foreground" />
-                  Admin: /apollo/login
-                </div>
-              </CardContent>
-            </Card>
-
-            {/* Type C: Hospital Doctor */}
-            <Card className="hover:shadow-md transition-shadow border-t-4 border-t-sky-600">
-              <CardHeader>
-                <div className="flex items-center justify-between">
-                  <Badge variant="secondary" className="text-xs">Type C</Badge>
-                  <Users className="h-5 w-5 text-sky-600" />
-                </div>
-                <CardTitle className="mt-2">Hospital Doctor</CardTitle>
-                <CardDescription>Affiliated child medical staff</CardDescription>
-              </CardHeader>
-              <CardContent className="space-y-3 text-sm">
-                <p className="text-muted-foreground">
-                  Inherits hospital assets at runtime. Doctor controls qualifications and schedule.
-                </p>
-                <div className="rounded-md bg-muted p-2.5 font-mono text-xs text-foreground/80 break-all">
-                  doctorwebsite.in/apollo/dr-rajiv-shah
-                </div>
-                <div className="text-xs text-muted-foreground flex items-center gap-1">
-                  <Lock className="h-3.5 w-3.5 text-muted-foreground" />
-                  Admin: /apollo/dr-rajiv-shah/admin/login
-                </div>
-              </CardContent>
-            </Card>
-          </div>
+              </Card>
+            );
+          })}
         </div>
-
-        {/* Foundation Architecture Highlights */}
-        <div className="space-y-4">
-          <div className="flex items-center gap-2">
-            <ShieldCheck className="h-5 w-5 text-primary" />
-            <h2 className="text-xl font-bold tracking-tight">Core System Subsystems</h2>
-          </div>
-
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
-            <Card className="bg-card/50">
-              <CardHeader className="p-5">
-                <Database className="h-5 w-5 text-primary mb-2" />
-                <CardTitle className="text-base">Mongoose Connection</CardTitle>
-                <CardDescription className="text-xs">
-                  Serverless connection caching with zero pool explosion
-                </CardDescription>
-              </CardHeader>
-            </Card>
-
-            <Card className="bg-card/50">
-              <CardHeader className="p-5">
-                <Lock className="h-5 w-5 text-emerald-600 mb-2" />
-                <CardTitle className="text-base">Better Auth Layer</CardTitle>
-                <CardDescription className="text-xs">
-                  Role-guarded multi-tenant authentication and session management
-                </CardDescription>
-              </CardHeader>
-            </Card>
-
-            <Card className="bg-card/50">
-              <CardHeader className="p-5">
-                <Layers className="h-5 w-5 text-sky-600 mb-2" />
-                <CardTitle className="text-base">Media Pipeline</CardTitle>
-                <CardDescription className="text-xs">
-                  Strict file type and size validation per tenant role
-                </CardDescription>
-              </CardHeader>
-            </Card>
-
-            <Card className="bg-card/50">
-              <CardHeader className="p-5">
-                <Sparkles className="h-5 w-5 text-amber-500 mb-2" />
-                <CardTitle className="text-base">Healthcare AI Rules</CardTitle>
-                <CardDescription className="text-xs">
-                  Draft-only text generation with strict medical guardrails
-                </CardDescription>
-              </CardHeader>
-            </Card>
-          </div>
-        </div>
-
-        {/* Interactive Primitive Tokens Preview */}
-        <Card className="border bg-card shadow-sm">
-          <CardHeader>
-            <CardTitle className="text-lg">Design System Foundation Primitives</CardTitle>
-            <CardDescription>
-              Consistent clinical tokens, accessible typography, and interactive button states.
-            </CardDescription>
-          </CardHeader>
-          <CardContent className="space-y-6">
-            <div className="flex flex-wrap items-center gap-3">
-              <Button variant="default">Primary Action</Button>
-              <Button variant="secondary">Secondary Action</Button>
-              <Button variant="outline">Outline Action</Button>
-              <Button variant="destructive">Destructive Action</Button>
-              <Button variant="success">Success Action</Button>
-              <Button variant="ghost">Ghost Button</Button>
-            </div>
-
-            <div className="flex flex-wrap items-center gap-2 pt-2 border-t">
-              <Badge variant="default">Role: SUPERADMIN</Badge>
-              <Badge variant="secondary">Role: HOSPITAL_ADMIN</Badge>
-              <Badge variant="outline">Role: HOSPITAL_DOCTOR</Badge>
-              <Badge variant="success">Role: INDEPENDENT_DOCTOR</Badge>
-              <Badge variant="warning">Status: Verification Pending</Badge>
-              <Badge variant="destructive">Status: Suspended</Badge>
-            </div>
-          </CardContent>
-        </Card>
       </main>
+
+      {/* Footer - Transparent Glassmorphism with Rounded Angles */}
+      <footer className="border-t border-x border-white/30 py-2 sm:py-2.5 lg:py-2 bg-white/20 backdrop-blur-xs text-center text-xs text-slate-600 font-medium shrink-0 mx-2 sm:mx-6 lg:mx-8 rounded-t-2xl sm:rounded-t-3xl shadow-2xs">
+        <div className="container max-w-7xl mx-auto px-4 flex flex-col sm:flex-row items-center justify-center gap-2">
+          <span>&copy; {new Date().getFullYear()} Doczeno Healthcare Platform. All rights reserved.</span>
+        </div>
+      </footer>
     </div>
   );
 }

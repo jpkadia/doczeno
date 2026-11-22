@@ -1,4 +1,5 @@
 import { Request, Response, NextFunction } from "express";
+import mongoose from "mongoose";
 import { UserRole } from "@/types";
 import { Doctor, Website } from "@/models";
 
@@ -72,7 +73,7 @@ export async function requireOrganizationAccess(
  * Validates that the authenticated user has permission to view or mutate the target doctor.
  * Superadmin: all doctors.
  * Hospital Admin: only doctors belonging to their hospital.
- * Independent Doctor: only their own profile.
+ * Only Doctor: only their own profile.
  * Hospital Doctor: only their own profile.
  */
 export async function requireDoctorAccess(
@@ -90,7 +91,8 @@ export async function requireDoctorAccess(
     return next();
   }
 
-  const targetDoctorId = req.params.doctorId || req.params.id || req.body.doctorId;
+  const rawDoctorId = req.params.doctorId || req.params.id || req.body?.doctorId;
+  const targetDoctorId = String(rawDoctorId || "");
   if (!targetDoctorId) {
     res.status(400).json({ success: false, error: "Target doctor ID is required", code: "BAD_REQUEST" });
     return;
@@ -98,7 +100,7 @@ export async function requireDoctorAccess(
 
   // Doctor accessing their own profile
   if (
-    (user.role === UserRole.HOSPITAL_DOCTOR || user.role === UserRole.INDEPENDENT_DOCTOR) &&
+    (user.role === UserRole.HOSPITAL_DOCTOR || user.role === UserRole.ONLY_DOCTOR) &&
     user.doctorProfileId &&
     user.doctorProfileId.toString() === targetDoctorId.toString()
   ) {
@@ -108,7 +110,13 @@ export async function requireDoctorAccess(
   // Hospital Admin accessing a doctor in their hospital
   if (user.role === UserRole.HOSPITAL_ADMIN && user.organizationId) {
     try {
-      const doctor = await Doctor.findById(targetDoctorId);
+      let doctor: any = null;
+      if (mongoose.Types.ObjectId.isValid(targetDoctorId)) {
+        doctor = await Doctor.findById(targetDoctorId);
+      }
+      if (!doctor) {
+        doctor = await Doctor.findOne({ slug: String(targetDoctorId).toLowerCase() });
+      }
       if (
         doctor &&
         doctor.organizationId &&
@@ -194,31 +202,43 @@ export async function requireWebsiteAccess(
     return next();
   }
 
-  const targetWebsiteId = req.params.websiteId || req.params.id;
+  const rawWebsiteId = req.params.websiteId || req.params.id;
+  const targetWebsiteId = String(rawWebsiteId || "");
   if (!targetWebsiteId) {
     res.status(400).json({ success: false, error: "Website ID is required", code: "BAD_REQUEST" });
     return;
   }
 
-  const website = await Website.findById(targetWebsiteId);
+  let website: any = null;
+  if (mongoose.Types.ObjectId.isValid(targetWebsiteId)) {
+    website = await Website.findById(targetWebsiteId);
+  }
+  if (!website) {
+    website = await Website.findOne({ slug: String(targetWebsiteId).toLowerCase() });
+  }
+
   if (!website) {
     res.status(404).json({ success: false, error: "Website not found", code: "NOT_FOUND" });
     return;
   }
 
-  // Hospital admin can manage websites belonging to their organization
+  // Hospital admin can manage websites belonging to their organization (hospital or hospital doctors)
   if (
     user.role === UserRole.HOSPITAL_ADMIN &&
-    user.organizationId &&
-    website.organizationId &&
-    website.organizationId.toString() === user.organizationId.toString()
+    user.organizationId
   ) {
-    return next();
+    if (website.organizationId && website.organizationId.toString() === user.organizationId.toString()) {
+      return next();
+    }
+    if (website.doctorId) {
+      const doc = await Doctor.findOne({ _id: website.doctorId, organizationId: user.organizationId });
+      if (doc) return next();
+    }
   }
 
   // Doctor can manage their own website
   if (
-    (user.role === UserRole.HOSPITAL_DOCTOR || user.role === UserRole.INDEPENDENT_DOCTOR) &&
+    (user.role === UserRole.HOSPITAL_DOCTOR || user.role === UserRole.ONLY_DOCTOR) &&
     user.doctorProfileId &&
     website.doctorId &&
     website.doctorId.toString() === user.doctorProfileId.toString()

@@ -12,6 +12,9 @@ export function createApp(): Application {
   const app = express();
   const env = getEnv();
 
+  // Trust reverse proxy (Render, Cloudflare, Vercel)
+  app.set("trust proxy", 1);
+
   // Helmet Security Headers (allow cross-origin embedding for media assets like images/logos)
   app.use(
     helmet({
@@ -19,17 +22,43 @@ export function createApp(): Application {
     })
   );
 
-  // Strict CORS Configuration
-  const allowedOrigins = [env.FRONTEND_URL, "http://localhost:3000"];
+  // Parse allowed frontend origins from environment (supports comma-separated list)
+  const configuredOrigins = (env.FRONTEND_URL || "")
+    .split(",")
+    .map((url) => url.trim().replace(/\/+$/, ""))
+    .filter(Boolean);
+
+  const allowedOrigins = Array.from(
+    new Set([...configuredOrigins, "http://localhost:3000", "http://localhost:3001"])
+  );
+
+  // CORS Configuration supporting production cross-domain credentials
   app.use(
     cors({
       origin: (origin, callback) => {
-        // Allow requests with no origin (e.g. mobile apps, curl, server-to-server)
-        if (!origin || allowedOrigins.includes(origin)) {
-          callback(null, true);
-        } else {
-          callback(new Error(`CORS blocked request from origin: ${origin}`));
+        // Allow requests with no origin (e.g. mobile apps, curl, Render health checks, server-to-server)
+        if (!origin) {
+          return callback(null, true);
         }
+
+        const normalizedOrigin = origin.replace(/\/+$/, "");
+
+        // Explicitly allowed origin
+        if (allowedOrigins.includes(normalizedOrigin)) {
+          return callback(null, true);
+        }
+
+        // Allow any Vercel deployment (preview or production domains)
+        if (/^https:\/\/[a-zA-Z0-9_\-.]+\.vercel\.app$/.test(normalizedOrigin)) {
+          return callback(null, true);
+        }
+
+        // In development, allow localhost on any port
+        if (env.NODE_ENV !== "production" && /^http:\/\/localhost(:\d+)?$/.test(normalizedOrigin)) {
+          return callback(null, true);
+        }
+
+        return callback(null, false);
       },
       credentials: true,
       methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
@@ -37,6 +66,16 @@ export function createApp(): Application {
       maxAge: 86400, // 24 hours
     })
   );
+
+  // Ultra-fast root and health check endpoints for Render and frontend warm-up
+  app.get(["/", "/health", "/api/health"], (_req: Request, res: Response) => {
+    res.status(200).json({
+      status: "ok",
+      name: "Doczeno Medical API",
+      uptime: process.uptime(),
+      timestamp: new Date().toISOString(),
+    });
+  });
 
   // Body and cookie parsing
   app.use(express.json({ limit: "10mb" }));

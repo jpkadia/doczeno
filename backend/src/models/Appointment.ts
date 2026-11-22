@@ -1,21 +1,29 @@
 import mongoose, { Document, Schema, Model } from "mongoose";
 
 export interface IAppointment extends Document {
+  appointmentId: string;
   organizationId?: mongoose.Types.ObjectId | null;
   doctorId: mongoose.Types.ObjectId;
   patientName: string;
+  patientAge: number;
   patientPhone: string;
   patientEmail?: string;
   appointmentDate: Date;
   timeSlot: string;
-  status: "PENDING" | "CONFIRMED" | "CANCELLED" | "COMPLETED";
-  notes?: string;
+  status: "PENDING" | "CONFIRMED" | "CANCELLED" | "COMPLETED" | "PATIENT_NOT_COME";
+  notes: string;
   createdAt: Date;
   updatedAt: Date;
 }
 
 const AppointmentSchema = new Schema<IAppointment>(
   {
+    appointmentId: {
+      type: String,
+      required: true,
+      trim: true,
+      index: true,
+    },
     organizationId: {
       type: Schema.Types.ObjectId,
       ref: "Organization",
@@ -32,6 +40,12 @@ const AppointmentSchema = new Schema<IAppointment>(
       type: String,
       required: true,
       trim: true,
+    },
+    patientAge: {
+      type: Number,
+      required: true,
+      min: 1,
+      max: 120,
     },
     patientPhone: {
       type: String,
@@ -55,12 +69,13 @@ const AppointmentSchema = new Schema<IAppointment>(
     },
     status: {
       type: String,
-      enum: ["PENDING", "CONFIRMED", "CANCELLED", "COMPLETED"],
+      enum: ["PENDING", "CONFIRMED", "CANCELLED", "COMPLETED", "PATIENT_NOT_COME"],
       default: "PENDING",
       index: true,
     },
     notes: {
       type: String,
+      required: true,
       trim: true,
     },
   },
@@ -69,6 +84,8 @@ const AppointmentSchema = new Schema<IAppointment>(
   }
 );
 
+AppointmentSchema.index({ appointmentId: 1, doctorId: 1 });
+AppointmentSchema.index({ appointmentId: 1, organizationId: 1 });
 AppointmentSchema.index({ doctorId: 1, appointmentDate: 1, timeSlot: 1 });
 AppointmentSchema.index({ organizationId: 1, appointmentDate: 1 });
 AppointmentSchema.index({ doctorId: 1, status: 1 });

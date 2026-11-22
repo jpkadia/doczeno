@@ -18,7 +18,6 @@ const UserSchema = new Schema<IUser>(
     email: {
       type: String,
       required: true,
-      unique: true,
       lowercase: true,
       trim: true,
       index: true,
@@ -36,7 +35,7 @@ const UserSchema = new Schema<IUser>(
       type: String,
       enum: Object.values(UserRole),
       required: true,
-      default: UserRole.INDEPENDENT_DOCTOR,
+      default: UserRole.ONLY_DOCTOR,
       index: true,
     },
     organizationId: {
@@ -61,6 +60,7 @@ const UserSchema = new Schema<IUser>(
   }
 );
 
+UserSchema.index({ email: 1, role: 1 }, { unique: true });
 UserSchema.index({ organizationId: 1, role: 1 });
 
 export const User: Model<IUser> =

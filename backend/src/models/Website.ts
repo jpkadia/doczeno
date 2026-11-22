@@ -18,6 +18,8 @@ export interface IWebsite extends Document {
   };
   aiContentStatus: "NONE" | "PENDING" | "APPROVED";
   customDomain?: string;
+  faviconUrl?: string;
+  browserTabTitle?: string;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -63,7 +65,7 @@ const WebsiteSchema = new Schema<IWebsite>(
     templateId: {
       type: String,
       required: true,
-      default: "modern-clinical",
+      default: "hospital-classic",
     },
     publishStatus: {
       type: String,
@@ -86,6 +88,14 @@ const WebsiteSchema = new Schema<IWebsite>(
       type: String,
       sparse: true,
       unique: true,
+      trim: true,
+    },
+    faviconUrl: {
+      type: String,
+      trim: true,
+    },
+    browserTabTitle: {
+      type: String,
       trim: true,
     },
   },

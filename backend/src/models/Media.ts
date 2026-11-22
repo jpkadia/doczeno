@@ -8,7 +8,10 @@ export interface IMedia extends Document {
   fileName: string;
   mimeType: string;
   sizeBytes: number;
-  category: "DOCTOR_PHOTO" | "CLINIC_LOGO" | "GALLERY" | "DOCUMENT";
+  category: "DOCTOR_PHOTO" | "CLINIC_LOGO" | "GALLERY" | "DOCUMENT" | "BUILDING_PHOTO";
+  isAttached: boolean;
+  attachedEntityId?: mongoose.Types.ObjectId | null;
+  attachedEntityType?: "DOCTOR" | "ORGANIZATION" | null;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -47,9 +50,24 @@ const MediaSchema = new Schema<IMedia>(
     },
     category: {
       type: String,
-      enum: ["DOCTOR_PHOTO", "CLINIC_LOGO", "GALLERY", "DOCUMENT"],
+      enum: ["DOCTOR_PHOTO", "CLINIC_LOGO", "GALLERY", "DOCUMENT", "BUILDING_PHOTO"],
       required: true,
       index: true,
+    },
+    isAttached: {
+      type: Boolean,
+      default: false,
+      index: true,
+    },
+    attachedEntityId: {
+      type: Schema.Types.ObjectId,
+      default: null,
+      index: true,
+    },
+    attachedEntityType: {
+      type: String,
+      enum: ["DOCTOR", "ORGANIZATION", null],
+      default: null,
     },
   },
   {

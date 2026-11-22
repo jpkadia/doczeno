@@ -1,7 +1,9 @@
-import { Website, IWebsite, Doctor, Organization } from "@/models";
-import { WebsiteType, EffectiveWebsiteData, DoctorDirectoryItem, FaqItem } from "@/types";
+import { Website, IWebsite, Doctor, Organization, Review } from "@/models";
+import { WebsiteType, EffectiveWebsiteData, DoctorDirectoryItem, FaqItem, TestimonialItem } from "@/types";
 import { logAuditEvent } from "./audit.service";
 import { AuthUserPayload } from "@/types";
+import { geminiService } from "./gemini.service";
+import { aiContentService } from "./ai-content.service";
 
 function getDefaultDoctorFaqs(doctorName: string, specialization: string): FaqItem[] {
   return [
@@ -78,9 +80,77 @@ export class WebsiteService {
   }
 
   /**
+   * Retrieves live published patient testimonials from MongoDB.
+   * If none exist yet, automatically generates contextual testimonials via AI
+   * and persists them into the Review collection.
+   */
+  public static async getOrSeedReviews(params: {
+    doctorId?: any;
+    organizationId?: any;
+    type: "DOCTOR" | "HOSPITAL";
+    doctorName?: string;
+    specialization?: string;
+    degree?: string;
+    clinicName?: string;
+    hospitalName?: string;
+    city?: string;
+  }): Promise<TestimonialItem[]> {
+    try {
+      const query: Record<string, any> = { isPublished: true };
+      if (params.doctorId) {
+        query.doctorId = params.doctorId;
+      } else if (params.organizationId) {
+        query.organizationId = params.organizationId;
+      }
+
+      let docs = await Review.find(query).sort({ createdAt: -1 });
+      if (docs.length === 0) {
+        const generated = await geminiService.generatePatientTestimonials({
+          type: params.type,
+          doctorName: params.doctorName,
+          specialization: params.specialization,
+          degree: params.degree,
+          clinicName: params.clinicName,
+          hospitalName: params.hospitalName,
+          city: params.city,
+        });
+
+        const toInsert = generated.map((g) => ({
+          doctorId: params.doctorId || null,
+          organizationId: params.organizationId || null,
+          patientName: g.patientName,
+          rating: g.rating,
+          comment: g.comment,
+          tag: g.tag,
+          isVerified: true,
+          isPublished: true,
+        }));
+
+        try {
+          docs = (await Review.insertMany(toInsert)) as any;
+        } catch {
+          docs = [];
+        }
+      }
+
+      return docs.map((r: any) => ({
+        id: r._id.toString(),
+        patientName: r.patientName,
+        rating: r.rating,
+        comment: r.comment,
+        tag: r.tag || "Verified Patient",
+        isVerified: r.isVerified,
+        createdAt: r.createdAt ? new Date(r.createdAt).toISOString() : undefined,
+      }));
+    } catch {
+      return [];
+    }
+  }
+
+  /**
    * Runtime Data Inheritance Engine
    * Resolves public website data dynamically for single slug routes (/:slug).
-   * Supports Independent Doctors and Hospital/Clinic organizations.
+   * Supports Only Doctors and Hospital/Clinic organizations.
    * If a hospital doctor slug is requested directly, it resolves inheritance seamlessly.
    */
   static async resolveEffectiveWebsiteData(
@@ -97,7 +167,22 @@ export class WebsiteService {
     // Type B: Hospital / Clinic Organization
     if (website.websiteType === WebsiteType.HOSPITAL_CLINIC) {
       const org = await Organization.findById(website.organizationId || website.ownerId);
-      if (!org || org.status !== "ACTIVE") return null;
+      if (!org) return null;
+
+      if (org.status !== "ACTIVE") {
+        return {
+          isDeactivated: true,
+          deactivationMessage: "Your website is temporarily deactivated. Please contact admin.",
+          slug: website.slug,
+          organizationName: org.name,
+          websiteType: WebsiteType.HOSPITAL_CLINIC,
+          selectedTheme: "hospital-classic",
+          browserTabTitle: `${org.name} — Deactivated`,
+          address: org.address || { city: "", state: "", pincode: "", country: "India" },
+          galleryPhotos: [],
+          isHospitalChild: false,
+        } as any;
+      }
 
       // Fetch active affiliated doctors for directory
       const affiliatedDocs = await Doctor.find({
@@ -115,17 +200,42 @@ export class WebsiteService {
         doctorPhoto: doc.doctorPhoto,
       }));
 
-      // Extract unique departments from doctors
+      // Extract unique departments from registered specialties and doctors
       const departments = Array.from(
-        new Set(affiliatedDocs.map((d) => d.specialization).filter(Boolean))
+        new Set([
+          ...(Array.isArray(org.specialties) ? org.specialties : []),
+          ...(Array.isArray((org as any).departments) ? (org as any).departments : []),
+          ...affiliatedDocs.map((d) => d.specialization).filter(Boolean),
+        ])
       );
+
+      const testimonials = await WebsiteService.getOrSeedReviews({
+        organizationId: org._id,
+        type: "HOSPITAL",
+        hospitalName: org.name,
+        city: org.address?.city,
+      });
+
+      let aiContent: Record<string, any> = {};
+      try {
+        const aiRecord = await aiContentService.getOrCreateRecord("HOSPITAL", org._id);
+        aiContent = aiRecord.publishedContent || aiRecord.approvedContent || aiRecord.draftContent || {};
+      } catch {
+        aiContent = {};
+      }
 
       return {
         websiteType: WebsiteType.HOSPITAL_CLINIC,
         slug: website.slug,
+        organizationId: org._id.toString(),
         organizationName: org.name,
         organizationType: org.type,
-        about: org.about,
+        about: org.about || aiContent.about,
+        tagline: aiContent.tagline || `${org.name} — Medical Center`,
+        shortIntro: aiContent.hospitalIntro || aiContent.shortIntro || org.about,
+        clinicDescription: aiContent.hospitalIntro,
+        services: Array.isArray(aiContent.services) && aiContent.services.length > 0 ? aiContent.services : undefined,
+        departmentsDetailed: Array.isArray(aiContent.departments) && aiContent.departments.length > 0 ? aiContent.departments : undefined,
         phone: org.phone,
         whatsApp: org.whatsApp,
         email: org.email,
@@ -133,20 +243,28 @@ export class WebsiteService {
         weeklyOff: org.weeklyOff,
         appointmentRequired: org.appointmentRequired,
         logo: org.logo,
+        buildingPhoto: org.buildingPhoto,
         galleryPhotos: org.galleryPhotos || [],
         address: org.address,
         selectedTheme: org.selectedTheme,
-        faviconUrl: org.faviconUrl,
-        browserTabTitle: org.browserTabTitle || `${org.name} — Healthcare & Clinics`,
+        faviconUrl: org.faviconUrl?.trim() || undefined,
+        browserTabTitle: aiContent.seoTitle || org.browserTabTitle || `${org.name} — Healthcare & Clinics`,
         isHospitalChild: false,
         doctorDirectory,
         departments,
-        faqs: getDefaultHospitalFaqs(org.name),
+        specialties: (Array.isArray(org.specialties) && org.specialties.length > 0)
+          ? org.specialties
+          : (Array.isArray((org as any).departments) && (org as any).departments.length > 0)
+          ? (org as any).departments
+          : departments,
+        faqs: Array.isArray(aiContent.faqs) && aiContent.faqs.length > 0 ? aiContent.faqs : getDefaultHospitalFaqs(org.name),
+        testimonials,
         seoMetadata: {
-          title: org.browserTabTitle || `${org.name} — Premier Healthcare`,
-          description: org.about || `${org.name} provides comprehensive healthcare services.`,
-          ogImage: org.logo?.url,
+          title: aiContent.seoTitle || org.browserTabTitle || `${org.name} — Premier Healthcare`,
+          description: aiContent.seoDescription || org.about || `${org.name} provides comprehensive healthcare services.`,
+          ogImage: org.buildingPhoto?.url || org.logo?.url,
         },
+        websiteContent: aiContent,
       };
     }
 
@@ -158,9 +276,30 @@ export class WebsiteService {
       const parentOrg = await Organization.findById(doctor.organizationId);
       if (!parentOrg || parentOrg.status !== "ACTIVE") return null;
 
+      const testimonials = await WebsiteService.getOrSeedReviews({
+        doctorId: doctor._id,
+        organizationId: parentOrg._id,
+        type: "DOCTOR",
+        doctorName: doctor.doctorName,
+        specialization: doctor.specialization,
+        degree: doctor.degree,
+        hospitalName: parentOrg.name,
+        city: parentOrg.address?.city,
+      });
+
+      let aiContent: Record<string, any> = {};
+      try {
+        const aiRecord = await aiContentService.getOrCreateRecord("HOSPITAL_DOCTOR", doctor._id);
+        aiContent = aiRecord.publishedContent || aiRecord.approvedContent || aiRecord.draftContent || {};
+      } catch {
+        aiContent = {};
+      }
+
       return {
         websiteType: WebsiteType.HOSPITAL_DOCTOR,
         slug: website.slug,
+        doctorId: doctor._id.toString(),
+        organizationId: parentOrg._id.toString(),
         // Runtime inherited from parent Hospital (strictly dynamic, zero duplication):
         organizationName: parentOrg.name,
         organizationType: parentOrg.type,
@@ -168,17 +307,28 @@ export class WebsiteService {
         galleryPhotos: parentOrg.galleryPhotos || [],
         address: parentOrg.address,
         selectedTheme: parentOrg.selectedTheme, // Inherited theme!
-        faviconUrl: parentOrg.faviconUrl, // Inherited favicon!
-        browserTabTitle: parentOrg.browserTabTitle || `${parentOrg.name} — Healthcare`,
+        faviconUrl: parentOrg.faviconUrl?.trim() || undefined, // Inherited favicon!
+        browserTabTitle: aiContent.seoTitle || parentOrg.browserTabTitle || `${parentOrg.name} — Healthcare`,
         phone: parentOrg.phone,
+        tagline: aiContent.tagline || aiContent.professionalIntro || `Specialist in ${doctor.specialization} at ${parentOrg.name}`,
+        shortIntro: aiContent.professionalIntro || aiContent.shortIntro,
+        clinicDescription: aiContent.expertiseSummary,
+        services: Array.isArray(aiContent.services) && aiContent.services.length > 0 ? aiContent.services : undefined,
         // Doctor specific attributes:
         doctorName: doctor.doctorName,
         gender: doctor.gender,
         degree: doctor.degree,
         specialization: doctor.specialization,
         yearsOfExperience: doctor.yearsOfExperience,
+        newCaseFee: doctor.newCaseFee,
+        oldCaseFee: doctor.oldCaseFee,
         bio:
           doctor.bio ||
+          aiContent.about ||
+          `Dr. ${doctor.doctorName} (${doctor.degree}) is a recognized specialist in ${doctor.specialization} at ${parentOrg.name}.`,
+        about:
+          doctor.bio ||
+          aiContent.about ||
           `Dr. ${doctor.doctorName} (${doctor.degree}) is a recognized specialist in ${doctor.specialization} at ${parentOrg.name}.`,
         consultationHours: doctor.consultationHours,
         weeklyOff: doctor.weeklyOff,
@@ -188,21 +338,39 @@ export class WebsiteService {
         doctorPhoto: doctor.doctorPhoto,
         isHospitalChild: true,
         hospitalSlug: parentOrg.slug,
-        faqs: getDefaultDoctorFaqs(doctor.doctorName, doctor.specialization),
+        faqs: Array.isArray(aiContent.faqs) && aiContent.faqs.length > 0 ? aiContent.faqs : getDefaultDoctorFaqs(doctor.doctorName, doctor.specialization),
+        testimonials,
         seoMetadata: {
-          title: `Dr. ${doctor.doctorName} — ${doctor.specialization} | ${parentOrg.name}`,
-          description: `Consult Dr. ${doctor.doctorName} (${doctor.degree}), specialist in ${doctor.specialization} at ${parentOrg.name}, ${parentOrg.address.city}.`,
+          title: aiContent.seoTitle || `Dr. ${doctor.doctorName} — ${doctor.specialization} | ${parentOrg.name}`,
+          description: aiContent.seoDescription || `Consult Dr. ${doctor.doctorName} (${doctor.degree}), specialist in ${doctor.specialization} at ${parentOrg.name}, ${parentOrg.address.city}.`,
           ogImage: doctor.doctorPhoto?.url || parentOrg.logo?.url,
         },
+        websiteContent: aiContent,
       };
     }
 
-    // Type A: Independent Doctor
-    if (website.websiteType === WebsiteType.INDEPENDENT_DOCTOR) {
+    // Type A: Only Doctor
+    if (website.websiteType === WebsiteType.ONLY_DOCTOR) {
       const doctor = await Doctor.findById(website.doctorId || website.ownerId);
-      if (!doctor || doctor.status !== "ACTIVE") return null;
+      if (!doctor) return null;
 
-      const clinicName = doctor.clinicName || `${doctor.doctorName}'s Medical Practice`;
+      if (doctor.status !== "ACTIVE") {
+        return {
+          isDeactivated: true,
+          deactivationMessage: "Your website is temporarily deactivated. Please contact admin.",
+          slug: website.slug,
+          doctorName: doctor.doctorName,
+          organizationName: doctor.clinicName || doctor.doctorName,
+          websiteType: WebsiteType.ONLY_DOCTOR,
+          selectedTheme: "hospital-classic",
+          browserTabTitle: `Dr. ${doctor.doctorName} — Deactivated`,
+          address: doctor.address || { city: "", state: "", pincode: "", country: "India" },
+          galleryPhotos: [],
+          isHospitalChild: false,
+        } as any;
+      }
+
+      const clinicName = doctor.clinicName || `${doctor.doctorName}'s Clinic`;
       const fallbackAddress = doctor.address || {
         city: "Medical Center",
         state: "Maharashtra",
@@ -210,24 +378,54 @@ export class WebsiteService {
         country: "India",
       };
 
+      const testimonials = await WebsiteService.getOrSeedReviews({
+        doctorId: doctor._id,
+        type: "DOCTOR",
+        doctorName: doctor.doctorName,
+        specialization: doctor.specialization,
+        degree: doctor.degree,
+        clinicName,
+        city: fallbackAddress.city,
+      });
+
+      let aiContent: Record<string, any> = {};
+      try {
+        const aiRecord = await aiContentService.getOrCreateRecord("ONLY_DOCTOR", doctor._id);
+        aiContent = aiRecord.publishedContent || aiRecord.approvedContent || aiRecord.draftContent || {};
+      } catch {
+        aiContent = {};
+      }
+
       return {
-        websiteType: WebsiteType.INDEPENDENT_DOCTOR,
+        websiteType: WebsiteType.ONLY_DOCTOR,
         slug: website.slug,
+        doctorId: doctor._id.toString(),
         organizationName: clinicName,
         logo: doctor.clinicLogo || doctor.doctorPhoto,
         galleryPhotos: doctor.clinicPhotos || [],
         address: fallbackAddress,
-        selectedTheme: website.templateId || "clinical-editorial",
-        faviconUrl: website.seoMetadata?.ogImage || doctor.doctorPhoto?.url,
+        selectedTheme: website.templateId || "hospital-classic",
+        faviconUrl: website.faviconUrl?.trim() || undefined,
         browserTabTitle:
-          website.seoMetadata?.title || `Dr. ${doctor.doctorName} — ${doctor.specialization}`,
+          aiContent.seoTitle || website.seoMetadata?.title || `Dr. ${doctor.doctorName} — ${doctor.specialization}`,
+        tagline: aiContent.tagline || `Specialist in ${doctor.specialization} | Dedicated Patient Care`,
+        shortIntro: aiContent.shortIntro,
+        clinicDescription: aiContent.clinicDescription,
+        services: Array.isArray(aiContent.services) && aiContent.services.length > 0 ? aiContent.services : undefined,
         doctorName: doctor.doctorName,
         gender: doctor.gender,
         degree: doctor.degree,
         specialization: doctor.specialization,
         yearsOfExperience: doctor.yearsOfExperience,
+        newCaseFee: doctor.newCaseFee,
+        oldCaseFee: doctor.oldCaseFee,
         bio:
           doctor.bio ||
+          aiContent.about ||
+          `Dr. ${doctor.doctorName} (${doctor.degree}) is a dedicated ${doctor.specialization} specialist with over ${doctor.yearsOfExperience} years of medical experience.`,
+        about:
+          doctor.bio ||
+          aiContent.about ||
           `Dr. ${doctor.doctorName} (${doctor.degree}) is a dedicated ${doctor.specialization} specialist with over ${doctor.yearsOfExperience} years of medical experience.`,
         consultationHours: doctor.consultationHours,
         weeklyOff: doctor.weeklyOff,
@@ -237,14 +435,17 @@ export class WebsiteService {
         phone: doctor.whatsApp,
         doctorPhoto: doctor.doctorPhoto,
         isHospitalChild: false,
-        faqs: getDefaultDoctorFaqs(doctor.doctorName, doctor.specialization),
+        faqs: Array.isArray(aiContent.faqs) && aiContent.faqs.length > 0 ? aiContent.faqs : getDefaultDoctorFaqs(doctor.doctorName, doctor.specialization),
+        testimonials,
         seoMetadata: {
-          title: website.seoMetadata?.title || `Dr. ${doctor.doctorName} — ${doctor.specialization}`,
+          title: aiContent.seoTitle || website.seoMetadata?.title || `Dr. ${doctor.doctorName} — ${doctor.specialization}`,
           description:
+            aiContent.seoDescription ||
             website.seoMetadata?.description ||
             `Consult Dr. ${doctor.doctorName} (${doctor.degree}) for ${doctor.specialization} at ${clinicName}.`,
           ogImage: doctor.doctorPhoto?.url,
         },
+        websiteContent: aiContent,
       };
     }
 
@@ -266,17 +467,46 @@ export class WebsiteService {
     // 1. Resolve parent Organization by slug
     const parentOrg = await Organization.findOne({
       slug: orgSlug.toLowerCase(),
-      status: "ACTIVE",
     });
     if (!parentOrg) return null;
+
+    if (parentOrg.status !== "ACTIVE") {
+      return {
+        isDeactivated: true,
+        deactivationMessage: "Your website is temporarily deactivated. Please contact admin.",
+        slug: orgSlug,
+        organizationName: parentOrg.name,
+        websiteType: WebsiteType.HOSPITAL_CLINIC,
+        selectedTheme: "hospital-classic",
+        browserTabTitle: `${parentOrg.name} — Deactivated`,
+        address: parentOrg.address || { city: "", state: "", pincode: "", country: "India" },
+        galleryPhotos: [],
+        isHospitalChild: false,
+      } as any;
+    }
 
     // 2. Resolve Doctor by slug AND enforce internal parent organization ID match
     const doctor = await Doctor.findOne({
       slug: doctorSlug.toLowerCase(),
       organizationId: parentOrg._id,
-      status: "ACTIVE",
     });
     if (!doctor) return null;
+
+    if (doctor.status !== "ACTIVE") {
+      return {
+        isDeactivated: true,
+        deactivationMessage: "Your website is temporarily deactivated. Please contact admin.",
+        slug: doctorSlug,
+        doctorName: doctor.doctorName,
+        organizationName: parentOrg.name,
+        websiteType: WebsiteType.HOSPITAL_DOCTOR,
+        selectedTheme: "hospital-classic",
+        browserTabTitle: `Dr. ${doctor.doctorName} — Deactivated`,
+        address: parentOrg.address || { city: "", state: "", pincode: "", country: "India" },
+        galleryPhotos: [],
+        isHospitalChild: true,
+      } as any;
+    }
 
     // 3. Resolve Website record and enforce PUBLISHED status
     const website = await Website.findOne({
@@ -286,10 +516,31 @@ export class WebsiteService {
     });
     if (!website) return null;
 
+    const testimonials = await WebsiteService.getOrSeedReviews({
+      doctorId: doctor._id,
+      organizationId: parentOrg._id,
+      type: "DOCTOR",
+      doctorName: doctor.doctorName,
+      specialization: doctor.specialization,
+      degree: doctor.degree,
+      hospitalName: parentOrg.name,
+      city: parentOrg.address?.city,
+    });
+
+    let aiContent: Record<string, any> = {};
+    try {
+      const aiRecord = await aiContentService.getOrCreateRecord("HOSPITAL_DOCTOR", doctor._id);
+      aiContent = aiRecord.publishedContent || aiRecord.approvedContent || aiRecord.draftContent || {};
+    } catch {
+      aiContent = {};
+    }
+
     // 4. Return dynamically resolved effective website data
     return {
       websiteType: WebsiteType.HOSPITAL_DOCTOR,
       slug: `${parentOrg.slug}/${doctor.slug}`,
+      doctorId: doctor._id.toString(),
+      organizationId: parentOrg._id.toString(),
       // Runtime inherited from parent Hospital (strictly dynamic, zero duplication):
       organizationName: parentOrg.name,
       organizationType: parentOrg.type,
@@ -297,17 +548,28 @@ export class WebsiteService {
       galleryPhotos: parentOrg.galleryPhotos || [],
       address: parentOrg.address,
       selectedTheme: parentOrg.selectedTheme, // Inherited theme!
-      faviconUrl: parentOrg.faviconUrl, // Inherited favicon!
-      browserTabTitle: parentOrg.browserTabTitle || `${parentOrg.name} — Healthcare`,
+      faviconUrl: parentOrg.faviconUrl?.trim() || undefined, // Inherited favicon!
+      browserTabTitle: aiContent.seoTitle || parentOrg.browserTabTitle || `${parentOrg.name} — Healthcare`,
       phone: parentOrg.phone,
+      tagline: aiContent.tagline || aiContent.professionalIntro || `Specialist in ${doctor.specialization} at ${parentOrg.name}`,
+      shortIntro: aiContent.professionalIntro || aiContent.shortIntro,
+      clinicDescription: aiContent.expertiseSummary,
+      services: Array.isArray(aiContent.services) && aiContent.services.length > 0 ? aiContent.services : undefined,
       // Doctor-owned professional attributes:
       doctorName: doctor.doctorName,
       gender: doctor.gender,
       degree: doctor.degree,
       specialization: doctor.specialization,
       yearsOfExperience: doctor.yearsOfExperience,
+      newCaseFee: doctor.newCaseFee,
+      oldCaseFee: doctor.oldCaseFee,
       bio:
         doctor.bio ||
+        aiContent.about ||
+        `Dr. ${doctor.doctorName} (${doctor.degree}) is a recognized specialist in ${doctor.specialization} at ${parentOrg.name}.`,
+      about:
+        doctor.bio ||
+        aiContent.about ||
         `Dr. ${doctor.doctorName} (${doctor.degree}) is a recognized specialist in ${doctor.specialization} at ${parentOrg.name}.`,
       consultationHours: doctor.consultationHours,
       weeklyOff: doctor.weeklyOff,
@@ -317,12 +579,14 @@ export class WebsiteService {
       doctorPhoto: doctor.doctorPhoto,
       isHospitalChild: true,
       hospitalSlug: parentOrg.slug,
-      faqs: getDefaultDoctorFaqs(doctor.doctorName, doctor.specialization),
+      faqs: Array.isArray(aiContent.faqs) && aiContent.faqs.length > 0 ? aiContent.faqs : getDefaultDoctorFaqs(doctor.doctorName, doctor.specialization),
+      testimonials,
       seoMetadata: {
-        title: `Dr. ${doctor.doctorName} — ${doctor.specialization} | ${parentOrg.name}`,
-        description: `Consult Dr. ${doctor.doctorName} (${doctor.degree}), specialist in ${doctor.specialization} at ${parentOrg.name}, ${parentOrg.address.city}.`,
+        title: aiContent.seoTitle || `Dr. ${doctor.doctorName} — ${doctor.specialization} | ${parentOrg.name}`,
+        description: aiContent.seoDescription || `Consult Dr. ${doctor.doctorName} (${doctor.degree}), specialist in ${doctor.specialization} at ${parentOrg.name}, ${parentOrg.address.city}.`,
         ogImage: doctor.doctorPhoto?.url || parentOrg.logo?.url,
       },
+      websiteContent: aiContent,
     };
   }
 }

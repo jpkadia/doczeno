@@ -18,7 +18,13 @@ export interface IOrganization extends Document {
   workingHours?: string;
   weeklyOff?: string;
   appointmentRequired: boolean;
+  specialties?: string[];
+  departments?: string[];
   logo?: {
+    url: string;
+    publicId?: string;
+  };
+  buildingPhoto?: {
     url: string;
     publicId?: string;
   };
@@ -94,7 +100,19 @@ const OrganizationSchema = new Schema<IOrganization>(
       type: Boolean,
       default: true,
     },
+    specialties: {
+      type: [String],
+      default: [],
+    },
+    departments: {
+      type: [String],
+      default: [],
+    },
     logo: {
+      url: { type: String },
+      publicId: { type: String },
+    },
+    buildingPhoto: {
       url: { type: String },
       publicId: { type: String },
     },
@@ -108,7 +126,7 @@ const OrganizationSchema = new Schema<IOrganization>(
     selectedTheme: {
       type: String,
       required: true,
-      default: "theme-teal-modern",
+      default: "hospital-classic",
     },
     faviconUrl: {
       type: String,

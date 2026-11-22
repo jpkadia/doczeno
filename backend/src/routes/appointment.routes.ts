@@ -1,11 +1,61 @@
 import { Router, Request, Response, NextFunction } from "express";
-import { Appointment } from "@/models";
+import { Appointment, Website, Organization, Doctor, getNextAppointmentId } from "@/models";
 import { appointmentCreateSchema } from "@/validations";
 import { requireAuthenticatedUser } from "@/middleware/auth";
-import { UserRole } from "@/types";
+import { UserRole, WebsiteType } from "@/types";
 import { logAuditEvent } from "@/services/audit.service";
+import {
+  validateAppointmentBookingDate,
+  getBookingWindowDays,
+} from "@/services/appointment-schedule.service";
 
 export const appointmentRouter = Router();
+
+/**
+ * GET /api/v1/appointments/available-days
+ * Public: Returns the 4-day booking window (Day 0 to Day 3) with open/closed status for a doctor/org
+ */
+appointmentRouter.get(
+  "/available-days",
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const { doctorId, organizationId } = req.query;
+
+      let scheduleRaw: string | undefined;
+      let weeklyOffRaw: string | undefined;
+      let entityName = "Doctor/Clinic";
+
+      if (doctorId && typeof doctorId === "string") {
+        const doc = await Doctor.findById(doctorId).select("doctorName consultationHours weeklyOff").lean();
+        if (doc) {
+          scheduleRaw = doc.consultationHours;
+          weeklyOffRaw = doc.weeklyOff;
+          entityName = `Dr. ${doc.doctorName}`;
+        }
+      }
+
+      if (!scheduleRaw && organizationId && typeof organizationId === "string") {
+        const org = await Organization.findById(organizationId).select("name workingHours weeklyOff").lean();
+        if (org) {
+          scheduleRaw = org.workingHours;
+          if (!weeklyOffRaw) weeklyOffRaw = org.weeklyOff;
+          if (entityName === "Doctor/Clinic") entityName = org.name;
+        }
+      }
+
+      const days = getBookingWindowDays(scheduleRaw, weeklyOffRaw);
+      res.json({
+        success: true,
+        data: {
+          entityName,
+          days,
+        },
+      });
+    } catch (error) {
+      next(error);
+    }
+  }
+);
 
 /**
  * POST /api/v1/appointments
@@ -16,11 +66,452 @@ appointmentRouter.post(
   async (req: Request, res: Response, next: NextFunction) => {
     try {
       const validated = appointmentCreateSchema.parse(req.body);
-      const appointment = await Appointment.create(validated);
+
+      // Validate consultation schedule and 3-day advance booking window
+      let scheduleRaw: string | undefined;
+      let weeklyOffRaw: string | undefined;
+      let entityName = "Doctor/Clinic";
+
+      if (validated.doctorId) {
+        const doc = await Doctor.findById(validated.doctorId).select("doctorName consultationHours weeklyOff organizationId").lean();
+        if (doc) {
+          scheduleRaw = doc.consultationHours;
+          weeklyOffRaw = doc.weeklyOff;
+          entityName = `Dr. ${doc.doctorName}`;
+          if (doc.organizationId) {
+            validated.organizationId = doc.organizationId.toString();
+          } else {
+            delete (validated as any).organizationId;
+          }
+        }
+      }
+
+      if (!scheduleRaw && validated.organizationId) {
+        const org = await Organization.findById(validated.organizationId).select("name workingHours weeklyOff").lean();
+        if (org) {
+          scheduleRaw = org.workingHours;
+          if (!weeklyOffRaw) weeklyOffRaw = org.weeklyOff;
+          if (entityName === "Doctor/Clinic") entityName = org.name;
+        }
+      }
+
+      const scheduleValidation = validateAppointmentBookingDate(
+        validated.appointmentDate,
+        scheduleRaw,
+        weeklyOffRaw,
+        entityName
+      );
+
+      if (!scheduleValidation.isValid) {
+        res.status(400).json({
+          success: false,
+          error: scheduleValidation.errorMessage,
+          code: scheduleValidation.errorCode,
+          data: {
+            availableOptions: scheduleValidation.availableOptions,
+          },
+        });
+        return;
+      }
+
+      // Determine scope for sequential appointment ID:
+      // For hospital: organizationId scope (shared across all hospital doctors)
+      // For only doctor: doctorId scope (per doctor sequence)
+      const scopeType = validated.organizationId ? "ORGANIZATION" : "DOCTOR";
+      const scopeId = validated.organizationId || validated.doctorId;
+      const appointmentId = await getNextAppointmentId({
+        scopeType,
+        scopeId,
+        date: validated.appointmentDate,
+      });
+
+      const appointment = await Appointment.create({
+        ...validated,
+        appointmentId,
+      });
+
       res.status(201).json({
         success: true,
         message: "Appointment request submitted successfully",
-        data: { appointment },
+        data: {
+          appointment,
+          appointmentId: appointment.appointmentId,
+        },
+      });
+    } catch (error) {
+      next(error);
+    }
+  }
+);
+
+/**
+ * POST /api/v1/appointments/check-status
+ * Public: Check appointment status using Appointment ID within the doctor/hospital website scope
+ */
+appointmentRouter.post(
+  "/check-status",
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const { appointmentId, slug, doctorSlug } = req.body;
+
+      if (!appointmentId || typeof appointmentId !== "string" || !appointmentId.trim()) {
+        res.status(400).json({
+          success: false,
+          error: "Appointment ID is required",
+          code: "INVALID_APPOINTMENT_ID",
+        });
+        return;
+      }
+
+      if (!slug || typeof slug !== "string") {
+        res.status(400).json({
+          success: false,
+          error: "Website slug is required",
+          code: "INVALID_SLUG",
+        });
+        return;
+      }
+
+      let cleanSlug = slug.trim().toLowerCase();
+      let cleanDocSlug = doctorSlug ? String(doctorSlug).trim().toLowerCase() : undefined;
+
+      if (cleanSlug.includes("/")) {
+        const parts = cleanSlug.split("/").filter(Boolean);
+        cleanSlug = parts[0] || cleanSlug;
+        if (!cleanDocSlug && parts[1]) {
+          cleanDocSlug = parts[1];
+        }
+      }
+
+      const rawApptId = appointmentId.trim();
+      const cleanApptId = rawApptId.toUpperCase();
+      const idVariants: string[] = [rawApptId, cleanApptId];
+      if (cleanApptId.startsWith("APT-")) {
+        idVariants.push(cleanApptId.replace(/^APT-/, ""));
+      } else {
+        idVariants.push(`APT-${cleanApptId}`);
+      }
+      const uniqueVariants = Array.from(new Set(idVariants.filter(Boolean)));
+      const apptIdCondition = uniqueVariants.length === 1 ? uniqueVariants[0] : { $in: uniqueVariants };
+      let appointmentQuery: Record<string, unknown> | null = null;
+
+      // 1. Hospital Doctor route (/:slug/:doctorSlug)
+      if (cleanDocSlug) {
+        const org = await Organization.findOne({ slug: cleanSlug });
+        if (!org) {
+          res.status(404).json({ success: false, error: "Hospital not found", code: "NOT_FOUND" });
+          return;
+        }
+        const doc = await Doctor.findOne({ organizationId: org._id, slug: cleanDocSlug });
+        if (!doc) {
+          res.status(404).json({ success: false, error: "Doctor not found under this hospital", code: "NOT_FOUND" });
+          return;
+        }
+
+        appointmentQuery = {
+          appointmentId: apptIdCondition,
+          organizationId: org._id,
+          doctorId: doc._id,
+        };
+      } else {
+        // 2. Single slug: Check Website or Doctor or Organization
+        const website = await Website.findOne({ slug: cleanSlug });
+        if (website) {
+          if (website.websiteType === WebsiteType.ONLY_DOCTOR) {
+            const doc = await Doctor.findById(website.doctorId || website.ownerId);
+            if (!doc) {
+              res.status(404).json({ success: false, error: "Doctor profile not found", code: "NOT_FOUND" });
+              return;
+            }
+            appointmentQuery = {
+              appointmentId: apptIdCondition,
+              doctorId: doc._id,
+              $or: [{ organizationId: null }, { organizationId: { $exists: false } }],
+            };
+          } else if (website.websiteType === WebsiteType.HOSPITAL_CLINIC) {
+            const org = await Organization.findById(website.organizationId || website.ownerId);
+            if (!org) {
+              res.status(404).json({ success: false, error: "Hospital not found", code: "NOT_FOUND" });
+              return;
+            }
+            appointmentQuery = {
+              appointmentId: apptIdCondition,
+              organizationId: org._id,
+            };
+          }
+        }
+
+        if (!appointmentQuery) {
+          // Direct doctor slug fallback
+          const directDoc = await Doctor.findOne({ slug: cleanSlug });
+          if (directDoc) {
+            if (directDoc.organizationId) {
+              // Hospital doctor direct slug -> query under that doctor and org
+              appointmentQuery = {
+                appointmentId: apptIdCondition,
+                doctorId: directDoc._id,
+                organizationId: directDoc.organizationId,
+              };
+            } else {
+              // Autonomous doctor
+              appointmentQuery = {
+                appointmentId: apptIdCondition,
+                doctorId: directDoc._id,
+                $or: [{ organizationId: null }, { organizationId: { $exists: false } }],
+              };
+            }
+          } else {
+            // Direct organization slug fallback
+            const directOrg = await Organization.findOne({ slug: cleanSlug });
+            if (directOrg) {
+              appointmentQuery = {
+                appointmentId: apptIdCondition,
+                organizationId: directOrg._id,
+              };
+            }
+          }
+        }
+      }
+
+      if (!appointmentQuery) {
+        res.status(404).json({
+          success: false,
+          error: "Healthcare practice website not found",
+          code: "NOT_FOUND",
+        });
+        return;
+      }
+
+      const appointment = await Appointment.findOne(appointmentQuery)
+        .populate("doctorId", "doctorName specialization")
+        .populate("organizationId", "name");
+
+      if (!appointment) {
+        res.status(404).json({
+          success: false,
+          error: `No appointment found with ID "${rawApptId}" for this doctor/hospital. Please check your Appointment ID.`,
+          code: "APPOINTMENT_NOT_FOUND",
+        });
+        return;
+      }
+
+      const docObj = appointment.doctorId as any;
+      const orgObj = appointment.organizationId as any;
+
+      res.status(200).json({
+        success: true,
+        data: {
+          appointmentId: appointment.appointmentId,
+          status: appointment.status,
+          patientName: appointment.patientName,
+          patientAge: appointment.patientAge,
+          doctorName: docObj?.doctorName || "Doctor",
+          doctorSpecialization: docObj?.specialization || "General Medicine",
+          hospitalName: orgObj?.name || undefined,
+          appointmentDate: appointment.appointmentDate,
+          timeSlot: appointment.timeSlot,
+          notes: appointment.notes,
+          createdAt: appointment.createdAt,
+        },
+      });
+    } catch (error) {
+      next(error);
+    }
+  }
+);
+
+/**
+ * POST /api/v1/appointments/cancel
+ * Public: Patient can cancel their own appointment using Appointment ID from the website
+ */
+appointmentRouter.post(
+  "/cancel",
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const { appointmentId, slug, doctorSlug, reason } = req.body;
+
+      if (!appointmentId || typeof appointmentId !== "string" || !appointmentId.trim()) {
+        res.status(400).json({
+          success: false,
+          error: "Appointment ID is required",
+          code: "INVALID_APPOINTMENT_ID",
+        });
+        return;
+      }
+
+      if (!slug || typeof slug !== "string") {
+        res.status(400).json({
+          success: false,
+          error: "Website slug is required",
+          code: "INVALID_SLUG",
+        });
+        return;
+      }
+
+      let cleanSlug = slug.trim().toLowerCase();
+      let cleanDocSlug = doctorSlug ? String(doctorSlug).trim().toLowerCase() : undefined;
+
+      if (cleanSlug.includes("/")) {
+        const parts = cleanSlug.split("/").filter(Boolean);
+        cleanSlug = parts[0] || cleanSlug;
+        if (!cleanDocSlug && parts[1]) {
+          cleanDocSlug = parts[1];
+        }
+      }
+
+      const rawApptId = appointmentId.trim();
+      const cleanApptId = rawApptId.toUpperCase();
+      const idVariants: string[] = [rawApptId, cleanApptId];
+      if (cleanApptId.startsWith("APT-")) {
+        idVariants.push(cleanApptId.replace(/^APT-/, ""));
+      } else {
+        idVariants.push(`APT-${cleanApptId}`);
+      }
+      const uniqueVariants = Array.from(new Set(idVariants.filter(Boolean)));
+      const apptIdCondition = uniqueVariants.length === 1 ? uniqueVariants[0] : { $in: uniqueVariants };
+      let appointmentQuery: Record<string, unknown> | null = null;
+
+      // 1. Hospital Doctor route (/:slug/:doctorSlug)
+      if (cleanDocSlug) {
+        const org = await Organization.findOne({ slug: cleanSlug });
+        if (!org) {
+          res.status(404).json({ success: false, error: "Hospital not found", code: "NOT_FOUND" });
+          return;
+        }
+        const doc = await Doctor.findOne({ organizationId: org._id, slug: cleanDocSlug });
+        if (!doc) {
+          res.status(404).json({ success: false, error: "Doctor not found under this hospital", code: "NOT_FOUND" });
+          return;
+        }
+
+        appointmentQuery = {
+          appointmentId: apptIdCondition,
+          organizationId: org._id,
+          doctorId: doc._id,
+        };
+      } else {
+        // 2. Single slug: Check Website or Doctor or Organization
+        const website = await Website.findOne({ slug: cleanSlug });
+        if (website) {
+          if (website.websiteType === WebsiteType.ONLY_DOCTOR) {
+            const doc = await Doctor.findById(website.doctorId || website.ownerId);
+            if (!doc) {
+              res.status(404).json({ success: false, error: "Doctor profile not found", code: "NOT_FOUND" });
+              return;
+            }
+            appointmentQuery = {
+              appointmentId: apptIdCondition,
+              doctorId: doc._id,
+              $or: [{ organizationId: null }, { organizationId: { $exists: false } }],
+            };
+          } else if (website.websiteType === WebsiteType.HOSPITAL_CLINIC) {
+            const org = await Organization.findById(website.organizationId || website.ownerId);
+            if (!org) {
+              res.status(404).json({ success: false, error: "Hospital not found", code: "NOT_FOUND" });
+              return;
+            }
+            appointmentQuery = {
+              appointmentId: apptIdCondition,
+              organizationId: org._id,
+            };
+          }
+        }
+
+        if (!appointmentQuery) {
+          // Direct doctor slug fallback
+          const directDoc = await Doctor.findOne({ slug: cleanSlug });
+          if (directDoc) {
+            if (directDoc.organizationId) {
+              appointmentQuery = {
+                appointmentId: apptIdCondition,
+                doctorId: directDoc._id,
+                organizationId: directDoc.organizationId,
+              };
+            } else {
+              appointmentQuery = {
+                appointmentId: apptIdCondition,
+                doctorId: directDoc._id,
+                $or: [{ organizationId: null }, { organizationId: { $exists: false } }],
+              };
+            }
+          } else {
+            // Direct organization slug fallback
+            const directOrg = await Organization.findOne({ slug: cleanSlug });
+            if (directOrg) {
+              appointmentQuery = {
+                appointmentId: apptIdCondition,
+                organizationId: directOrg._id,
+              };
+            }
+          }
+        }
+      }
+
+      if (!appointmentQuery) {
+        res.status(404).json({
+          success: false,
+          error: "Healthcare practice website not found",
+          code: "NOT_FOUND",
+        });
+        return;
+      }
+
+      const appointment = await Appointment.findOne(appointmentQuery);
+      if (!appointment) {
+        res.status(404).json({
+          success: false,
+          error: `No appointment found with ID "${rawApptId}" for this doctor/hospital.`,
+          code: "APPOINTMENT_NOT_FOUND",
+        });
+        return;
+      }
+
+      if (appointment.status === "CANCELLED") {
+        res.status(400).json({
+          success: false,
+          error: "This appointment is already cancelled and cannot be modified.",
+          code: "ALREADY_CANCELLED",
+        });
+        return;
+      }
+
+      if (appointment.status === "COMPLETED") {
+        res.status(400).json({
+          success: false,
+          error: "Completed appointments cannot be cancelled.",
+          code: "ALREADY_COMPLETED",
+        });
+        return;
+      }
+
+      const previousStatus = appointment.status;
+      appointment.status = "CANCELLED";
+      await appointment.save();
+
+      await logAuditEvent({
+        userId: null,
+        userEmail: appointment.patientEmail || appointment.patientPhone,
+        action: "APPOINTMENT_CANCELLED_BY_PATIENT",
+        entityType: "Appointment",
+        entityId: appointment._id.toString(),
+        organizationId: appointment.organizationId ? appointment.organizationId.toString() : null,
+        doctorId: appointment.doctorId.toString(),
+        details: {
+          previousStatus,
+          newStatus: "CANCELLED",
+          patientName: appointment.patientName,
+          appointmentId: appointment.appointmentId,
+          reason: reason || "Cancelled by patient via website status portal",
+        },
+      });
+
+      res.status(200).json({
+        success: true,
+        message: "Your appointment has been cancelled successfully.",
+        data: {
+          appointmentId: appointment.appointmentId,
+          status: "CANCELLED",
+        },
       });
     } catch (error) {
       next(error);
@@ -51,16 +542,47 @@ appointmentRouter.get(
           res.status(403).json({ success: false, error: "Hospital admin missing organization assignment", code: "FORBIDDEN" });
           return;
         }
-        filter.organizationId = user.organizationId;
-        // Optionally filter by a doctor belonging to this hospital
-        if (doctorId) filter.doctorId = doctorId;
-      } else if (user.role === UserRole.HOSPITAL_DOCTOR || user.role === UserRole.INDEPENDENT_DOCTOR) {
+
+        // Strict boundary: Resolve doctors belonging to this hospital only
+        const hospitalDocs = await Doctor.find({ organizationId: user.organizationId }).select("_id").lean();
+        const hospitalDocIds = hospitalDocs.map((d) => d._id);
+
+        if (doctorId) {
+          const belongs = hospitalDocIds.some((id) => id.toString() === doctorId.toString());
+          if (!belongs) {
+            res.status(403).json({
+              success: false,
+              error: "Forbidden: You cannot view appointments of a doctor outside your hospital",
+              code: "FORBIDDEN",
+            });
+            return;
+          }
+          filter.doctorId = doctorId;
+          filter.organizationId = user.organizationId;
+        } else {
+          filter.$or = [
+            { organizationId: user.organizationId },
+            { doctorId: { $in: hospitalDocIds } },
+          ];
+        }
+      } else if (user.role === UserRole.HOSPITAL_DOCTOR) {
         if (!user.doctorProfileId) {
           res.status(403).json({ success: false, error: "Doctor user missing profile link", code: "FORBIDDEN" });
           return;
         }
-        // Strict boundary: Doctor sees ONLY their own appointments
+        // Strict boundary: Hospital Doctor sees ONLY their own appointments
         filter.doctorId = user.doctorProfileId;
+        if (user.organizationId) {
+          filter.organizationId = user.organizationId;
+        }
+      } else if (user.role === UserRole.ONLY_DOCTOR) {
+        if (!user.doctorProfileId) {
+          res.status(403).json({ success: false, error: "Doctor user missing profile link", code: "FORBIDDEN" });
+          return;
+        }
+        // Strict boundary: Only Doctor sees ONLY their own appointments and NEVER any hospital appointments
+        filter.doctorId = user.doctorProfileId;
+        filter.$or = [{ organizationId: null }, { organizationId: { $exists: false } }];
       } else {
         res.status(403).json({ success: false, error: "Access denied", code: "FORBIDDEN" });
         return;
@@ -117,7 +639,7 @@ appointmentRouter.patch(
   async (req: Request, res: Response, next: NextFunction) => {
     try {
       const { status } = req.body;
-      const validStatuses = ["PENDING", "CONFIRMED", "CANCELLED", "COMPLETED"];
+      const validStatuses = ["PENDING", "CONFIRMED", "CANCELLED", "COMPLETED", "PATIENT_NOT_COME"];
       if (!validStatuses.includes(status)) {
         res.status(400).json({
           success: false,
@@ -138,7 +660,15 @@ appointmentRouter.patch(
       if (user.role === UserRole.SUPERADMIN) {
         // Allowed
       } else if (user.role === UserRole.HOSPITAL_ADMIN) {
-        if (!user.organizationId || appointment.organizationId?.toString() !== user.organizationId.toString()) {
+        let isAuthorized = false;
+        if (user.organizationId && appointment.organizationId?.toString() === user.organizationId.toString()) {
+          isAuthorized = true;
+        } else if (user.organizationId && appointment.doctorId) {
+          const doc = await Doctor.findOne({ _id: appointment.doctorId, organizationId: user.organizationId });
+          if (doc) isAuthorized = true;
+        }
+
+        if (!isAuthorized) {
           res.status(403).json({
             success: false,
             error: "Forbidden: Not an appointment for your hospital organization",
@@ -146,7 +676,20 @@ appointmentRouter.patch(
           });
           return;
         }
-      } else if (user.role === UserRole.HOSPITAL_DOCTOR || user.role === UserRole.INDEPENDENT_DOCTOR) {
+      } else if (user.role === UserRole.ONLY_DOCTOR) {
+        if (
+          !user.doctorProfileId ||
+          appointment.doctorId.toString() !== user.doctorProfileId.toString() ||
+          appointment.organizationId
+        ) {
+          res.status(403).json({
+            success: false,
+            error: "Forbidden: You can only manage your own patient appointments",
+            code: "FORBIDDEN",
+          });
+          return;
+        }
+      } else if (user.role === UserRole.HOSPITAL_DOCTOR) {
         if (!user.doctorProfileId || appointment.doctorId.toString() !== user.doctorProfileId.toString()) {
           res.status(403).json({
             success: false,
@@ -157,6 +700,16 @@ appointmentRouter.patch(
         }
       } else {
         res.status(403).json({ success: false, error: "Access denied", code: "FORBIDDEN" });
+        return;
+      }
+
+      // Permanent lock: Once cancelled, cannot be reactivated or changed to any other status
+      if (appointment.status === "CANCELLED") {
+        res.status(400).json({
+          success: false,
+          error: "Cancelled appointments are permanently locked and cannot be modified or reactivated.",
+          code: "APPOINTMENT_ALREADY_CANCELLED",
+        });
         return;
       }
 
@@ -207,23 +760,46 @@ appointmentRouter.delete(
       if (user.role === UserRole.SUPERADMIN) {
         // Allowed
       } else if (user.role === UserRole.HOSPITAL_ADMIN) {
-        if (!user.organizationId || appointment.organizationId?.toString() !== user.organizationId.toString()) {
-          res.status(403).json({ success: false, error: "Forbidden", code: "FORBIDDEN" });
+        let isAuthorized = false;
+        if (user.organizationId && appointment.organizationId?.toString() === user.organizationId.toString()) {
+          isAuthorized = true;
+        } else if (user.organizationId && appointment.doctorId) {
+          const doc = await Doctor.findOne({ _id: appointment.doctorId, organizationId: user.organizationId });
+          if (doc) isAuthorized = true;
+        }
+        if (!isAuthorized) {
+          res.status(403).json({ success: false, error: "Forbidden: Not an appointment for your hospital organization", code: "FORBIDDEN" });
           return;
         }
-      } else if (user.role === UserRole.HOSPITAL_DOCTOR || user.role === UserRole.INDEPENDENT_DOCTOR) {
+      } else if (user.role === UserRole.ONLY_DOCTOR) {
+        if (!user.doctorProfileId || appointment.doctorId.toString() !== user.doctorProfileId.toString() || appointment.organizationId) {
+          res.status(403).json({ success: false, error: "Forbidden: You can only delete your own appointments", code: "FORBIDDEN" });
+          return;
+        }
+      } else if (user.role === UserRole.HOSPITAL_DOCTOR) {
         if (!user.doctorProfileId || appointment.doctorId.toString() !== user.doctorProfileId.toString()) {
-          res.status(403).json({ success: false, error: "Forbidden", code: "FORBIDDEN" });
+          res.status(403).json({ success: false, error: "Forbidden: You can only delete your own appointments", code: "FORBIDDEN" });
           return;
         }
       }
 
-      appointment.status = "CANCELLED";
-      await appointment.save();
+      await Appointment.findByIdAndDelete(req.params.id);
+
+      await logAuditEvent({
+        userId: user.userId,
+        userEmail: user.email,
+        userRole: user.role,
+        action: "APPOINTMENT_DELETED",
+        entityType: "Appointment",
+        entityId: appointment._id.toString(),
+        organizationId: appointment.organizationId ? appointment.organizationId.toString() : null,
+        doctorId: appointment.doctorId.toString(),
+        details: { patientName: appointment.patientName, patientPhone: appointment.patientPhone },
+      });
 
       res.status(200).json({
         success: true,
-        message: "Appointment marked as cancelled",
+        message: "Appointment permanently deleted from database",
         data: { appointmentId: appointment._id },
       });
     } catch (error) {

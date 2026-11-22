@@ -12,7 +12,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { apiClient } from "@/lib/api-client";
-import { Loader2, ArrowRight, RotateCw, ShieldCheck } from "lucide-react";
+import { Loader2, ArrowRight, RotateCw, ShieldCheck, Info } from "lucide-react";
 import { toast } from "sonner";
 
 interface OtpVerificationDialogProps {
@@ -104,7 +104,7 @@ export function OtpVerificationDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-md">
+      <DialogContent className="sm:max-w-md bg-white/95 backdrop-blur-md border border-blue-100 shadow-xl">
         <DialogHeader className="text-center sm:text-center">
           <div className="h-12 w-12 rounded-full bg-primary/10 text-primary mx-auto flex items-center justify-center mb-2">
             <ShieldCheck className="h-6 w-6" />
@@ -117,7 +117,15 @@ export function OtpVerificationDialog({
           </DialogDescription>
         </DialogHeader>
 
-        <form onSubmit={handleSubmit} className="space-y-4 pt-2">
+        {/* Spam folder note */}
+        <div className="rounded-xl bg-amber-500/10 border border-amber-500/25 px-3 py-2 text-xs text-amber-900 dark:text-amber-200 flex items-center gap-2">
+          <Info className="h-4 w-4 shrink-0 text-amber-600 dark:text-amber-400" />
+          <p className="leading-snug text-left">
+            Can&apos;t find the email in your inbox? Please check your <strong>Spam</strong> or <strong>Junk</strong> folder.
+          </p>
+        </div>
+
+        <form onSubmit={handleSubmit} className="space-y-4 pt-1">
           <div className="space-y-2">
             <Label htmlFor="otp-input" className="text-xs font-medium text-muted-foreground uppercase tracking-wider block text-center">
               6-Digit Verification Code

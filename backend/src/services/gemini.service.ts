@@ -4,10 +4,20 @@ import {
   AiTargetType,
   validateFullContent,
   getSectionSchema,
-  IndependentDoctorGeneratedContent,
+  OnlyDoctorGeneratedContent,
   HospitalGeneratedContent,
   HospitalDoctorGeneratedContent,
 } from "@/validations/ai";
+import { GeminiLoggerService } from "./gemini-logger.service";
+import { GeminiFeature } from "@/models";
+
+export interface GeminiCallOptions {
+  feature?: GeminiFeature;
+  organizationId?: any;
+  doctorId?: any;
+  userId?: any;
+  metadata?: Record<string, any>;
+}
 
 export const CLINICAL_COPYWRITER_SYSTEM_PROMPT = `
 You are an expert healthcare copywriter and clinical communications assistant.
@@ -127,7 +137,7 @@ export function checkFactualityAndSafety(
 /**
  * Predefined response JSON Schemas for Gemini API
  */
-const INDEPENDENT_DOCTOR_JSON_SCHEMA = {
+const ONLY_DOCTOR_JSON_SCHEMA = {
   type: "object",
   properties: {
     tagline: { type: "string", description: "Concise, professional medical tagline (5-150 chars)" },
@@ -139,12 +149,12 @@ const INDEPENDENT_DOCTOR_JSON_SCHEMA = {
       items: {
         type: "object",
         properties: {
-          title: { type: "string" },
-          description: { type: "string" },
+          title: { type: "string", description: "Short medical problem or condition treated, max 35 characters" },
+          description: { type: "string", description: "Concise clinical guidance in 8 to 12 words (under 75 characters) so it fits in website cards without truncation" },
         },
         required: ["title", "description"],
       },
-      description: "List of 1 to 12 relevant clinical services",
+      description: "List of exactly 4 specific medical conditions or health problems the doctor treats in plain, patient-friendly language (e.g. Acne & Pimples, Hair Fall, Skin Allergies, Infections)",
     },
     faqs: {
       type: "array",
@@ -156,7 +166,7 @@ const INDEPENDENT_DOCTOR_JSON_SCHEMA = {
         },
         required: ["question", "answer"],
       },
-      description: "List of 1 to 10 frequently asked questions",
+      description: "List of exactly 3 relevant patient frequently asked questions",
     },
     seoTitle: { type: "string", description: "High-relevance SEO meta title (5-70 chars)" },
     seoDescription: { type: "string", description: "High-relevance SEO meta description (10-160 chars)" },
@@ -270,7 +280,7 @@ export class GeminiService {
 
   constructor() {
     const env = getEnv();
-    this.model = env.GEMINI_MODEL || "gemini-3.8-flash";
+    this.model = env.GEMINI_MODEL || "gemini-3.5-flash-lite";
     if (env.GEMINI_API_KEY) {
       this.client = new GoogleGenAI({ apiKey: env.GEMINI_API_KEY });
     }
@@ -296,33 +306,83 @@ export class GeminiService {
   public async callModelWithRetry(
     prompt: string,
     responseJsonSchema: Record<string, any>,
-    maxRetries = 2
+    maxRetries = 2,
+    options?: GeminiCallOptions
   ): Promise<string> {
     const client = this.getClient();
     let lastError: any = null;
 
+    const candidateModels = Array.from(
+      new Set([
+        this.model,
+        "gemini-3.5-flash-lite",
+        "gemini-3.1-flash-lite",
+        "gemini-3.5-flash",
+      ])
+    );
+
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
+      const activeModel = candidateModels[attempt % candidateModels.length] || this.model;
+      const startTime = Date.now();
       try {
+        const config: any = {
+          systemInstruction: CLINICAL_COPYWRITER_SYSTEM_PROMPT,
+          responseMimeType: "application/json",
+          responseJsonSchema,
+        };
+        if (!activeModel.toLowerCase().includes("lite")) {
+          config.thinkingConfig = {
+            thinkingLevel: "HIGH" as any,
+          };
+        }
+
         const response = await client.models.generateContent({
-          model: this.model,
+          model: activeModel,
           contents: prompt,
-          config: {
-            systemInstruction: CLINICAL_COPYWRITER_SYSTEM_PROMPT,
-            responseMimeType: "application/json",
-            responseJsonSchema,
-            thinkingConfig: {
-              thinkingLevel: "HIGH" as any,
-            },
-          },
+          config,
         });
 
+        const latencyMs = Date.now() - startTime;
         const text = response.text;
         if (!text) {
           throw new Error("Empty response received from Gemini model");
         }
+
+        const usage = (response as any)?.usageMetadata;
+        GeminiLoggerService.logCall({
+          feature: options?.feature || "AI_CONTENT_GEN",
+          model: activeModel,
+          status: "SUCCESS",
+          statusCode: 200,
+          latencyMs,
+          promptTokens: usage?.promptTokenCount || 0,
+          candidatesTokens: usage?.candidatesTokenCount || 0,
+          totalTokens: usage?.totalTokenCount || 0,
+          organizationId: options?.organizationId,
+          doctorId: options?.doctorId,
+          userId: options?.userId,
+          metadata: options?.metadata,
+        });
+
         return text;
       } catch (err: any) {
         lastError = err;
+        const latencyMs = Date.now() - startTime;
+        const parsed = GeminiLoggerService.parseError(err);
+        GeminiLoggerService.logCall({
+          feature: options?.feature || "AI_CONTENT_GEN",
+          model: activeModel,
+          status: "FAILED",
+          statusCode: parsed.statusCode,
+          latencyMs,
+          errorCode: parsed.errorCode,
+          errorMessage: parsed.errorMessage,
+          organizationId: options?.organizationId,
+          doctorId: options?.doctorId,
+          userId: options?.userId,
+          metadata: options?.metadata,
+        });
+
         const status = err?.status || err?.statusCode;
         const msg = String(err?.message || "");
         const isTransient =
@@ -347,21 +407,26 @@ export class GeminiService {
   }
 
   /**
-   * 1. Generate full content for Independent Doctor
+   * 1. Generate full content for Only Doctor
    */
-  public async generateIndependentDoctor(
-    doctorData: Record<string, any>
-  ): Promise<IndependentDoctorGeneratedContent> {
+  public async generateOnlyDoctor(
+    doctorData: Record<string, any>,
+    options?: GeminiCallOptions
+  ): Promise<OnlyDoctorGeneratedContent> {
     const sourceBlock = formatSourceDataBlock(doctorData);
     const userPrompt = [
       sourceBlock,
       "",
-      "TASK: Generate comprehensive, high-quality, professional website text for this independent doctor.",
-      "Include: tagline, about, shortIntro, clinicDescription, services, faqs, seoTitle, seoDescription.",
+      "TASK: Generate comprehensive, high-quality, professional website text for this doctor.",
+      "Include: tagline, about, shortIntro, clinicDescription, services (generate exactly 4 real patient medical conditions or health problems the doctor treats in simple everyday language. For each service, provide a short title and a concise 1-sentence description of only 8-12 words so it fits neatly in card boxes without overflowing or clipping), faqs (exactly 3 questions and answers), seoTitle, seoDescription.",
       "Ensure all output is truthful and directly aligned with the provided clinical facts.",
     ].join("\n");
 
-    const rawJson = await this.callModelWithRetry(userPrompt, INDEPENDENT_DOCTOR_JSON_SCHEMA);
+    const rawJson = await this.callModelWithRetry(userPrompt, ONLY_DOCTOR_JSON_SCHEMA, 2, {
+      ...options,
+      doctorId: options?.doctorId || doctorData._id || doctorData.id,
+      feature: "AI_CONTENT_GEN",
+    });
     let parsed: any;
     try {
       parsed = JSON.parse(rawJson);
@@ -376,7 +441,7 @@ export class GeminiService {
     }
 
     // Zod schema validation
-    const validated = validateFullContent(AiTargetType.INDEPENDENT_DOCTOR, parsed);
+    const validated = validateFullContent(AiTargetType.ONLY_DOCTOR, parsed);
     if (!validated.success) {
       throw new Error(`AI generated content failed schema validation: ${validated.error}`);
     }
@@ -388,7 +453,8 @@ export class GeminiService {
    * 2. Generate full content for Hospital / Clinic
    */
   public async generateHospital(
-    hospitalData: Record<string, any>
+    hospitalData: Record<string, any>,
+    options?: GeminiCallOptions
   ): Promise<HospitalGeneratedContent> {
     const sourceBlock = formatSourceDataBlock(hospitalData);
     const userPrompt = [
@@ -399,7 +465,11 @@ export class GeminiService {
       "Ensure all output is truthful and directly reflects the provided organization details.",
     ].join("\n");
 
-    const rawJson = await this.callModelWithRetry(userPrompt, HOSPITAL_JSON_SCHEMA);
+    const rawJson = await this.callModelWithRetry(userPrompt, HOSPITAL_JSON_SCHEMA, 2, {
+      ...options,
+      organizationId: options?.organizationId || hospitalData._id || hospitalData.id,
+      feature: "AI_CONTENT_GEN",
+    });
     let parsed: any;
     try {
       parsed = JSON.parse(rawJson);
@@ -421,11 +491,66 @@ export class GeminiService {
   }
 
   /**
+   * 2b. Fast targeted generation for hospital About section
+   */
+  public async generateHospitalAbout(
+    hospitalData: {
+      hospitalName: string;
+      type?: string;
+      specialties?: string[];
+      city?: string;
+    },
+    options?: GeminiCallOptions
+  ): Promise<string> {
+    const specs =
+      hospitalData.specialties && hospitalData.specialties.length > 0
+        ? hospitalData.specialties.join(", ")
+        : "general medicine, diagnostics, and outpatient healthcare";
+
+    const prompt = [
+      formatSourceDataBlock({
+        hospitalName: hospitalData.hospitalName,
+        facilityType: hospitalData.type === "CLINIC" ? "Outpatient Clinic" : "Multi-Specialty Hospital",
+        specialtiesOffered: specs,
+        city: hospitalData.city || "",
+      }),
+      "",
+      "TASK: Generate a professional, comprehensive, and reassuring 'about' paragraph for this healthcare facility's website (around 80-120 words).",
+      "Highlight its clinical excellence across the specified medical departments, experienced healthcare team, modern infrastructure, and patient-first care.",
+      "CRITICAL: Output JSON with a single key 'about'.",
+    ].join("\n");
+
+    const rawJson = await this.callModelWithRetry(
+      prompt,
+      {
+        type: "OBJECT",
+        properties: {
+          about: { type: "STRING" },
+        },
+        required: ["about"],
+      },
+      1,
+      {
+        ...options,
+        feature: "AI_CONTENT_GEN",
+      }
+    );
+
+    try {
+      const parsed = JSON.parse(rawJson);
+      return parsed.about?.trim() || "";
+    } catch {
+      return "";
+    }
+  }
+
+  /**
    * 3. Generate full content for Hospital Doctor
    */
   public async generateHospitalDoctor(
     doctorData: Record<string, any>,
-    hospitalData: Record<string, any>
+    hospitalData: Record<string, any>,
+    options?: GeminiCallOptions
   ): Promise<HospitalDoctorGeneratedContent> {
     const combinedData = {
       ...doctorData,
@@ -441,7 +566,12 @@ export class GeminiService {
       "Ensure all output highlights the doctor's qualifications within the hospital context.",
     ].join("\n");
 
-    const rawJson = await this.callModelWithRetry(userPrompt, HOSPITAL_DOCTOR_JSON_SCHEMA);
+    const rawJson = await this.callModelWithRetry(userPrompt, HOSPITAL_DOCTOR_JSON_SCHEMA, 2, {
+      ...options,
+      organizationId: options?.organizationId || hospitalData._id || hospitalData.id,
+      doctorId: options?.doctorId || doctorData._id || doctorData.id,
+      feature: "AI_CONTENT_GEN",
+    });
     let parsed: any;
     try {
       parsed = JSON.parse(rawJson);
@@ -469,7 +599,8 @@ export class GeminiService {
     targetType: string,
     section: string,
     sourceData: Record<string, any>,
-    existingDraft: Record<string, any>
+    existingDraft: Record<string, any>,
+    options?: GeminiCallOptions
   ): Promise<any> {
     const sectionSchema = getSectionSchema(targetType, section);
     if (!sectionSchema) {
@@ -477,7 +608,7 @@ export class GeminiService {
     }
 
     // Determine target JSON schema property
-    let parentSchema: any = INDEPENDENT_DOCTOR_JSON_SCHEMA;
+    let parentSchema: any = ONLY_DOCTOR_JSON_SCHEMA;
     if (targetType === AiTargetType.HOSPITAL) {
       parentSchema = HOSPITAL_JSON_SCHEMA;
     } else if (targetType === AiTargetType.HOSPITAL_DOCTOR) {
@@ -508,7 +639,10 @@ export class GeminiService {
       `Return JSON with key "${section}".`,
     ].join("\n");
 
-    const rawJson = await this.callModelWithRetry(userPrompt, wrapperJsonSchema);
+    const rawJson = await this.callModelWithRetry(userPrompt, wrapperJsonSchema, 2, {
+      feature: "AI_CONTENT_GEN",
+      ...options,
+    });
     let parsed: any;
     try {
       parsed = JSON.parse(rawJson);
@@ -535,6 +669,128 @@ export class GeminiService {
     }
 
     return zodResult.data;
+  }
+
+  /**
+   * Generates realistic, contextual patient testimonials using AI with guaranteed fallback
+   */
+  public async generatePatientTestimonials(params: {
+    type: "DOCTOR" | "HOSPITAL";
+    doctorName?: string;
+    specialization?: string;
+    degree?: string;
+    clinicName?: string;
+    hospitalName?: string;
+    city?: string;
+    options?: GeminiCallOptions;
+  }): Promise<Array<{ patientName: string; rating: number; comment: string; tag: string }>> {
+    const isDoctor = params.type === "DOCTOR";
+    const docName = params.doctorName || "Doctor";
+    const spec = params.specialization || "Healthcare Specialist";
+    const hospName = params.hospitalName || "Hospital & Medical Centre";
+    const city = params.city || "Local";
+
+    const TESTIMONIALS_SCHEMA = {
+      type: "object",
+      properties: {
+        testimonials: {
+          type: "array",
+          items: {
+            type: "object",
+            properties: {
+              patientName: { type: "string", description: "Realistic patient full name" },
+              rating: { type: "number", description: "Star rating between 4 and 5" },
+              comment: { type: "string", description: "Warm, authentic 2-3 sentence patient review" },
+              tag: { type: "string", description: "Treatment, department, or patient condition" },
+            },
+            required: ["patientName", "rating", "comment", "tag"],
+          },
+          description: "List of 3 to 4 patient testimonials",
+        },
+      },
+      required: ["testimonials"],
+    };
+
+    const promptText = isDoctor
+      ? `Generate 3 to 4 realistic, heartfelt patient testimonials for Dr. ${docName} (${params.degree || "MD"}), specialized in ${spec} at ${params.clinicName || "Private Clinic"}, ${city}.
+Each review should highlight the doctor's clinical attentiveness, empathy, diagnostic clarity, and treatment recovery without making unrealistic miracle cure claims.`
+      : `Generate 3 to 4 realistic, authentic patient testimonials for ${hospName}, a multi-speciality hospital in ${city}.
+Each review should highlight the hospital's prompt emergency response, compassionate nursing staff, hygienic patient rooms, and advanced medical infrastructure.`;
+
+    try {
+      const rawJson = await this.callModelWithRetry(promptText, TESTIMONIALS_SCHEMA, 2, {
+        feature: "AI_CONTENT_GEN",
+        ...params.options,
+      });
+      const parsed = JSON.parse(rawJson);
+      if (Array.isArray(parsed?.testimonials) && parsed.testimonials.length > 0) {
+        return parsed.testimonials.map((t: any) => ({
+          patientName: String(t.patientName || "Verified Patient").trim(),
+          rating: Math.min(5, Math.max(4, Number(t.rating) || 5)),
+          comment: String(t.comment || "").trim(),
+          tag: String(t.tag || (isDoctor ? `${spec} Care` : "Hospital Care")).trim(),
+        }));
+      }
+    } catch {
+      // Graceful fallback if Gemini quota is exceeded or offline
+    }
+
+    // High quality contextual fallback
+    if (isDoctor) {
+      return [
+        {
+          patientName: "Rajesh Mehta",
+          rating: 5,
+          comment: `Dr. ${docName} listened patiently to all my symptoms and explained the diagnosis with great clarity. His guidance and treatment plan helped me recover smoothly.`,
+          tag: `${spec} Patient`,
+        },
+        {
+          patientName: "Priya Sharma",
+          rating: 5,
+          comment: `I was anxious before my consultation, but Dr. ${docName}'s reassuring bedside manner and thorough medical attention made all the difference. Highly recommended specialist.`,
+          tag: "Consultation & Care",
+        },
+        {
+          patientName: "Amit Patel",
+          rating: 5,
+          comment: `Prompt diagnosis and compassionate care throughout the visit. Dr. ${docName} is extremely knowledgeable and genuinely cares for patient well-being.`,
+          tag: "Patient Recovery",
+        },
+        {
+          patientName: "Sunita Verma",
+          rating: 5,
+          comment: `One of the finest doctors I have visited. The clinic staff was polite and Dr. ${docName} took ample time to address all my medical questions without rushing.`,
+          tag: "Follow-up Visit",
+        },
+      ];
+    }
+
+    return [
+      {
+        patientName: "Ramesh Joshi",
+        rating: 5,
+        comment: `Our experience at ${hospName} was outstanding. The nursing team was attentive, rooms were clean, and doctors were available 24/7 during our medical stay.`,
+        tag: "Inpatient Care",
+      },
+      {
+        patientName: "Ananya Deshmukh",
+        rating: 5,
+        comment: `Immediate attention and swift care by the emergency department when we needed it the most. The medical infrastructure and team coordination are truly commendable.`,
+        tag: "Emergency Department",
+      },
+      {
+        patientName: "Vikram Malhotra",
+        rating: 5,
+        comment: `Very well-maintained healthcare facility with helpful reception and minimal wait times. Diagnostic reports and consultations were handled with utmost professionalism.`,
+        tag: "Outpatient Care",
+      },
+      {
+        patientName: "Sneha Kulkarni",
+        rating: 5,
+        comment: `The staff and specialists at ${hospName} provided compassionate, top-quality treatment for my family member. Very grateful for their dedicated medical service.`,
+        tag: "Multispeciality Care",
+      },
+    ];
   }
 }
 

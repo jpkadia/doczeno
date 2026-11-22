@@ -1,8 +1,8 @@
 import { Metadata } from "next";
-import { notFound } from "next/navigation";
+import { notFound, redirect } from "next/navigation";
+import { cookies } from "next/headers";
 import { getEffectiveWebsite } from "@/lib/website";
 import { AdminClient } from "./admin-client";
-import { EffectiveWebsiteData } from "@/types";
 
 interface PageProps {
   params: Promise<{
@@ -25,38 +25,17 @@ export default async function AdminPage({ params }: PageProps) {
     notFound();
   }
 
+  // Pre-check authentication on server: unauthenticated users redirect immediately to login
+  const cookieStore = await cookies();
+  const sessionCookie = cookieStore.get("doczeno_session")?.value;
+  if (!sessionCookie) {
+    redirect(`/${slug}/admin/login`);
+  }
+
   const website = await getEffectiveWebsite(slug);
 
   if (!website) {
-    // Provide a resilient fallback for local mock / test fixtures if backend is not seeded
-    const fallbackWebsite: EffectiveWebsiteData = {
-      websiteType: slug.startsWith("dr-") ? "INDEPENDENT_DOCTOR" : "HOSPITAL_CLINIC",
-      slug,
-      organizationName: slug.startsWith("dr-") ? "Dr. Parth Clinic" : "Apollo Hospitals Ahmedabad",
-      organizationType: "HOSPITAL",
-      doctorName: slug.startsWith("dr-") ? "Parth Kadiya" : undefined,
-      gender: "Male",
-      degree: "MBBS, MS",
-      specialization: "General Surgery",
-      yearsOfExperience: 12,
-      email: `${slug}@doczeno.com`,
-      phone: "+91 9876543210",
-      whatsApp: "+91 9876543210",
-      address: {
-        street: "Bhat, GIDC",
-        city: "Ahmedabad",
-        state: "Gujarat",
-        pincode: "382428",
-        country: "India",
-      },
-      selectedTheme: "clinical-editorial",
-      browserTabTitle: `${slug} — Admin Console`,
-      galleryPhotos: [],
-      isHospitalChild: false,
-      departments: ["Cardiology", "Neurology", "General Surgery"],
-    };
-
-    return <AdminClient initialWebsite={fallbackWebsite} slug={slug} />;
+    notFound();
   }
 
   return <AdminClient initialWebsite={website} slug={slug} />;

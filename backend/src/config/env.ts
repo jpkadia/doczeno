@@ -17,7 +17,7 @@ const envSchema = z.object({
     .string()
     .min(16, "AUTH_SECRET must be at least 16 characters")
     .default("doczeno-secure-default-auth-secret-key-32chars"),
-  FRONTEND_URL: z.string().url().default("http://localhost:3000"),
+  FRONTEND_URL: z.string().default("http://localhost:3000"),
 
   // Cloudinary credentials
   CLOUDINARY_URL: z.string().optional(),
@@ -38,7 +38,7 @@ const envSchema = z.object({
 
   // Gemini AI configuration
   GEMINI_API_KEY: z.string().optional(),
-  GEMINI_MODEL: z.string().default("gemini-3.8-flash"),
+  GEMINI_MODEL: z.string().default("gemini-3.5-flash-lite"),
 
   // Initial Platform Superadmin
   SUPERADMIN_EMAIL: z.string().email().optional(),

@@ -8,10 +8,31 @@ import {
 } from "@/models";
 
 export interface TenantRetrievalScope {
-  websiteType: "INDEPENDENT_DOCTOR" | "HOSPITAL" | "HOSPITAL_DOCTOR" | "HOSPITAL_CLINIC";
+  websiteType: "ONLY_DOCTOR" | "HOSPITAL" | "HOSPITAL_DOCTOR" | "HOSPITAL_CLINIC";
   organizationId?: string | mongoose.Types.ObjectId | null;
   doctorId?: string | mongoose.Types.ObjectId | null;
   websiteId?: string | mongoose.Types.ObjectId | null;
+}
+
+export function formatConsultationHours(raw: string | undefined): string {
+  if (!raw) return "Monday - Saturday: 09:00 AM - 05:00 PM";
+  try {
+    const parsed = JSON.parse(raw);
+    if (Array.isArray(parsed)) {
+      return parsed
+        .map((item: any) => {
+          if (item.isClosed) {
+            return `${item.day}: Closed`;
+          }
+          const slots = item.slots?.map((s: any) => `${s.startTime} to ${s.endTime}`).join(", ") || "Open";
+          return `${item.day}: ${slots}`;
+        })
+        .join(" | ");
+    }
+  } catch {
+    // Already formatted text
+  }
+  return raw;
 }
 
 export class RAGKnowledgeService {
@@ -21,7 +42,7 @@ export class RAGKnowledgeService {
   public getTenantFilter(scope: TenantRetrievalScope): FilterQuery<IChatbotKnowledge> {
     const { websiteType, organizationId, doctorId } = scope;
 
-    if (websiteType === "INDEPENDENT_DOCTOR") {
+    if (websiteType === "ONLY_DOCTOR") {
       if (!doctorId) {
         // Safe empty condition if doctorId missing
         return { doctorId: new mongoose.Types.ObjectId(), isActive: true, visibility: "PUBLIC" };
@@ -128,9 +149,9 @@ export class RAGKnowledgeService {
   }
 
   /**
-   * Ingests and synchronizes knowledge chunks for an Independent Doctor
+   * Ingests and synchronizes knowledge chunks for Only Doctor
    */
-  public async syncIndependentDoctorKnowledge(
+  public async syncOnlyDoctorKnowledge(
     doctorId: string | mongoose.Types.ObjectId,
     websiteId?: string | mongoose.Types.ObjectId | null
   ): Promise<number> {
@@ -178,10 +199,10 @@ export class RAGKnowledgeService {
         websiteId: webObjectId,
         sourceType: "PAGE_CONTENT",
         visibility: "PUBLIC",
-        title: `${doctor.clinicName || "Practice Clinic"} — Location & Contact`,
+        title: `${doctor.clinicName || "Clinic"} — Location & Contact`,
         category: "Location",
         chunkText: [
-          `Clinic Name: ${doctor.clinicName || "Independent Practice"}`,
+          `Clinic Name: ${doctor.clinicName || "Doctor Clinic"}`,
           doctor.address?.street ? `Street: ${doctor.address.street}` : "",
           `City: ${doctor.address?.city || "Local City"}`,
           `State: ${doctor.address?.state || ""}`,
@@ -197,6 +218,7 @@ export class RAGKnowledgeService {
     }
 
     // 3. Consultation Hours & Appointment Booking
+    const formattedHours = formatConsultationHours(doctor.consultationHours);
     chunksToInsert.push({
       doctorId: docObjectId,
       websiteId: webObjectId,
@@ -205,7 +227,7 @@ export class RAGKnowledgeService {
       title: "Consultation Hours & Appointment Policy",
       category: "Appointments",
       chunkText: [
-        `Consultation Hours: ${doctor.consultationHours || "Monday - Saturday: 09:00 AM - 05:00 PM"}`,
+        `Consultation Hours: ${formattedHours}`,
         `Weekly Off Days: ${doctor.weeklyOff || "Sunday"}`,
         `Appointment Required: ${doctor.appointmentRequired ? "Yes, prior appointment is required before visiting." : "Walk-ins accepted, appointment recommended."}`,
       ].join("\n"),
@@ -213,7 +235,29 @@ export class RAGKnowledgeService {
       isActive: true,
     });
 
-    // 4. Approved Services and FAQs from Website if present
+    // 4. Clinical Scope & Specialization Guidance
+    const isCardio = doctor.specialization?.toLowerCase().includes("cardio");
+    chunksToInsert.push({
+      doctorId: docObjectId,
+      websiteId: webObjectId,
+      sourceType: "SERVICE",
+      visibility: "PUBLIC",
+      title: `${doctor.specialization || "Clinical"} Care & Specialization Scope`,
+      category: "Services",
+      chunkText: [
+        `Medical Specialization: ${doctor.specialization}`,
+        isCardio
+          ? `Services Offered: Cardiology consultation, heart health assessment, ECG interpretation, hypertension (blood pressure) management, chest pain & discomfort evaluation, cardiovascular disease prevention and management.`
+          : `Services Offered: Clinical consultations and healthcare treatments for ${doctor.specialization}.`,
+        isCardio
+          ? `Scope of Practice: Dr. ${doctor.doctorName} is a Cardiologist (Heart specialist / Hriday Rog). He treats heart conditions, chest discomfort, palpitations, and high BP. He does NOT treat unrelated general ailments like seasonal fever (bukhar), viral flu, cough/cold, stomach infections, dermatology, or dental issues. Patients with general fever or unrelated symptoms should consult a General Physician (MD Medicine).`
+          : `Scope of Practice: Dr. ${doctor.doctorName} specializes specifically in ${doctor.specialization}. For other medical conditions, patients should consult the respective specialists.`,
+      ].join("\n"),
+      version: 1,
+      isActive: true,
+    });
+
+    // 5. Approved Services and FAQs from Website if present
     if (webObjectId) {
       const website = await Website.findById(webObjectId);
       if (website?.seoMetadata?.description) {
@@ -222,7 +266,7 @@ export class RAGKnowledgeService {
           websiteId: webObjectId,
           sourceType: "PAGE_CONTENT",
           visibility: "PUBLIC",
-          title: "Practice Focus & SEO Summary",
+          title: "Clinical Focus & SEO Summary",
           category: "Overview",
           chunkText: website.seoMetadata.description,
           version: 1,

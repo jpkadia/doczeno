@@ -13,8 +13,8 @@
     --popover: 0 0% 100%;
     --popover-foreground: 222 47% 11%;
 
-    /* Healthcare Professional Teal / Deep Ocean */
-    --primary: 187 92% 33%;
+    /* Doczeno Sapphire Blue Medical Theme */
+    --primary: 210 78% 46%;
     --primary-foreground: 0 0% 100%;
 
     --secondary: 210 40% 96.1%;
@@ -23,8 +23,8 @@
     --muted: 210 40% 96.1%;
     --muted-foreground: 215.4 16.3% 46.9%;
 
-    --accent: 187 75% 95%;
-    --accent-foreground: 187 92% 28%;
+    --accent: 210 90% 96%;
+    --accent-foreground: 210 78% 38%;
 
     --destructive: 0 84.2% 60.2%;
     --destructive-foreground: 210 40% 98%;
@@ -37,7 +37,7 @@
 
     --border: 214.3 31.8% 91.4%;
     --input: 214.3 31.8% 91.4%;
-    --ring: 187 92% 33%;
+    --ring: 210 78% 46%;
 
     --radius: 0.5rem;
   }
@@ -52,8 +52,8 @@
     --popover: 222 47% 14%;
     --popover-foreground: 210 40% 98%;
 
-    --primary: 187 85% 45%;
-    --primary-foreground: 222 47% 11%;
+    --primary: 210 85% 55%;
+    --primary-foreground: 0 0% 100%;
 
     --secondary: 217.2 32.6% 17.5%;
     --secondary-foreground: 210 40% 98%;
@@ -61,15 +61,15 @@
     --muted: 217.2 32.6% 17.5%;
     --muted-foreground: 215 20.2% 65.1%;
 
-    --accent: 187 85% 20%;
-    --accent-foreground: 187 85% 75%;
+    --accent: 210 85% 20%;
+    --accent-foreground: 210 85% 75%;
 
     --destructive: 0 62.8% 30.6%;
     --destructive-foreground: 210 40% 98%;
 
     --border: 217.2 32.6% 22%;
     --input: 217.2 32.6% 22%;
-    --ring: 187 85% 45%;
+    --ring: 210 85% 55%;
   }
 }
 
@@ -77,8 +77,161 @@
   * {
     @apply border-border;
   }
+  html {
+    scroll-behavior: smooth;
+  }
   body {
     @apply bg-background text-foreground antialiased;
     font-feature-settings: "rlig" 1, "calt" 1;
   }
+
+  /* Custom stylish theme-aware vertical scrollbar ONLY for public healthcare websites */
+  html.public-website {
+    --scrollbar-thumb: var(--theme-primary, transparent);
+    --scrollbar-thumb-hover: var(--theme-primary-hover, transparent);
+    --scrollbar-track: transparent;
+    scrollbar-width: thin;
+    scrollbar-color: var(--scrollbar-thumb) var(--scrollbar-track);
+  }
+
+  html.public-website::-webkit-scrollbar,
+  .website-theme-scrollbar::-webkit-scrollbar {
+    width: 9px;
+    height: 9px;
+  }
+
+  html.public-website::-webkit-scrollbar-track,
+  .website-theme-scrollbar::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  html.public-website::-webkit-scrollbar-thumb,
+  .website-theme-scrollbar::-webkit-scrollbar-thumb {
+    background-color: var(--scrollbar-thumb, var(--theme-primary, transparent));
+    border-radius: 9999px;
+    border: 2px solid transparent;
+    background-clip: content-box;
+    transition: background-color 0.2s ease;
+  }
+
+  html.public-website::-webkit-scrollbar-thumb:hover,
+  .website-theme-scrollbar::-webkit-scrollbar-thumb:hover {
+    background-color: var(--scrollbar-thumb-hover, var(--theme-primary-hover, transparent));
+  }
+
+  .dark html.public-website::-webkit-scrollbar-thumb,
+  html.dark.public-website::-webkit-scrollbar-thumb,
+  .dark .website-theme-scrollbar::-webkit-scrollbar-thumb {
+    background-color: var(--scrollbar-thumb, var(--theme-primary-light, #60a5fa));
+  }
+
+  .dark html.public-website::-webkit-scrollbar-thumb:hover,
+  html.dark.public-website::-webkit-scrollbar-thumb:hover,
+  .dark .website-theme-scrollbar::-webkit-scrollbar-thumb:hover {
+    background-color: var(--scrollbar-thumb-hover, var(--theme-primary, #1a76d1));
+  }
+
+  /* Remove spin buttons on number/digit inputs across all modern browsers */
+  input[type="number"]::-webkit-outer-spin-button,
+  input[type="number"]::-webkit-inner-spin-button {
+    -webkit-appearance: none;
+    margin: 0;
+  }
+  input[type="number"] {
+    -moz-appearance: textfield;
+    appearance: textfield;
+  }
+}
+
+@keyframes drawCircle {
+  0% {
+    stroke-dashoffset: 905;
+  }
+  50% {
+    stroke-dashoffset: 0;
+  }
+  100% {
+    stroke-dashoffset: -905;
+  }
+}
+
+@keyframes borderPulse {
+  0%, 100% {
+    filter: drop-shadow(0 0 10px rgba(0, 198, 255, 0.4));
+  }
+  50% {
+    filter: drop-shadow(0 0 25px rgba(0, 114, 255, 0.7));
+  }
+}
+
+@keyframes growWidth {
+  0%, 100% {
+    width: 0;
+    opacity: 0.2;
+  }
+  50% {
+    width: 50%;
+    opacity: 1;
+  }
+}
+
+@keyframes growHeight {
+  0%, 100% {
+    height: 0;
+    opacity: 0.2;
+  }
+  50% {
+    height: 35%;
+    opacity: 1;
+  }
+}
+
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.animate-fadeIn {
+  animation: fadeIn 0.35s ease-out forwards;
+}
+
+@keyframes aiButtonBreathing {
+  0%, 100% {
+    transform: scale(1);
+    box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.12), 0 4px 6px -4px rgba(0, 0, 0, 0.08);
+  }
+  50% {
+    transform: scale(1.08);
+    box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.18), 0 8px 10px -6px rgba(0, 0, 0, 0.1);
+  }
+}
+
+.animate-ai-breathe {
+  animation: aiButtonBreathing 2.4s ease-in-out infinite;
+  will-change: transform;
+}
+
+.animate-ai-breathe:hover {
+  animation-play-state: paused;
+  transform: scale(1.12);
+}
+
+@keyframes borderBeamRotate {
+  0% {
+    transform: rotate(0deg);
+  }
+  100% {
+    transform: rotate(360deg);
+  }
+}
+
+.animate-border-beam {
+  animation: borderBeamRotate 4s linear infinite;
+  will-change: transform;
 }

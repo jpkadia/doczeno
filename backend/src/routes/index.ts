@@ -11,6 +11,7 @@ import { onboardingRouter } from "./onboarding.routes";
 import { superadminRouter } from "./superadmin.routes";
 import { aiRouter } from "./ai.routes";
 import { chatbotRouter } from "./chatbot.routes";
+import { reviewRouter } from "./review.routes";
 
 export const apiV1Router = Router();
 
@@ -26,3 +27,4 @@ apiV1Router.use("/onboarding", onboardingRouter);
 apiV1Router.use("/superadmin", superadminRouter);
 apiV1Router.use("/ai", aiRouter);
 apiV1Router.use("/chatbot", chatbotRouter);
+apiV1Router.use("/reviews", reviewRouter);

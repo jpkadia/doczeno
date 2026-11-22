@@ -1,6 +1,5 @@
 import { z } from "zod";
 import {
-  MEDICAL_SPECIALIZATIONS,
   INDIA_STATES_AND_CITIES,
   DAYS_OF_WEEK,
   RESERVED_SLUGS,
@@ -69,12 +68,63 @@ export const consultationHoursSchema = z
 
 export const phoneSchema = z
   .string()
-  .min(10, "Phone number must have at least 10 digits")
-  .regex(/^\+?[0-9\s-]{10,15}$/, "Invalid phone or WhatsApp number format");
+  .min(7, "Phone number must have at least 7 digits")
+  .regex(/^\+?[0-9\s-]{7,20}$/, "Invalid phone or WhatsApp number format");
 
-export const pincodeSchema = z
-  .string()
-  .regex(/^[1-9][0-9]{5}$/, "Pincode must be a valid 6-digit Indian postal code");
+export function validatePostalCodeForCountry(
+  countryNameOrCode: string,
+  pincode: string
+): { isValid: boolean; error?: string } {
+  const norm = (countryNameOrCode || "India").trim().toLowerCase();
+  const trimmed = (pincode || "").trim();
+
+  if (!trimmed) {
+    return { isValid: false, error: "Postal/PIN code is required" };
+  }
+
+  if (norm === "india" || norm === "in") {
+    if (!/^[1-9][0-9]{5}$/.test(trimmed)) {
+      return { isValid: false, error: "Must be a valid 6-digit Indian PIN code" };
+    }
+    return { isValid: true };
+  }
+
+  if (norm === "united states" || norm === "us" || norm === "usa") {
+    if (!/^\d{5}(-\d{4})?$/.test(trimmed)) {
+      return { isValid: false, error: "Must be a valid 5-digit US ZIP code" };
+    }
+    return { isValid: true };
+  }
+
+  if (norm === "united kingdom" || norm === "gb" || norm === "uk") {
+    if (!/^[A-Za-z]{1,2}\d[A-Za-z\d]? ?\d[A-Za-z]{2}$/.test(trimmed)) {
+      return { isValid: false, error: "Must be a valid UK postcode" };
+    }
+    return { isValid: true };
+  }
+
+  if (norm === "canada" || norm === "ca") {
+    if (!/^[A-Za-z]\d[A-Za-z] ?\d[A-Za-z]\d$/.test(trimmed)) {
+      return { isValid: false, error: "Must be a valid Canadian postal code" };
+    }
+    return { isValid: true };
+  }
+
+  if (norm === "australia" || norm === "au") {
+    if (!/^\d{4}$/.test(trimmed)) {
+      return { isValid: false, error: "Must be a valid 4-digit Australian postcode" };
+    }
+    return { isValid: true };
+  }
+
+  if (!/^[A-Za-z0-9\s-]{3,10}$/.test(trimmed)) {
+    return { isValid: false, error: "Must be a valid postal code (3-10 characters)" };
+  }
+
+  return { isValid: true };
+}
+
+export const pincodeSchema = z.string().min(2, "Postal/PIN code is required");
 
 export const slugSchema = z
   .string()
@@ -98,13 +148,14 @@ export const mediaAssetSchema = z.object({
 export const addressSchema = z
   .object({
     street: z.string().optional(),
+    country: z.string().default("India"),
     state: z.string().min(1, "State is required"),
     city: z.string().min(1, "City is required"),
     pincode: pincodeSchema,
-    country: z.string().default("India"),
   })
   .refine(
     (addr) => {
+      if (addr.country && addr.country !== "India") return true;
       const cities = INDIA_STATES_AND_CITIES[addr.state];
       if (!cities) return false;
       return cities.includes(addr.city);
@@ -113,6 +164,15 @@ export const addressSchema = z
       message: "Selected city does not belong to the selected state",
       path: ["city"],
     }
+  )
+  .refine(
+    (addr) => {
+      return validatePostalCodeForCountry(addr.country || "India", addr.pincode).isValid;
+    },
+    (addr) => ({
+      message: validatePostalCodeForCountry(addr.country || "India", addr.pincode).error || "Invalid postal code",
+      path: ["pincode"],
+    })
   );
 
 export const securePasswordSchema = z
@@ -122,15 +182,15 @@ export const securePasswordSchema = z
   .regex(/[0-9]/, "Password must contain at least 1 number")
   .regex(/[^A-Za-z0-9]/, "Password must contain at least 1 special symbol (e.g. @, #, $, !)");
 
-export const independentDoctorOnboardingSchema = z
+export const onlyDoctorOnboardingSchema = z
   .object({
     doctorName: z
       .string()
       .min(2, "Doctor name must be at least 2 characters")
       .transform(normalizeDoctorName),
-    gender: z.enum(["MALE", "FEMALE", "OTHER"]),
+    gender: z.enum(["MALE", "FEMALE"]),
     degree: z.string().min(2, "Medical degree is required (e.g. MBBS, MD)"),
-    specialization: z.enum(MEDICAL_SPECIALIZATIONS),
+    specialization: z.string().min(2, "Specialization is required"),
     yearsOfExperience: z
       .number()
       .int("Years of experience must be an integer")
@@ -141,9 +201,11 @@ export const independentDoctorOnboardingSchema = z
     consultationHours: consultationHoursSchema,
     weeklyOff: z.array(z.enum(DAYS_OF_WEEK)).min(0),
     appointmentRequired: z.boolean().default(true),
+    newCaseFee: z.number().min(0, "Fee cannot be negative").optional(),
+    oldCaseFee: z.number().min(0, "Fee cannot be negative").optional(),
     clinicName: z.string().min(2, "Clinic or Hospital name is required"),
     address: addressSchema,
-    selectedTheme: z.enum(["clinical-editorial", "modern-minimal", "vital-compact"]),
+    selectedTheme: z.string().default("hospital-classic"),
     doctorPhoto: mediaAssetSchema.optional(),
     clinicLogo: mediaAssetSchema.optional(),
     clinicPhotos: z.array(mediaAssetSchema).max(6, "Maximum 6 clinic gallery photos allowed").default([]),
@@ -157,8 +219,12 @@ export const independentDoctorOnboardingSchema = z
     message: "Doctor profile photo is required before publishing",
     path: ["doctorPhoto"],
   })
-  .refine((data) => data.isDraft || !data.password || data.password === data.confirmPassword, {
-    message: "Confirm password does not match",
+  .refine((data) => data.isDraft || (!!data.password && data.password.length >= 6), {
+    message: "Password must be at least 6 characters",
+    path: ["password"],
+  })
+  .refine((data) => data.isDraft || (!!data.password && !!data.confirmPassword && data.password === data.confirmPassword), {
+    message: "Password and Confirm Password must match",
     path: ["confirmPassword"],
   });
 
@@ -166,8 +232,9 @@ export const hospitalOnboardingSchema = z
   .object({
     hospitalName: z.string().min(2, "Hospital or Clinic name is required"),
     type: z.enum(["HOSPITAL", "CLINIC"]).default("HOSPITAL"),
+    specialties: z.array(z.string()).min(1, "Please select at least one medical specialty/department").default([]),
     slug: slugSchema,
-    about: z.string().min(10, "About section must be at least 10 characters"),
+    about: z.string().optional().default(""),
     phone: phoneSchema,
     whatsApp: phoneSchema,
     email: z.string().email("Valid official email address is required"),
@@ -176,8 +243,9 @@ export const hospitalOnboardingSchema = z
     weeklyOff: z.array(z.enum(DAYS_OF_WEEK)).min(0),
     appointmentRequired: z.boolean().default(true),
     logo: mediaAssetSchema,
+    buildingPhoto: mediaAssetSchema,
     galleryPhotos: z.array(mediaAssetSchema).max(6, "Maximum 6 hospital photos allowed").default([]),
-    selectedTheme: z.enum(["clinical-editorial", "modern-minimal", "vital-compact"]),
+    selectedTheme: z.string().default("hospital-classic"),
     adminName: z.string().min(2, "Admin name is required"),
     adminEmail: z.string().email("Valid admin login email is required"),
     adminPassword: z.string().optional(),
@@ -189,10 +257,20 @@ export const hospitalOnboardingSchema = z
   .refine(
     (data) => {
       const pwd = data.password || data.adminPassword;
-      return data.isDraft || !pwd || pwd === data.confirmPassword;
+      return data.isDraft || (!!pwd && pwd.length >= 6);
     },
     {
-      message: "Passwords do not match",
+      message: "Admin password must be at least 6 characters",
+      path: ["adminPassword"],
+    }
+  )
+  .refine(
+    (data) => {
+      const pwd = data.password || data.adminPassword;
+      return data.isDraft || (!!pwd && !!data.confirmPassword && pwd === data.confirmPassword);
+    },
+    {
+      message: "Password and Confirm Password must match",
       path: ["confirmPassword"],
     }
   );
@@ -204,9 +282,9 @@ export const hospitalDoctorOnboardingSchema = z
       .string()
       .min(2, "Doctor name must be at least 2 characters")
       .transform(normalizeDoctorName),
-    gender: z.enum(["MALE", "FEMALE", "OTHER"]),
+    gender: z.enum(["MALE", "FEMALE"]),
     degree: z.string().min(2, "Medical degree is required"),
-    specialization: z.enum(MEDICAL_SPECIALIZATIONS),
+    specialization: z.string().min(2, "Specialization is required"),
     yearsOfExperience: z
       .number()
       .int("Years of experience must be an integer")
@@ -217,6 +295,8 @@ export const hospitalDoctorOnboardingSchema = z
     consultationHours: consultationHoursSchema,
     weeklyOff: z.array(z.enum(DAYS_OF_WEEK)).min(0),
     appointmentRequired: z.boolean().default(true),
+    newCaseFee: z.number().min(0, "Fee cannot be negative").optional(),
+    oldCaseFee: z.number().min(0, "Fee cannot be negative").optional(),
     doctorPhoto: mediaAssetSchema,
     password: securePasswordSchema.optional(),
     confirmPassword: z.string().optional(),
@@ -224,7 +304,11 @@ export const hospitalDoctorOnboardingSchema = z
     isDraft: z.boolean().default(false),
     customSlug: slugSchema.optional(),
   })
-  .refine((data) => data.isDraft || !data.password || data.password === data.confirmPassword, {
-    message: "Confirm password does not match",
+  .refine((data) => data.isDraft || (!!data.password && data.password.length >= 6), {
+    message: "Password must be at least 6 characters",
+    path: ["password"],
+  })
+  .refine((data) => data.isDraft || (!!data.password && !!data.confirmPassword && data.password === data.confirmPassword), {
+    message: "Password and Confirm Password must match",
     path: ["confirmPassword"],
   });

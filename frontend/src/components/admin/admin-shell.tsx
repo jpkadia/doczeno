@@ -4,13 +4,18 @@ import {
   ExternalLink,
   LogOut,
   Lock,
-  Layers,
-  Sparkles,
+  Menu,
+  X,
+  Bot,
+  QrCode,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
+import { DoczenoLogo, DoczenoIconMark } from "@/components/brand/doczeno-logo";
 import { AdminAssistantDrawer } from "./admin-assistant-drawer";
+import { ClinicQrDialog } from "./clinic-qr-dialog";
+import { apiClient } from "@/lib/api-client";
+import { toast } from "sonner";
 
 export interface NavItem {
   id: string;
@@ -25,12 +30,14 @@ interface AdminShellProps {
   subtitle?: string;
   roleBadge: string;
   publicWebsiteUrl?: string;
+  logoUrl?: string;
   navItems: NavItem[];
   activeTab: string;
   onTabChange: (id: string) => void;
   children: React.ReactNode;
   userEmail?: string;
   onLogout?: () => void;
+  hideHeader?: boolean;
 }
 
 export function AdminShell({
@@ -38,197 +45,291 @@ export function AdminShell({
   subtitle,
   roleBadge,
   publicWebsiteUrl,
+  logoUrl,
   navItems,
   activeTab,
   onTabChange,
   children,
-  userEmail = "doctor@doczeno.com",
+  userEmail: _userEmail = "doctor@doczeno.vercel.app",
   onLogout,
+  hideHeader = false,
 }: AdminShellProps) {
   const [mobileMenuOpen, setMobileMenuOpen] = React.useState(false);
   const [copilotOpen, setCopilotOpen] = React.useState(false);
+  const [qrOpen, setQrOpen] = React.useState(false);
 
-  return (
-    <div className="min-h-screen bg-slate-50 flex flex-col md:flex-row text-slate-900 font-sans">
-      {/* 1. Desktop & Mobile Sidebar */}
-      <aside
-        className={cn(
-          "w-full md:w-64 bg-slate-900 text-slate-200 border-r border-slate-800 flex flex-col shrink-0 transition-all",
-          mobileMenuOpen ? "block" : "hidden md:flex"
-        )}
-      >
-        {/* Brand Header */}
-        <div className="h-16 px-6 flex items-center justify-between border-b border-slate-800">
-          <div className="flex items-center gap-2.5">
-            <div className="h-8 w-8 rounded-lg bg-emerald-500 text-slate-950 flex items-center justify-center font-bold text-sm">
-              DZ
+  const handleLogout = async () => {
+    if (onLogout) {
+      onLogout();
+      return;
+    }
+
+    try {
+      await apiClient.post("/auth/logout");
+      toast.success("Logged out successfully.");
+    } catch {
+      // Ignore
+    } finally {
+      if (typeof window !== "undefined") {
+        window.location.replace("/admin/login");
+      }
+    }
+  };
+
+  const renderNavList = () => (
+    <nav className="p-3 space-y-1 flex-1 overflow-y-auto min-h-0">
+      {navItems.map((item) => {
+        const Icon = item.icon;
+        const isActive = activeTab === item.id;
+
+        return (
+          <button
+            key={item.id}
+            type="button"
+            onClick={() => {
+              onTabChange(item.id);
+              setMobileMenuOpen(false);
+            }}
+            className={cn(
+              "w-full flex items-center justify-between px-3.5 py-2.5 rounded-xl text-xs font-semibold transition-all text-left",
+              isActive
+                ? "bg-[#1a76d1] text-white shadow-xs font-bold"
+                : "text-slate-600 hover:bg-blue-50/80 hover:text-[#1a76d1]"
+            )}
+          >
+            <div className="flex items-center gap-3 min-w-0">
+              <Icon className={cn("h-4 w-4 shrink-0 transition-colors", isActive ? "text-white" : "text-slate-400")} />
+              <span className="truncate">{item.label}</span>
             </div>
-            <div>
-              <span className="font-extrabold text-sm text-white tracking-tight block">
-                Doczeno
-              </span>
-              <span className="text-[10px] text-slate-400 block tracking-wider uppercase font-medium">
-                Admin Console
-              </span>
-            </div>
-          </div>
-          <Badge variant="outline" className="text-[10px] bg-slate-800 text-slate-300 border-slate-700">
-            {roleBadge}
-          </Badge>
-        </div>
 
-        {/* Navigation Item List */}
-        <nav className="p-3 space-y-1 flex-1 overflow-y-auto">
-          {navItems.map((item) => {
-            const Icon = item.icon;
-            const isActive = activeTab === item.id;
-
-            return (
-              <button
-                key={item.id}
-                type="button"
-                onClick={() => {
-                  onTabChange(item.id);
-                  setMobileMenuOpen(false);
-                }}
-                className={cn(
-                  "w-full flex items-center justify-between px-3 py-2.5 rounded-lg text-xs font-medium transition-colors text-left",
-                  isActive
-                    ? "bg-emerald-500 text-slate-950 font-bold shadow-xs"
-                    : "text-slate-300 hover:bg-slate-800/80 hover:text-white"
-                )}
-              >
-                <div className="flex items-center gap-2.5 min-w-0">
-                  <Icon className={cn("h-4 w-4 shrink-0", isActive ? "text-slate-950" : "text-slate-400")} />
-                  <span className="truncate">{item.label}</span>
-                </div>
-
-                <div className="flex items-center gap-1.5 shrink-0">
-                  {item.isLocked && (
-                    <Lock className={cn("h-3 w-3", isActive ? "text-slate-950" : "text-amber-400")} />
+            <div className="flex items-center gap-1.5 shrink-0">
+              {item.isLocked && (
+                <Lock className={cn("h-3 w-3", isActive ? "text-white" : "text-amber-500")} />
+              )}
+              {item.badge && (
+                <span
+                  className={cn(
+                    "text-[10px] px-1.5 py-0.5 rounded-full font-mono font-bold",
+                    isActive ? "bg-white/20 text-white" : "bg-blue-100 text-[#1560aa]"
                   )}
-                  {item.badge && (
-                    <span
-                      className={cn(
-                        "text-[10px] px-1.5 py-0.5 rounded-full font-mono font-bold",
-                        isActive ? "bg-slate-900 text-white" : "bg-slate-800 text-slate-300"
-                      )}
-                    >
-                      {item.badge}
-                    </span>
-                  )}
-                </div>
-              </button>
-            );
-          })}
-        </nav>
-
-        {/* Sidebar Footer / User Profile */}
-        <div className="p-4 border-t border-slate-800 bg-slate-950/40 space-y-3">
-          {publicWebsiteUrl && (
-            <Button
-              asChild
-              variant="outline"
-              size="sm"
-              className="w-full bg-slate-800/80 border-slate-700 text-slate-200 hover:bg-slate-800 hover:text-white text-xs h-8"
-            >
-              <Link href={publicWebsiteUrl} target="_blank">
-                <ExternalLink className="h-3 w-3 mr-1.5 text-emerald-400" />
-                View Public Site
-              </Link>
-            </Button>
-          )}
-
-          <div className="flex items-center justify-between pt-1">
-            <div className="truncate mr-2">
-              <span className="text-[11px] font-medium text-slate-300 block truncate">
-                {userEmail}
-              </span>
-              <span className="text-[9px] text-slate-500 block uppercase">
-                {roleBadge}
-              </span>
-            </div>
-
-            <Button
-              type="button"
-              variant="ghost"
-              size="sm"
-              onClick={onLogout}
-              className="h-7 px-2 text-slate-400 hover:text-rose-400 hover:bg-rose-500/10"
-              title="Logout"
-            >
-              <LogOut className="h-3.5 w-3.5" />
-            </Button>
-          </div>
-        </div>
-      </aside>
-
-      {/* 2. Main Content Container */}
-      <div className="flex-1 flex flex-col min-w-0">
-        {/* Top Header */}
-        <header className="h-16 bg-white border-b border-slate-200 px-4 sm:px-8 flex items-center justify-between sticky top-0 z-30 shadow-2xs">
-          <div className="flex items-center gap-3">
-            <Button
-              variant="ghost"
-              size="sm"
-              onClick={() => setMobileMenuOpen(!mobileMenuOpen)}
-              className="md:hidden h-8 w-8 p-0"
-              aria-label="Toggle navigation"
-            >
-              <Layers className="h-4 w-4" />
-            </Button>
-            <div>
-              <h1 className="text-base sm:text-lg font-bold text-slate-900 tracking-tight leading-tight">
-                {title}
-              </h1>
-              {subtitle && (
-                <p className="text-xs text-slate-500 hidden sm:block">
-                  {subtitle}
-                </p>
+                >
+                  {item.badge}
+                </span>
               )}
             </div>
+          </button>
+        );
+      })}
+    </nav>
+  );
+
+  return (
+    <>
+      <div className="min-h-screen bg-[#f0f7ff]/40 flex flex-col md:flex-row text-slate-900 font-sans">
+        {/* 1. Desktop Sticky Sidebar - Light Theme */}
+        <aside className="w-64 bg-white text-slate-800 border-r border-blue-100/90 flex-col shrink-0 hidden md:flex sticky top-0 h-screen max-h-screen z-40 shadow-xs">
+          {/* Brand Header */}
+          <div className="h-16 px-6 flex items-center border-b border-blue-100/80 bg-white shrink-0">
+            <div className="flex items-center gap-3">
+              <div className="relative flex items-center justify-center shrink-0 bg-white rounded-xl shadow-2xs border border-blue-100 p-1.5">
+                <DoczenoIconMark className="h-8 w-8" />
+              </div>
+              <div className="flex flex-col">
+                <span className="font-extrabold tracking-tight text-[#0F2E4A] text-lg leading-tight">
+                  Doczeno
+                </span>
+                <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[9px] font-bold bg-blue-50 text-[#1560aa] border border-blue-200 uppercase tracking-wider mt-0.5 w-fit">
+                  {roleBadge}
+                </span>
+              </div>
+            </div>
           </div>
 
-          <div className="flex items-center gap-2.5">
+          {/* Navigation Item List */}
+          {renderNavList()}
+
+          {/* Sidebar Footer */}
+          <div className="p-4 border-t border-blue-100 bg-slate-50/60 shrink-0">
             <Button
               type="button"
-              size="sm"
               variant="outline"
-              onClick={() => setCopilotOpen(true)}
-              className="h-8 gap-1.5 border-emerald-600/40 text-emerald-700 hover:bg-emerald-50 hover:text-emerald-800 text-xs font-semibold"
+              size="sm"
+              onClick={handleLogout}
+              className="w-full h-9 px-3 text-slate-700 hover:text-rose-600 hover:bg-rose-50 border-slate-200 hover:border-rose-200 gap-2 font-semibold text-xs shadow-2xs transition-colors rounded-lg"
+              title="Sign Out"
             >
-              <Sparkles className="h-3.5 w-3.5 text-emerald-600" />
-              <span>AI Copilot</span>
+              <LogOut className="h-4 w-4 text-rose-500" />
+              <span>Logout</span>
             </Button>
-
-            <Badge variant="secondary" className="text-xs font-semibold">
-              {roleBadge}
-            </Badge>
-
-            {publicWebsiteUrl && (
-              <Button asChild size="sm" variant="default" className="bg-slate-900 hover:bg-slate-800 text-white text-xs h-8">
-                <Link href={publicWebsiteUrl} target="_blank">
-                  <ExternalLink className="h-3 w-3 mr-1.5" />
-                  Live Preview
-                </Link>
-              </Button>
-            )}
           </div>
-        </header>
+        </aside>
 
-        {/* Dynamic Admin Body Content */}
-        <main className="p-4 sm:p-8 flex-1 overflow-y-auto max-w-7xl w-full mx-auto space-y-6">
-          {children}
-        </main>
+        {/* Mobile Slide-in Drawer with Backdrop */}
+        {mobileMenuOpen && (
+          <div className="fixed inset-0 z-50 md:hidden flex">
+            {/* Backdrop */}
+            <div
+              className="fixed inset-0 bg-slate-900/40 backdrop-blur-xs transition-opacity"
+              onClick={() => setMobileMenuOpen(false)}
+            />
+
+            {/* Slide-over Menu Content */}
+            <div className="relative w-72 max-w-[85vw] bg-white h-full shadow-2xl flex flex-col z-50 animate-in slide-in-from-left duration-200">
+              <div className="h-16 px-5 flex items-center justify-between border-b border-blue-100 bg-white shrink-0">
+                <div className="flex items-center gap-2.5">
+                  <DoczenoIconMark className="h-7 w-7" />
+                  <div className="flex flex-col">
+                    <span className="font-bold text-[#0F2E4A] text-base leading-tight">
+                      Doczeno
+                    </span>
+                    <span className="text-[9px] font-bold text-[#1560aa] uppercase">
+                      {roleBadge}
+                    </span>
+                  </div>
+                </div>
+
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => setMobileMenuOpen(false)}
+                  className="h-8 w-8 p-0 text-slate-500 hover:text-slate-800"
+                >
+                  <X className="h-5 w-5" />
+                </Button>
+              </div>
+
+              {renderNavList()}
+
+              <div className="p-4 border-t border-blue-100 bg-slate-50/60 shrink-0">
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={handleLogout}
+                  className="w-full h-9 px-3 text-slate-700 hover:text-rose-600 hover:bg-rose-50 border-slate-200 hover:border-rose-200 gap-2 font-semibold text-xs shadow-2xs transition-colors rounded-lg"
+                >
+                  <LogOut className="h-4 w-4 text-rose-500" />
+                  <span>Logout</span>
+                </Button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* 2. Main Content Container */}
+        <div className="flex-1 flex flex-col min-w-0">
+          {/* Top Header */}
+          {!hideHeader ? (
+            <header className="h-16 bg-white border-b border-blue-100 px-4 sm:px-8 flex items-center justify-between sticky top-0 z-30 shadow-2xs">
+              <div className="flex items-center gap-3">
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => setMobileMenuOpen(!mobileMenuOpen)}
+                  className="md:hidden h-8 w-8 p-0 text-slate-700 hover:text-[#1a76d1] hover:bg-blue-50"
+                  aria-label="Toggle navigation"
+                >
+                  <Menu className="h-5 w-5" />
+                </Button>
+                <div>
+                  <h1 className="text-base sm:text-lg font-bold text-slate-900 tracking-tight leading-tight">
+                    {title}
+                  </h1>
+                  {subtitle && (
+                    <p className="text-xs text-slate-500 hidden sm:block">
+                      {subtitle}
+                    </p>
+                  )}
+                </div>
+              </div>
+
+              <div className="flex items-center gap-2 sm:gap-2.5">
+                {publicWebsiteUrl && (
+                  <>
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="outline"
+                      onClick={() => setQrOpen(true)}
+                      className="h-8 gap-1.5 border-blue-200 text-[#1560aa] hover:bg-blue-50 hover:border-blue-300 text-xs font-semibold rounded-lg"
+                      title="View & Export Clinic Website QR Code"
+                    >
+                      <QrCode className="h-3.5 w-3.5 text-[#1a76d1]" />
+                      <span className="hidden sm:inline">QR Code</span>
+                    </Button>
+
+                    <Button asChild size="sm" variant="default" className="bg-[#1a76d1] hover:bg-[#1560aa] text-white text-xs h-8 font-semibold rounded-lg shadow-xs">
+                      <Link href={publicWebsiteUrl} target="_blank">
+                        <ExternalLink className="h-3 w-3 mr-1.5" />
+                        Live Preview
+                      </Link>
+                    </Button>
+                  </>
+                )}
+              </div>
+            </header>
+          ) : (
+            <div className="md:hidden flex items-center justify-between p-3 bg-white border-b border-blue-100 sticky top-0 z-30 shadow-2xs">
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => setMobileMenuOpen(!mobileMenuOpen)}
+                className="h-8 w-8 p-0 text-slate-700 hover:text-[#1a76d1]"
+                aria-label="Toggle navigation"
+              >
+                <Menu className="h-5 w-5" />
+              </Button>
+              <DoczenoLogo variant="horizontal" size="xs" textClassName="text-slate-900" />
+              <div className="w-8" />
+            </div>
+          )}
+
+          {/* Dynamic Admin Body Content */}
+          <main className="p-3.5 sm:p-6 lg:p-8 flex-1 overflow-y-auto max-w-7xl w-full mx-auto space-y-6">
+            {children}
+          </main>
+        </div>
       </div>
+
+      {/* Floating AI Copilot Trigger for All Admin Panels */}
+      {!copilotOpen && (
+        <div className="fixed bottom-6 right-6 z-50 font-sans print:hidden">
+          <button
+            type="button"
+            onClick={() => setCopilotOpen(true)}
+            className="group relative flex items-center justify-center h-12 w-12 bg-[#1a76d1] hover:bg-[#1560aa] text-white rounded-full shadow-lg hover:shadow-xl transition-all duration-300 focus:outline-none focus:ring-4 focus:ring-blue-400/30 animate-ai-breathe"
+            aria-label="Open AI Copilot Assistant"
+          >
+            <div className="relative flex items-center justify-center">
+              <Bot className="h-5 w-5" />
+              <span className="absolute -top-1 -right-1 flex h-2 w-2">
+                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-blue-300 opacity-75" />
+                <span className="relative inline-flex rounded-full h-2 w-2 bg-blue-200" />
+              </span>
+            </div>
+          </button>
+        </div>
+      )}
 
       {/* Slide-over Admin Assistant Copilot */}
       <AdminAssistantDrawer
         isOpen={copilotOpen}
         onClose={() => setCopilotOpen(false)}
         roleBadge={roleBadge}
-        practiceTitle={title}
+        portalTitle={title}
       />
-    </div>
+
+      {/* Clinic Website QR Code Modal */}
+      {publicWebsiteUrl && (
+        <ClinicQrDialog
+          isOpen={qrOpen}
+          onClose={() => setQrOpen(false)}
+          title={title}
+          subtitle={subtitle}
+          pathOrSlug={publicWebsiteUrl}
+          logoUrl={logoUrl}
+        />
+      )}
+    </>
   );
 }

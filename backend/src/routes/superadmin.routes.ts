@@ -1,9 +1,13 @@
 import { Router, Request, Response, NextFunction } from "express";
-import { Organization, Doctor, Website, User, Appointment } from "@/models";
+import mongoose from "mongoose";
+import { Organization, Doctor, Website, User, Appointment, AIContent, Review, PlatformConfig, ChatbotConversation } from "@/models";
 import { requireAuthenticatedUser } from "@/middleware/auth";
 import { requireRole } from "@/middleware/rbac";
 import { UserRole } from "@/types";
 import { logAuditEvent } from "@/services/audit.service";
+import { PlatformConfigService } from "@/services/platform-config.service";
+import { GeminiLoggerService } from "@/services/gemini-logger.service";
+import { MediaService } from "@/services/media.service";
 
 export const superadminRouter = Router();
 
@@ -24,13 +28,15 @@ superadminRouter.get("/stats", async (_req: Request, res: Response, next: NextFu
       totalUsers,
       totalAppointments,
       pendingAppointments,
+      platformConfig,
     ] = await Promise.all([
       Organization.countDocuments(),
       Doctor.countDocuments(),
       Website.countDocuments(),
-      User.countDocuments(),
+      User.countDocuments({ role: { $ne: UserRole.SUPERADMIN } }),
       Appointment.countDocuments(),
       Appointment.countDocuments({ status: "PENDING" }),
+      PlatformConfig.findOne().catch(() => null),
     ]);
 
     res.status(200).json({
@@ -42,6 +48,7 @@ superadminRouter.get("/stats", async (_req: Request, res: Response, next: NextFu
         totalUsers,
         totalAppointments,
         pendingAppointments,
+        deletedDoctorsCount: platformConfig?.deletedDoctorsCount || 0,
       },
     });
   } catch (error) {
@@ -107,7 +114,14 @@ superadminRouter.patch("/organizations/:id/status", async (req: Request, res: Re
       return;
     }
 
-    const org = await Organization.findById(req.params.id);
+    let org: any = null;
+    const paramId = String(req.params.id || "");
+    if (mongoose.Types.ObjectId.isValid(paramId)) {
+      org = await Organization.findById(paramId);
+    }
+    if (!org) {
+      org = await Organization.findOne({ slug: paramId.toLowerCase() });
+    }
     if (!org) {
       res.status(404).json({ success: false, error: "Organization not found", code: "NOT_FOUND" });
       return;
@@ -116,20 +130,12 @@ superadminRouter.patch("/organizations/:id/status", async (req: Request, res: Re
     org.status = status;
     await org.save();
 
-    // Cascading effect: when deactivating or suspending hospital, cascade update affiliated doctors and websites
+    // Cascading effect: when deactivating or suspending hospital, cascade update affiliated doctors
     if (status !== "ACTIVE") {
       await Doctor.updateMany({ organizationId: org._id }, { $set: { status: "INACTIVE" } });
-      await Website.updateMany(
-        { organizationId: org._id },
-        { $set: { publishStatus: "DRAFT" } }
-      );
     } else {
       // Re-activating hospital: allow affiliated records to be active
       await Doctor.updateMany({ organizationId: org._id }, { $set: { status: "ACTIVE" } });
-      await Website.updateMany(
-        { organizationId: org._id },
-        { $set: { publishStatus: "PUBLISHED" } }
-      );
     }
 
     await logAuditEvent({
@@ -154,56 +160,97 @@ superadminRouter.patch("/organizations/:id/status", async (req: Request, res: Re
 });
 
 /**
+ * PUT /api/v1/superadmin/organizations/:id
+ * Content updates are strictly disabled for superadmin
+ */
+superadminRouter.put("/organizations/:id", async (_req: Request, res: Response) => {
+  res.status(403).json({
+    success: false,
+    error: "Superadmin is restricted from updating practice content. Only practice owners can update their website content.",
+    code: "CONTENT_UPDATE_RESTRICTED",
+  });
+});
+
+/**
  * DELETE /api/v1/superadmin/organizations/:id
- * Safe delete / soft-delete flow with dependency validation
+ * Permanent deletion of organization and cascading cleanup by superadmin with media purge
  */
 superadminRouter.delete("/organizations/:id", async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const org = await Organization.findById(req.params.id);
+    let org: any = null;
+    const paramId = String(req.params.id || "");
+    if (mongoose.Types.ObjectId.isValid(paramId)) {
+      org = await Organization.findById(paramId);
+    }
+    if (!org) {
+      org = await Organization.findOne({ slug: paramId.toLowerCase() });
+    }
     if (!org) {
       res.status(404).json({ success: false, error: "Organization not found", code: "NOT_FOUND" });
       return;
     }
 
-    // Dependency check: count pending appointments
-    const pendingAppointmentsCount = await Appointment.countDocuments({
-      organizationId: org._id,
-      status: "PENDING",
-    });
+    const orgId = org._id;
+    const ownerIds: (mongoose.Types.ObjectId | string)[] = [orgId];
+    const additionalPublicIds: string[] = [];
 
-    if (pendingAppointmentsCount > 0) {
-      res.status(409).json({
-        success: false,
-        error: `Cannot safely delete organization: ${pendingAppointmentsCount} pending appointment(s) exist. Please resolve appointments or deactivate first.`,
-        code: "ACTIVE_DEPENDENCIES_EXIST",
-        details: { pendingAppointmentsCount },
+    if (org.logo?.publicId) additionalPublicIds.push(org.logo.publicId);
+    if (Array.isArray(org.galleryPhotos)) {
+      org.galleryPhotos.forEach((p: any) => {
+        if (p?.publicId) additionalPublicIds.push(p.publicId);
       });
-      return;
     }
 
-    // Soft delete strategy (prefer safe deactivation over destructive orphan creation)
-    org.status = "INACTIVE";
-    await org.save();
+    const hospitalDoctors = await Doctor.find({ organizationId: orgId });
+    for (const hd of hospitalDoctors) {
+      ownerIds.push(hd._id);
+      if (hd.doctorPhoto?.publicId) additionalPublicIds.push(hd.doctorPhoto.publicId);
+      if (hd.userId) {
+        ownerIds.push(hd.userId.toString());
+        await User.findByIdAndDelete(hd.userId);
+      }
+    }
 
-    // Cascade to affiliated entities
-    await Doctor.updateMany({ organizationId: org._id }, { $set: { status: "INACTIVE" } });
-    await Website.updateMany({ organizationId: org._id }, { $set: { publishStatus: "DRAFT" } });
+    // Permanently purge all tenant media from Cloudinary, local storage, and DB
+    await MediaService.purgeAllTenantMedia(ownerIds, additionalPublicIds);
+
+    // Permanently clean up all affiliated assets
+    await Doctor.deleteMany({ organizationId: orgId });
+    await User.deleteMany({ organizationId: orgId });
+    await Website.deleteMany({ $or: [{ organizationId: orgId }, { ownerId: orgId }] });
+    await AIContent.deleteMany({ $or: [{ organizationId: orgId }, { targetId: orgId }] });
+    await Review.deleteMany({ organizationId: orgId });
+    await Appointment.deleteMany({ organizationId: orgId });
+    await ChatbotConversation.deleteMany({
+      $or: [
+        { organizationId: orgId },
+        { "scope.organizationId": orgId },
+      ],
+    });
+    await Organization.findByIdAndDelete(orgId);
+
+    // Increment deleted count in PlatformConfig
+    await PlatformConfig.findOneAndUpdate(
+      {},
+      { $inc: { deletedDoctorsCount: hospitalDoctors.length || 1 } },
+      { upsert: true }
+    );
 
     await logAuditEvent({
       userId: req.user!.userId,
       userEmail: req.user!.email,
       userRole: req.user!.role,
-      action: "ORGANIZATION_SOFT_DELETED",
+      action: "ORGANIZATION_PERMANENTLY_DELETED",
       entityType: "Organization",
-      entityId: org._id.toString(),
-      organizationId: org._id.toString(),
+      entityId: orgId.toString(),
+      organizationId: orgId.toString(),
       details: { organizationName: org.name },
     });
 
     res.status(200).json({
       success: true,
-      message: "Organization safely deactivated and all affiliated websites unpublished.",
-      data: { organizationId: org._id },
+      message: "Organization and all affiliated doctors, media files, and websites permanently deleted.",
+      data: { organizationId: orgId },
     });
   } catch (error) {
     next(error);
@@ -229,7 +276,7 @@ superadminRouter.get("/doctors", async (req: Request, res: Response, next: NextF
     if (specialization) filter.specialization = specialization;
     if (status) filter.status = status;
     if (affiliation === "HOSPITAL") filter.organizationId = { $ne: null };
-    if (affiliation === "INDEPENDENT") filter.organizationId = null;
+    if (affiliation === "ONLY_DOCTOR") filter.organizationId = null;
 
     const pageNum = Math.max(1, parseInt(page as string, 10));
     const limitNum = Math.min(100, Math.max(1, parseInt(limit as string, 10)));
@@ -274,7 +321,14 @@ superadminRouter.patch("/doctors/:id/status", async (req: Request, res: Response
       return;
     }
 
-    const doctor = await Doctor.findById(req.params.id);
+    let doctor: any = null;
+    const paramId = String(req.params.id || "");
+    if (mongoose.Types.ObjectId.isValid(paramId)) {
+      doctor = await Doctor.findById(paramId);
+    }
+    if (!doctor) {
+      doctor = await Doctor.findOne({ slug: paramId.toLowerCase() });
+    }
     if (!doctor) {
       res.status(404).json({ success: false, error: "Doctor not found", code: "NOT_FOUND" });
       return;
@@ -282,10 +336,6 @@ superadminRouter.patch("/doctors/:id/status", async (req: Request, res: Response
 
     doctor.status = status;
     await doctor.save();
-
-    // Sync website publish status
-    const newPublishStatus = status === "ACTIVE" ? "PUBLISHED" : "DRAFT";
-    await Website.updateMany({ doctorId: doctor._id }, { $set: { publishStatus: newPublishStatus } });
 
     await logAuditEvent({
       userId: req.user!.userId,
@@ -303,6 +353,106 @@ superadminRouter.patch("/doctors/:id/status", async (req: Request, res: Response
       success: true,
       message: `Doctor status updated to ${status}`,
       data: { doctor },
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * PUT /api/v1/superadmin/doctors/:id
+ * Content updates are strictly disabled for superadmin
+ */
+superadminRouter.put("/doctors/:id", async (_req: Request, res: Response) => {
+  res.status(403).json({
+    success: false,
+    error: "Superadmin is restricted from updating doctor content. Only clinicians can update their profile content.",
+    code: "CONTENT_UPDATE_RESTRICTED",
+  });
+});
+
+/**
+ * DELETE /api/v1/superadmin/doctors/:id
+ * Permanent deletion of doctor and associated website by superadmin with media purge
+ */
+superadminRouter.delete("/doctors/:id", async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    let doctor: any = null;
+    const paramId = String(req.params.id || "");
+    if (mongoose.Types.ObjectId.isValid(paramId)) {
+      doctor = await Doctor.findById(paramId);
+    }
+    if (!doctor) {
+      doctor = await Doctor.findOne({ slug: paramId.toLowerCase() });
+    }
+    if (!doctor) {
+      res.status(404).json({ success: false, error: "Doctor not found", code: "NOT_FOUND" });
+      return;
+    }
+
+    const docId = doctor._id;
+    const targetType = doctor.organizationId ? "HOSPITAL_DOCTOR" : "ONLY_DOCTOR";
+    const ownerIds: (mongoose.Types.ObjectId | string)[] = [docId];
+    const additionalPublicIds: string[] = [];
+
+    if (doctor.doctorPhoto?.publicId) additionalPublicIds.push(doctor.doctorPhoto.publicId);
+    if (doctor.clinicLogo?.publicId) additionalPublicIds.push(doctor.clinicLogo.publicId);
+    if (Array.isArray(doctor.clinicPhotos)) {
+      doctor.clinicPhotos.forEach((p: any) => {
+        if (p?.publicId) additionalPublicIds.push(p.publicId);
+      });
+    }
+
+    // Permanently clean up all doctor accounts
+    if (doctor.userId) {
+      ownerIds.push(doctor.userId.toString());
+      await User.findByIdAndDelete(doctor.userId);
+    }
+    if (doctor.email) {
+      await User.deleteMany({
+        email: doctor.email.toLowerCase().trim(),
+        role: doctor.organizationId ? UserRole.HOSPITAL_DOCTOR : UserRole.ONLY_DOCTOR,
+      });
+    }
+
+    // Permanently purge all tenant media from Cloudinary, local storage, and DB
+    await MediaService.purgeAllTenantMedia(ownerIds, additionalPublicIds);
+
+    await Website.deleteMany({ $or: [{ doctorId: docId }, { ownerId: docId }] });
+    await AIContent.deleteMany({ $or: [{ doctorId: docId }, { targetId: docId }, { targetType, targetId: docId }] });
+    await Review.deleteMany({ doctorId: docId });
+    await Appointment.deleteMany({ doctorId: docId });
+    await ChatbotConversation.deleteMany({
+      $or: [
+        { doctorId: docId },
+        { "scope.doctorId": docId },
+      ],
+    });
+    await Doctor.findByIdAndDelete(docId);
+
+    // Increment deleted count in PlatformConfig
+    await PlatformConfig.findOneAndUpdate(
+      {},
+      { $inc: { deletedDoctorsCount: 1 } },
+      { upsert: true }
+    );
+
+    await logAuditEvent({
+      userId: req.user!.userId,
+      userEmail: req.user!.email,
+      userRole: req.user!.role,
+      action: "DOCTOR_PERMANENTLY_DELETED",
+      entityType: "Doctor",
+      entityId: docId.toString(),
+      doctorId: docId.toString(),
+      organizationId: doctor.organizationId ? doctor.organizationId.toString() : null,
+      details: { doctorName: doctor.doctorName },
+    });
+
+    res.status(200).json({
+      success: true,
+      message: "Doctor, media files, and associated website permanently deleted.",
+      data: { doctorId: docId },
     });
   } catch (error) {
     next(error);
@@ -407,7 +557,10 @@ superadminRouter.patch("/websites/:id/publish-status", async (req: Request, res:
 superadminRouter.get("/users", async (req: Request, res: Response, next: NextFunction) => {
   try {
     const { search, role, status, page = "1", limit = "20" } = req.query;
-    const filter: Record<string, unknown> = {};
+    // Exclude superadmin accounts from general users & accounts list and counts
+    const filter: Record<string, unknown> = {
+      role: { $ne: UserRole.SUPERADMIN },
+    };
 
     if (search) {
       filter.$or = [
@@ -415,7 +568,9 @@ superadminRouter.get("/users", async (req: Request, res: Response, next: NextFun
         { email: { $regex: search, $options: "i" } },
       ];
     }
-    if (role) filter.role = role;
+    if (role && role !== UserRole.SUPERADMIN) {
+      filter.role = role;
+    }
     if (status) filter.isActive = status === "ACTIVE";
 
     const pageNum = Math.max(1, parseInt(page as string, 10));
@@ -500,3 +655,106 @@ superadminRouter.patch("/users/:id/status", async (req: Request, res: Response, 
     next(error);
   }
 });
+
+/**
+ * GET /api/v1/superadmin/settings/domain
+ * Fetch current platform domain configuration
+ */
+superadminRouter.get(
+  "/settings/domain",
+  async (_req: Request, res: Response, next: NextFunction) => {
+    try {
+      const config = await PlatformConfigService.getConfig();
+      res.status(200).json({
+        success: true,
+        data: config,
+      });
+    } catch (error) {
+      next(error);
+    }
+  }
+);
+
+/**
+ * PUT /api/v1/superadmin/settings/domain
+ * Update primary platform root domain
+ */
+superadminRouter.put(
+  "/settings/domain",
+  async (_req: Request, res: Response) => {
+    res.status(400).json({
+      success: false,
+      error: "Platform domain is permanently locked to doczeno.vercel.app and cannot be modified.",
+      code: "DOMAIN_LOCKED",
+    });
+  }
+);
+
+/**
+ * GET /api/v1/superadmin/gemini-analytics
+ * Aggregated analytics and observability for Gemini API
+ */
+superadminRouter.get(
+  "/gemini-analytics",
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const { range, feature, model, status, organizationId, doctorId } = req.query;
+      const analytics = await GeminiLoggerService.getAnalytics({
+        range: range as any,
+        feature: feature as string,
+        model: model as string,
+        status: status as string,
+        organizationId: organizationId as string,
+        doctorId: doctorId as string,
+      });
+
+      res.status(200).json({
+        success: true,
+        data: analytics,
+      });
+    } catch (error) {
+      next(error);
+    }
+  }
+);
+
+/**
+ * GET /api/v1/superadmin/gemini-logs
+ * Paginated request logs with filters and diagnostics
+ */
+superadminRouter.get(
+  "/gemini-logs",
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const {
+        page = "1",
+        limit = "20",
+        feature,
+        status,
+        model,
+        errorCode,
+        search,
+        range,
+      } = req.query;
+
+      const result = await GeminiLoggerService.getLogs({
+        page: parseInt(page as string, 10),
+        limit: parseInt(limit as string, 10),
+        feature: feature as string,
+        status: status as string,
+        model: model as string,
+        errorCode: errorCode as string,
+        search: search as string,
+        range: range as any,
+      });
+
+      res.status(200).json({
+        success: true,
+        data: result,
+      });
+    } catch (error) {
+      next(error);
+    }
+  }
+);
+

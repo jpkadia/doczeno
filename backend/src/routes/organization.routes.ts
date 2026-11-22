@@ -53,6 +53,73 @@ organizationRouter.get(
 );
 
 /**
+ * PATCH /api/v1/organizations/me
+ * Authenticated: Update current hospital admin's organization, theme, and branding
+ * Updates propagate to all child websites and connected doctors automatically.
+ */
+organizationRouter.patch(
+  "/me",
+  requireAuthenticatedUser,
+  requireRole([UserRole.HOSPITAL_ADMIN, UserRole.SUPERADMIN]),
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const user = req.user!;
+      if (!user.organizationId) {
+        res.status(404).json({
+          success: false,
+          error: "No organization associated with current user",
+          code: "ORGANIZATION_NOT_FOUND",
+        });
+        return;
+      }
+
+      const validated = organizationUpdateSchema.parse(req.body);
+      const org = await OrganizationService.updateOrganization(
+        user.organizationId.toString(),
+        validated,
+        user
+      );
+      if (!org) {
+        res.status(404).json({ success: false, error: "Organization not found", code: "NOT_FOUND" });
+        return;
+      }
+
+      // If theme was updated, update all website records for this hospital and affiliated doctors
+      if (validated.selectedTheme) {
+        await Website.updateMany(
+          { organizationId: org._id },
+          { $set: { templateId: validated.selectedTheme } }
+        );
+      }
+
+      // Sync SEO tab title and favicon
+      if (validated.browserTabTitle || validated.faviconUrl || validated.logo?.url) {
+        const seoUpdates: Record<string, unknown> = {};
+        if (validated.browserTabTitle) {
+          seoUpdates["browserTabTitle"] = validated.browserTabTitle;
+          seoUpdates["seoMetadata.title"] = validated.browserTabTitle;
+        }
+        if (validated.faviconUrl) {
+          seoUpdates["faviconUrl"] = validated.faviconUrl;
+        }
+        if (validated.logo?.url) {
+          seoUpdates["seoMetadata.ogImage"] = validated.logo.url;
+        }
+        await Website.updateMany({ organizationId: org._id, websiteType: "HOSPITAL_CLINIC" }, { $set: seoUpdates });
+      }
+
+      res.status(200).json({
+        success: true,
+        message: "Hospital profile and theme updated successfully",
+        data: { organization: org },
+      });
+    } catch (error) {
+      next(error);
+    }
+  }
+);
+
+/**
  * Public: Get organization by slug
  */
 organizationRouter.get(

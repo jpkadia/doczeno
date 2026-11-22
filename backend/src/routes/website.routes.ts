@@ -112,7 +112,7 @@ websiteRouter.get(
 websiteRouter.post(
   "/",
   requireAuthenticatedUser,
-  requireRole([UserRole.SUPERADMIN, UserRole.HOSPITAL_ADMIN, UserRole.INDEPENDENT_DOCTOR]),
+  requireRole([UserRole.SUPERADMIN, UserRole.HOSPITAL_ADMIN, UserRole.ONLY_DOCTOR]),
   async (req: Request, res: Response, next: NextFunction) => {
     try {
       const website = await WebsiteService.createWebsite(req.body, req.user);

@@ -1,3 +1,5 @@
+"use client";
+
 import * as React from "react";
 import Link from "next/link";
 import {
@@ -5,22 +7,33 @@ import {
   Building2,
   Stethoscope,
   Globe,
-  Users,
-  CalendarCheck,
-  Search,
-  CheckCircle,
-  AlertTriangle,
   ExternalLink,
-  Palette,
-  Sliders,
-  History,
+  Link2,
+  QrCode,
+  Cpu,
+  Trash2,
+  AlertTriangle,
+  CheckCircle,
+  Info,
 } from "lucide-react";
+import { cn } from "@/lib/utils";
 import { AdminShell, NavItem } from "../admin-shell";
 import { Card, CardHeader, CardTitle, CardContent, CardDescription } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
-import { Table, TableHeader, TableRow, TableHead, TableBody, TableCell } from "@/components/ui/table";
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogDescription,
+  DialogFooter,
+} from "@/components/ui/dialog";
+import { DataTable, ColumnDef } from "@/components/ui/data-table";
+import { usePlatformDomain } from "@/hooks/use-platform-domain";
+import { GeminiAnalyticsView } from "./gemini-analytics-view";
+import { apiClient } from "@/lib/api-client";
+import { toast } from "sonner";
 
 export interface SuperadminStats {
   totalOrganizations: number;
@@ -29,6 +42,7 @@ export interface SuperadminStats {
   totalUsers: number;
   totalAppointments: number;
   pendingAppointments: number;
+  deletedDoctorsCount?: number;
 }
 
 export interface SuperadminOrgItem {
@@ -41,6 +55,7 @@ export interface SuperadminOrgItem {
     city: string;
     state: string;
   };
+  phone?: string;
   createdAt: string;
 }
 
@@ -113,42 +128,39 @@ interface SuperadminAdminProps {
   onToggleWebsitePublish?: (websiteId: string, newStatus: string) => Promise<void>;
   onToggleUserStatus?: (userId: string, newStatus: string) => Promise<void>;
   onUpdateAppointmentStatus?: (appointmentId: string, newStatus: string) => Promise<void>;
+  onLogout?: () => void;
 }
 
 export function SuperadminAdmin({
   initialStats,
   initialOrganizations = [],
   initialDoctors = [],
-  initialWebsites = [],
-  initialUsers = [],
-  initialAppointments = [],
-  initialAuditLogs = [],
+  initialWebsites: _initialWebsites = [],
+  initialUsers: _initialUsers = [],
+  initialAppointments: _initialAppointments = [],
+  initialAuditLogs: _initialAuditLogs = [],
   onToggleOrgStatus,
-  onSafeDeleteOrg,
+  onSafeDeleteOrg: _onSafeDeleteOrg,
   onToggleDoctorStatus,
-  onToggleWebsitePublish,
-  onToggleUserStatus,
-  onUpdateAppointmentStatus,
+  onToggleWebsitePublish: _onToggleWebsitePublish,
+  onToggleUserStatus: _onToggleUserStatus,
+  onUpdateAppointmentStatus: _onUpdateAppointmentStatus,
+  onLogout,
 }: SuperadminAdminProps) {
   const [activeTab, setActiveTab] = React.useState("dashboard");
 
   // State collections
-  const [stats] = React.useState<SuperadminStats>(initialStats);
+  const [stats, setStats] = React.useState<SuperadminStats>(initialStats);
   const [organizations, setOrganizations] = React.useState<SuperadminOrgItem[]>(initialOrganizations);
   const [doctors, setDoctors] = React.useState<SuperadminDoctorItem[]>(initialDoctors);
-  const [websites, setWebsites] = React.useState<SuperadminWebsiteItem[]>(initialWebsites);
-  const [users, setUsers] = React.useState<SuperadminUserItem[]>(initialUsers);
-  const [appointments, setAppointments] = React.useState<SuperadminAppointmentItem[]>(initialAppointments);
-  const [auditLogs] = React.useState<AuditLogItem[]>(initialAuditLogs);
 
-  // Filters & searches
-  const [orgSearch, setOrgSearch] = React.useState("");
+  React.useEffect(() => { setStats(initialStats); }, [initialStats]);
+  React.useEffect(() => { setOrganizations(initialOrganizations); }, [initialOrganizations]);
+  React.useEffect(() => { setDoctors(initialDoctors); }, [initialDoctors]);
+
+  // Filters
   const [orgTypeFilter, setOrgTypeFilter] = React.useState("ALL");
-  const [doctorSearch, setDoctorSearch] = React.useState("");
   const [doctorAffiliationFilter, setDoctorAffiliationFilter] = React.useState("ALL");
-  const [websiteSearch, setWebsiteSearch] = React.useState("");
-  const [userSearch, setUserSearch] = React.useState("");
-  const [appointmentSearch, setAppointmentSearch] = React.useState("");
 
   // Notification / Alert
   const [feedbackMessage, setFeedbackMessage] = React.useState<{ text: string; type: "success" | "error" } | null>(null);
@@ -158,16 +170,15 @@ export function SuperadminAdmin({
     setTimeout(() => setFeedbackMessage(null), 3500);
   };
 
+  // Platform Domain State (Fixed to doczeno.vercel.app)
+  const { formatUrl } = usePlatformDomain();
+
   const navItems: NavItem[] = [
     { id: "dashboard", label: "Overview & Stats", icon: LayoutDashboard },
-    { id: "organizations", label: "Organizations", icon: Building2, badge: String(organizations.length) },
+    { id: "organizations", label: "Hospitals & Clinics", icon: Building2, badge: String(organizations.length) },
     { id: "doctors", label: "All Doctors", icon: Stethoscope, badge: String(doctors.length) },
-    { id: "websites", label: "Websites Directory", icon: Globe, badge: String(websites.length) },
-    { id: "users", label: "Users & Accounts", icon: Users, badge: String(users.length) },
-    { id: "appointments", label: "Appointments", icon: CalendarCheck, badge: String(stats.pendingAppointments) },
-    { id: "audit", label: "Security & Audit", icon: History },
-    { id: "templates", label: "Design Templates", icon: Palette },
-    { id: "settings", label: "Platform Settings", icon: Sliders },
+    { id: "settings", label: "Platform Information", icon: Info },
+    { id: "gemini-api", label: "Gemini AI Analytics", icon: Cpu },
   ];
 
   // Handlers
@@ -182,25 +193,6 @@ export function SuperadminAdmin({
         showNotification(`Organization marked as ${nextStatus}`);
       } catch (e: unknown) {
         showNotification(e instanceof Error ? e.message : "Failed to update organization status", "error");
-      }
-    }
-  };
-
-  const handleSafeDeleteOrg = async (orgId: string) => {
-    if (!confirm("Are you sure you want to deactivate and soft-delete this organization? Affiliated websites will be moved to DRAFT.")) {
-      return;
-    }
-    if (onSafeDeleteOrg) {
-      try {
-        const res = await onSafeDeleteOrg(orgId);
-        if (res.success) {
-          setOrganizations((prev) =>
-            prev.map((o) => (o.id === orgId ? { ...o, status: "INACTIVE" } : o))
-          );
-          showNotification(res.message || "Organization safely deactivated");
-        }
-      } catch (e: unknown) {
-        showNotification(e instanceof Error ? e.message : "Cannot delete organization: active dependencies exist.", "error");
       }
     }
   };
@@ -220,112 +212,288 @@ export function SuperadminAdmin({
     }
   };
 
-  const handleToggleWebsite = async (siteId: string, currentStatus: string) => {
-    const nextStatus = currentStatus === "PUBLISHED" ? "DRAFT" : "PUBLISHED";
-    setWebsites((prev) =>
-      prev.map((w) => (w.id === siteId ? { ...w, publishStatus: nextStatus as "PUBLISHED" | "DRAFT" } : w))
-    );
-    if (onToggleWebsitePublish) {
-      try {
-        await onToggleWebsitePublish(siteId, nextStatus);
-        showNotification(`Website publish status changed to ${nextStatus}`);
-      } catch (e: unknown) {
-        showNotification(e instanceof Error ? e.message : "Failed to update publish status", "error");
+  // Superadmin Authority: Permanent Delete Modal State & Handler
+  const [deleteTarget, setDeleteTarget] = React.useState<{
+    type: "org" | "doctor";
+    id: string;
+    name: string;
+  } | null>(null);
+  const [isDeleting, setIsDeleting] = React.useState(false);
+
+  const confirmPermanentDelete = async () => {
+    if (!deleteTarget) return;
+    setIsDeleting(true);
+    try {
+      if (deleteTarget.type === "org") {
+        await apiClient.delete(`/superadmin/organizations/${deleteTarget.id}`);
+        setOrganizations((prev) => prev.filter((o) => o.id !== deleteTarget.id));
+        setDoctors((prev) => prev.filter((d) => d.organizationId?.id !== deleteTarget.id));
+        toast.success(`Organization "${deleteTarget.name}" and all media files permanently deleted.`);
+      } else {
+        await apiClient.delete(`/superadmin/doctors/${deleteTarget.id}`);
+        setDoctors((prev) => prev.filter((d) => d.id !== deleteTarget.id));
+        toast.success(`Dr. "${deleteTarget.name}" and associated media permanently deleted.`);
       }
+      setDeleteTarget(null);
+    } catch (e: unknown) {
+      toast.error(e instanceof Error ? e.message : "Failed to delete");
+    } finally {
+      setIsDeleting(false);
     }
   };
 
-  const handleToggleUser = async (userId: string, currentActive: boolean) => {
-    const nextStatus = currentActive ? "INACTIVE" : "ACTIVE";
-    setUsers((prev) =>
-      prev.map((u) => (u.id === userId ? { ...u, isActive: !currentActive } : u))
-    );
-    if (onToggleUserStatus) {
-      try {
-        await onToggleUserStatus(userId, nextStatus);
-        showNotification(`User account marked as ${nextStatus}`);
-      } catch (e: unknown) {
-        showNotification(e instanceof Error ? e.message : "Failed to update user status", "error");
-      }
-    }
-  };
-
-  const handleUpdateAppt = async (apptId: string, newStatus: string) => {
-    setAppointments((prev) =>
-      prev.map((a) =>
-        a.id === apptId ? { ...a, status: newStatus as SuperadminAppointmentItem["status"] } : a
-      )
-    );
-    if (onUpdateAppointmentStatus) {
-      try {
-        await onUpdateAppointmentStatus(apptId, newStatus);
-        showNotification(`Appointment status marked as ${newStatus}`);
-      } catch (e: unknown) {
-        showNotification(e instanceof Error ? e.message : "Failed to update appointment", "error");
-      }
-    }
-  };
-
-  // Filtered queries
-  const filteredOrgs = organizations.filter((org) => {
-    const matchesSearch =
-      org.name.toLowerCase().includes(orgSearch.toLowerCase()) ||
-      org.slug.toLowerCase().includes(orgSearch.toLowerCase()) ||
-      (org.address?.city && org.address.city.toLowerCase().includes(orgSearch.toLowerCase()));
-    const matchesType = orgTypeFilter === "ALL" || org.type === orgTypeFilter;
-    return matchesSearch && matchesType;
-  });
-
-  const filteredDoctors = doctors.filter((doc) => {
-    const matchesSearch =
-      doc.doctorName.toLowerCase().includes(doctorSearch.toLowerCase()) ||
-      doc.specialization.toLowerCase().includes(doctorSearch.toLowerCase()) ||
-      doc.slug.toLowerCase().includes(doctorSearch.toLowerCase());
-    const matchesAffil =
-      doctorAffiliationFilter === "ALL" ||
-      (doctorAffiliationFilter === "HOSPITAL" && Boolean(doc.organizationId)) ||
-      (doctorAffiliationFilter === "INDEPENDENT" && !doc.organizationId);
-    return matchesSearch && matchesAffil;
-  });
-
-  const filteredWebsites = websites.filter((site) =>
-    site.slug.toLowerCase().includes(websiteSearch.toLowerCase())
+  // Data Table Columns: Hospitals & Clinics
+  const organizationColumns = React.useMemo<ColumnDef<SuperadminOrgItem>[]>(
+    () => [
+      {
+        key: "name",
+        header: "Hospital / Clinic",
+        cell: (org) => (
+          <div>
+            <span className="font-semibold text-slate-900 block text-xs">{org.name}</span>
+            <span className="text-[11px] text-slate-500 font-mono">/{org.slug}</span>
+          </div>
+        ),
+      },
+      {
+        key: "slug",
+        header: "Public URL",
+        cell: (org) => (
+          <Link
+            href={`/${org.slug}`}
+            target="_blank"
+            className="hover:underline text-[#1a76d1] flex items-center gap-1 font-mono text-xs font-semibold"
+          >
+            {formatUrl(org.slug)}
+            <ExternalLink className="h-3 w-3 shrink-0" />
+          </Link>
+        ),
+      },
+      {
+        key: "type",
+        header: "Type",
+        cell: (org) => (
+          <Badge variant="secondary" className="text-[10px]">
+            {org.type}
+          </Badge>
+        ),
+      },
+      {
+        key: "location",
+        header: "Location",
+        accessorFn: (org) => `${org.address?.city || ""}, ${org.address?.state || ""}`,
+        cell: (org) => (
+          <span className="text-xs text-slate-600">
+            {org.address?.city ? `${org.address.city}, ${org.address.state || ""}` : "—"}
+          </span>
+        ),
+      },
+      {
+        key: "status",
+        header: "Status",
+        cell: (org) => (
+          <Badge
+            variant="outline"
+            className={`text-[10px] font-semibold ${
+              org.status === "ACTIVE"
+                ? "bg-blue-100 text-[#1560aa] border-blue-300"
+                : "bg-slate-100 text-slate-800 border-slate-300"
+            }`}
+          >
+            {org.status}
+          </Badge>
+        ),
+      },
+      {
+        key: "actions",
+        header: "Actions",
+        sortable: false,
+        headerClassName: "text-right",
+        cell: (org) => (
+          <div className="flex items-center justify-end gap-1.5 whitespace-nowrap">
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => handleToggleOrg(org.id, org.status)}
+              className={cn(
+                "text-[10px] h-7 px-2 font-medium rounded-lg",
+                org.status === "ACTIVE"
+                  ? "text-amber-700 border-amber-300 hover:bg-amber-50"
+                  : "text-[#1560aa] border-blue-300 hover:bg-blue-50"
+              )}
+            >
+              {org.status === "ACTIVE" ? "Deactivate" : "Activate"}
+            </Button>
+            <Button
+              size="sm"
+              variant="ghost"
+              onClick={() => setDeleteTarget({ type: "org", id: org.id, name: org.name })}
+              className="text-[10px] h-7 px-2 text-rose-600 hover:bg-rose-100 font-semibold"
+            >
+              <Trash2 className="h-3 w-3 mr-1" />
+              Delete
+            </Button>
+          </div>
+        ),
+      },
+    ],
+    [formatUrl]
   );
 
-  const filteredUsers = users.filter(
-    (u) =>
-      u.name.toLowerCase().includes(userSearch.toLowerCase()) ||
-      u.email.toLowerCase().includes(userSearch.toLowerCase())
+  // Data Table Columns: Doctors
+  const doctorColumns = React.useMemo<ColumnDef<SuperadminDoctorItem>[]>(
+    () => [
+      {
+        key: "doctorName",
+        header: "Doctor Name",
+        cell: (doc) => {
+          const urlPath = doc.organizationId
+            ? `${doc.organizationId.slug}/${doc.slug}`
+            : doc.slug;
+          return (
+            <div>
+              <span className="font-semibold text-slate-900 block text-xs">Dr. {doc.doctorName}</span>
+              <Link
+                href={`/${urlPath}`}
+                target="_blank"
+                className="font-mono text-[10px] text-[#1a76d1] font-semibold hover:underline flex items-center gap-1 truncate max-w-xs"
+              >
+                {formatUrl(urlPath)}
+                <ExternalLink className="h-2.5 w-2.5 shrink-0" />
+              </Link>
+            </div>
+          );
+        },
+      },
+      {
+        key: "specialization",
+        header: "Specialization",
+        cell: (doc) => (
+          <span className="text-xs text-slate-700">
+            {doc.specialization} {doc.yearsOfExperience ? `(${doc.yearsOfExperience} yrs)` : ""}
+          </span>
+        ),
+      },
+      {
+        key: "affiliation",
+        header: "Affiliation",
+        accessorFn: (doc) => doc.organizationId?.name || "Only Doctor",
+        cell: (doc) =>
+          doc.organizationId ? (
+            <span className="flex items-center gap-1 text-slate-800 text-xs">
+              <Building2 className="h-3 w-3 text-slate-400 shrink-0" />
+              {doc.organizationId.name}
+            </span>
+          ) : (
+            <Badge variant="outline" className="text-[10px] bg-slate-50 text-slate-700 border-slate-300">
+              Only Doctor
+            </Badge>
+          ),
+      },
+      {
+        key: "status",
+        header: "Status",
+        cell: (doc) => (
+          <Badge
+            variant="outline"
+            className={`text-[10px] font-semibold ${
+              doc.status === "ACTIVE"
+                ? "bg-blue-100 text-[#1560aa] border-blue-300"
+                : "bg-slate-100 text-slate-800 border-slate-300"
+            }`}
+          >
+            {doc.status}
+          </Badge>
+        ),
+      },
+      {
+        key: "actions",
+        header: "Actions",
+        sortable: false,
+        headerClassName: "text-right",
+        cell: (doc) => (
+          <div className="flex items-center justify-end gap-1.5 whitespace-nowrap">
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => handleToggleDoctor(doc.id, doc.status)}
+              className={cn(
+                "text-[10px] h-7 px-2 font-medium rounded-lg",
+                doc.status === "ACTIVE"
+                  ? "text-amber-700 border-amber-300 hover:bg-amber-50"
+                  : "text-[#1560aa] border-blue-300 hover:bg-blue-50"
+              )}
+            >
+              {doc.status === "ACTIVE" ? "Deactivate" : "Activate"}
+            </Button>
+            <Button
+              size="sm"
+              variant="ghost"
+              onClick={() => setDeleteTarget({ type: "doctor", id: doc.id, name: doc.doctorName })}
+              className="text-[10px] h-7 px-2 text-rose-600 hover:bg-rose-100 font-semibold"
+            >
+              <Trash2 className="h-3 w-3 mr-1" />
+              Delete Doctor
+            </Button>
+          </div>
+        ),
+      },
+    ],
+    [formatUrl]
   );
 
-  const filteredAppointments = appointments.filter(
-    (a) =>
-      a.patientName.toLowerCase().includes(appointmentSearch.toLowerCase()) ||
-      a.patientPhone.includes(appointmentSearch)
-  );
+  // Filtered datasets for Data Tables
+  const filteredOrgsData = React.useMemo(() => {
+    return orgTypeFilter === "ALL"
+      ? organizations
+      : organizations.filter((o) => o.type === orgTypeFilter);
+  }, [organizations, orgTypeFilter]);
+
+  const filteredDoctorsData = React.useMemo(() => {
+    return doctorAffiliationFilter === "ALL"
+      ? doctors
+      : doctorAffiliationFilter === "ONLY_DOCTOR"
+      ? doctors.filter((d) => !d.organizationId)
+      : doctors.filter((d) => Boolean(d.organizationId));
+  }, [doctors, doctorAffiliationFilter]);
+
+  // Doctor Breakdown Statistics for Overview
+  const soloDoctorsCount = React.useMemo(() => {
+    return doctors.filter((d) => !d.organizationId).length;
+  }, [doctors]);
+
+  const hospitalDoctorsCount = React.useMemo(() => {
+    return doctors.filter((d) => Boolean(d.organizationId)).length;
+  }, [doctors]);
+
+  const totalDoctorsCount = React.useMemo(() => {
+    return Math.max(doctors.length, stats.totalDoctors || 0);
+  }, [doctors, stats.totalDoctors]);
 
   return (
     <AdminShell
       title="Platform Superadmin Console"
       subtitle="Doczeno Multi-Tenant Control Authority"
       roleBadge="SUPERADMIN"
+      hideHeader={true}
       navItems={navItems}
       activeTab={activeTab}
       onTabChange={setActiveTab}
       userEmail="superadmin@doczeno.com"
+      onLogout={onLogout}
     >
       {/* Toast / Notification */}
       {feedbackMessage && (
         <div
-          className={`border text-xs px-4 py-2.5 rounded-lg flex items-center justify-between animate-in fade-in ${
+          className={`border text-xs px-4 py-2.5 rounded-xl flex items-center justify-between animate-in fade-in shadow-2xs ${
             feedbackMessage.type === "success"
-              ? "bg-emerald-50 border-emerald-200 text-emerald-800"
+              ? "bg-blue-50 border-blue-200 text-[#1560aa]"
               : "bg-rose-50 border-rose-200 text-rose-800"
           }`}
         >
           <div className="flex items-center gap-2">
             {feedbackMessage.type === "success" ? (
-              <CheckCircle className="h-4 w-4 text-emerald-600" />
+              <CheckCircle className="h-4 w-4 text-[#1a76d1]" />
             ) : (
               <AlertTriangle className="h-4 w-4 text-rose-600" />
             )}
@@ -337,10 +505,44 @@ export function SuperadminAdmin({
       {/* TAB 1: DASHBOARD / OVERVIEW */}
       {activeTab === "dashboard" && (
         <div className="space-y-6">
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5 gap-4">
+            {/* Total Doctors */}
+            <Card className="bg-white border-blue-100 rounded-2xl shadow-xs">
+              <CardHeader className="p-4 pb-2">
+                <CardDescription className="text-xs font-medium text-slate-500">Total Registered Doctors</CardDescription>
+                <CardTitle className="text-2xl font-bold text-slate-900">{totalDoctorsCount}</CardTitle>
+              </CardHeader>
+              <CardContent className="p-4 pt-0 text-xs text-slate-500">
+                All platform physicians
+              </CardContent>
+            </Card>
+
+            {/* Solo / Only Doctors */}
+            <Card className="bg-white border-blue-100 rounded-2xl shadow-xs">
+              <CardHeader className="p-4 pb-2">
+                <CardDescription className="text-xs font-medium text-[#1560aa]">Only Doctors</CardDescription>
+                <CardTitle className="text-2xl font-bold text-[#1a76d1]">{soloDoctorsCount}</CardTitle>
+              </CardHeader>
+              <CardContent className="p-4 pt-0 text-xs text-slate-500">
+                Independent private clinics
+              </CardContent>
+            </Card>
+
+            {/* Hospital-Affiliated Doctors */}
             <Card className="bg-white border-slate-200 shadow-2xs">
               <CardHeader className="p-4 pb-2">
-                <CardDescription className="text-xs">Organizations (Hospitals & Clinics)</CardDescription>
+                <CardDescription className="text-xs font-medium text-sky-700">Hospital / Clinic Doctors</CardDescription>
+                <CardTitle className="text-2xl font-bold text-sky-700">{hospitalDoctorsCount}</CardTitle>
+              </CardHeader>
+              <CardContent className="p-4 pt-0 text-xs text-slate-500">
+                Affiliated with hospital entities
+              </CardContent>
+            </Card>
+
+            {/* Hospitals & Clinics */}
+            <Card className="bg-white border-slate-200 shadow-2xs">
+              <CardHeader className="p-4 pb-2">
+                <CardDescription className="text-xs font-medium text-slate-500">Hospitals & Clinics</CardDescription>
                 <CardTitle className="text-2xl font-bold text-slate-900">{stats.totalOrganizations}</CardTitle>
               </CardHeader>
               <CardContent className="p-4 pt-0 text-xs text-slate-500">
@@ -348,782 +550,257 @@ export function SuperadminAdmin({
               </CardContent>
             </Card>
 
+            {/* Permanently Deleted Accounts */}
             <Card className="bg-white border-slate-200 shadow-2xs">
               <CardHeader className="p-4 pb-2">
-                <CardDescription className="text-xs">Doctors Registered</CardDescription>
-                <CardTitle className="text-2xl font-bold text-slate-900">{stats.totalDoctors}</CardTitle>
+                <CardDescription className="text-xs font-medium text-rose-700">Permanently Deleted</CardDescription>
+                <CardTitle className="text-2xl font-bold text-rose-600">
+                  {stats.deletedDoctorsCount || 0}
+                </CardTitle>
               </CardHeader>
               <CardContent className="p-4 pt-0 text-xs text-slate-500">
-                Independent and hospital-affiliated
-              </CardContent>
-            </Card>
-
-            <Card className="bg-white border-slate-200 shadow-2xs">
-              <CardHeader className="p-4 pb-2">
-                <CardDescription className="text-xs">Live Websites</CardDescription>
-                <CardTitle className="text-2xl font-bold text-slate-900">{stats.totalWebsites}</CardTitle>
-              </CardHeader>
-              <CardContent className="p-4 pt-0 text-xs text-slate-500">
-                Deterministic theme rendering sites
-              </CardContent>
-            </Card>
-
-            <Card className="bg-white border-slate-200 shadow-2xs">
-              <CardHeader className="p-4 pb-2">
-                <CardDescription className="text-xs">Platform Users</CardDescription>
-                <CardTitle className="text-2xl font-bold text-slate-900">{stats.totalUsers}</CardTitle>
-              </CardHeader>
-              <CardContent className="p-4 pt-0 text-xs text-slate-500">
-                Superadmins, hospital admins, doctors
-              </CardContent>
-            </Card>
-
-            <Card className="bg-white border-slate-200 shadow-2xs">
-              <CardHeader className="p-4 pb-2">
-                <CardDescription className="text-xs">Total Patient Appointments</CardDescription>
-                <CardTitle className="text-2xl font-bold text-slate-900">{stats.totalAppointments}</CardTitle>
-              </CardHeader>
-              <CardContent className="p-4 pt-0 text-xs text-slate-500">
-                Platform-wide booking requests
-              </CardContent>
-            </Card>
-
-            <Card className="bg-white border-slate-200 shadow-2xs">
-              <CardHeader className="p-4 pb-2">
-                <CardDescription className="text-xs">Pending Appointments</CardDescription>
-                <CardTitle className="text-2xl font-bold text-amber-600">{stats.pendingAppointments}</CardTitle>
-              </CardHeader>
-              <CardContent className="p-4 pt-0 text-xs text-slate-500">
-                Awaiting clinic confirmation
-              </CardContent>
-            </Card>
-          </div>
-
-          {/* Quick Actions & Platform Health */}
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-            <Card className="bg-white border-slate-200">
-              <CardHeader>
-                <CardTitle className="text-sm font-bold text-slate-900">Platform System Health</CardTitle>
-                <CardDescription className="text-xs">Multi-tenant architecture status</CardDescription>
-              </CardHeader>
-              <CardContent className="space-y-3 text-xs">
-                <div className="flex justify-between items-center py-1 border-b border-slate-100">
-                  <span className="text-slate-600">Database Engine</span>
-                  <Badge variant="outline" className="bg-emerald-50 text-emerald-700 border-emerald-300">
-                    MongoDB ReplicaSet Connected
-                  </Badge>
-                </div>
-                <div className="flex justify-between items-center py-1 border-b border-slate-100">
-                  <span className="text-slate-600">Authentication Authority</span>
-                  <Badge variant="outline" className="bg-emerald-50 text-emerald-700 border-emerald-300">
-                    JWT Session & RBAC Verified
-                  </Badge>
-                </div>
-                <div className="flex justify-between items-center py-1 border-b border-slate-100">
-                  <span className="text-slate-600">Renderer Engine</span>
-                  <Badge variant="outline" className="bg-emerald-50 text-emerald-700 border-emerald-300">
-                    Deterministic 3 Themes Active
-                  </Badge>
-                </div>
-                <div className="flex justify-between items-center py-1">
-                  <span className="text-slate-600">Inheritance Guard</span>
-                  <Badge variant="outline" className="bg-emerald-50 text-emerald-700 border-emerald-300">
-                    Hospital Doctor Lock Active (HTTP 403 Enforced)
-                  </Badge>
-                </div>
-              </CardContent>
-            </Card>
-
-            <Card className="bg-white border-slate-200">
-              <CardHeader>
-                <CardTitle className="text-sm font-bold text-slate-900">Recent Security Activity</CardTitle>
-                <CardDescription className="text-xs">Audit log summary</CardDescription>
-              </CardHeader>
-              <CardContent className="space-y-2 text-xs">
-                {auditLogs.slice(0, 4).map((log, idx) => (
-                  <div key={idx} className="p-2 rounded-md bg-slate-50 border border-slate-200 flex justify-between items-center">
-                    <div>
-                      <span className="font-semibold text-slate-800 block text-[11px]">{log.action}</span>
-                      <span className="text-[10px] text-slate-500">{log.userEmail} ({log.userRole})</span>
-                    </div>
-                    <span className="text-[10px] text-slate-400 font-mono">{log.timestamp.slice(11, 19)}</span>
-                  </div>
-                ))}
-                {auditLogs.length === 0 && (
-                  <p className="text-slate-400 text-center py-4">No security events recorded yet.</p>
-                )}
+                Purged DB & media files
               </CardContent>
             </Card>
           </div>
         </div>
       )}
 
-      {/* TAB 2: ORGANIZATIONS */}
+      {/* TAB 2: HOSPITALS & CLINICS (DATA TABLE) */}
       {activeTab === "organizations" && (
         <Card className="bg-white border-slate-200">
-          <CardHeader>
-            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-              <div>
-                <CardTitle className="text-lg font-bold text-slate-900">Organizations Directory</CardTitle>
-                <CardDescription className="text-xs">
-                  Manage all hospital and clinic tenants on Doczeno
-                </CardDescription>
-              </div>
-              <div className="flex items-center gap-2">
-                <div className="relative w-48 sm:w-64">
-                  <Search className="h-3.5 w-3.5 absolute left-2.5 top-2.5 text-slate-400" />
-                  <Input
-                    placeholder="Search name, slug, city..."
-                    value={orgSearch}
-                    onChange={(e) => setOrgSearch(e.target.value)}
-                    className="pl-8 text-xs h-8"
-                  />
-                </div>
+          <CardHeader className="border-b border-slate-100 pb-4">
+            <div>
+              <CardTitle className="text-lg font-bold text-slate-900">Hospitals & Clinics Directory</CardTitle>
+              <CardDescription className="text-xs text-slate-500 mt-1">
+                Manage all hospital and clinic facilities on Doczeno
+              </CardDescription>
+            </div>
+          </CardHeader>
+          <CardContent className="p-6">
+            <DataTable
+              columns={organizationColumns}
+              data={filteredOrgsData}
+              searchPlaceholder="Search name, slug, city..."
+              pageSize={10}
+              toolbarExtra={
                 <select
+                  aria-label="Filter by type"
                   value={orgTypeFilter}
                   onChange={(e) => setOrgTypeFilter(e.target.value)}
-                  className="text-xs h-8 border border-slate-300 rounded-md px-2 bg-white text-slate-700"
+                  className="text-xs h-9 border border-slate-200 rounded-lg px-2.5 bg-white text-slate-700 focus:outline-none focus:ring-1 focus:ring-indigo-500"
                 >
                   <option value="ALL">All Types</option>
                   <option value="HOSPITAL">Hospitals</option>
                   <option value="CLINIC">Clinics</option>
                 </select>
-              </div>
-            </div>
-          </CardHeader>
-          <CardContent className="p-0">
-            <div className="overflow-x-auto">
-              <Table>
-                <TableHeader>
-                  <TableRow>
-                    <TableHead className="text-xs font-semibold">Name</TableHead>
-                    <TableHead className="text-xs font-semibold">Slug</TableHead>
-                    <TableHead className="text-xs font-semibold">Type</TableHead>
-                    <TableHead className="text-xs font-semibold">Location</TableHead>
-                    <TableHead className="text-xs font-semibold">Status</TableHead>
-                    <TableHead className="text-xs font-semibold text-right">Actions</TableHead>
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {filteredOrgs.map((org) => (
-                    <TableRow key={org.id}>
-                      <TableCell className="font-semibold text-xs text-slate-900">
-                        {org.name}
-                      </TableCell>
-                      <TableCell className="text-xs font-mono text-slate-600">
-                        <Link href={`/${org.slug}`} target="_blank" className="hover:underline text-emerald-700">
-                          /{org.slug}
-                        </Link>
-                      </TableCell>
-                      <TableCell>
-                        <Badge variant="secondary" className="text-[10px]">
-                          {org.type}
-                        </Badge>
-                      </TableCell>
-                      <TableCell className="text-xs text-slate-600">
-                        {org.address?.city}, {org.address?.state}
-                      </TableCell>
-                      <TableCell>
-                        <Badge
-                          variant="outline"
-                          className={`text-[10px] font-semibold ${
-                            org.status === "ACTIVE"
-                              ? "bg-emerald-100 text-emerald-800 border-emerald-300"
-                              : "bg-slate-100 text-slate-800 border-slate-300"
-                          }`}
-                        >
-                          {org.status}
-                        </Badge>
-                      </TableCell>
-                      <TableCell className="text-right space-x-1.5 whitespace-nowrap">
-                        <Button
-                          size="sm"
-                          variant="outline"
-                          onClick={() => handleToggleOrg(org.id, org.status)}
-                          className="text-[10px] h-7 px-2"
-                        >
-                          {org.status === "ACTIVE" ? "Deactivate" : "Activate"}
-                        </Button>
-                        <Button
-                          size="sm"
-                          variant="ghost"
-                          onClick={() => handleSafeDeleteOrg(org.id)}
-                          className="text-[10px] h-7 px-2 text-rose-600 hover:bg-rose-50"
-                        >
-                          Safe Delete
-                        </Button>
-                      </TableCell>
-                    </TableRow>
-                  ))}
-                  {filteredOrgs.length === 0 && (
-                    <TableRow>
-                      <TableCell colSpan={6} className="text-center py-6 text-slate-400 text-xs">
-                        No organizations match your query.
-                      </TableCell>
-                    </TableRow>
-                  )}
-                </TableBody>
-              </Table>
-            </div>
+              }
+            />
           </CardContent>
         </Card>
       )}
 
-      {/* TAB 3: DOCTORS */}
+      {/* TAB 3: ALL DOCTORS (DATA TABLE) */}
       {activeTab === "doctors" && (
         <Card className="bg-white border-slate-200">
-          <CardHeader>
-            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-              <div>
-                <CardTitle className="text-lg font-bold text-slate-900">All Doctors Platform Directory</CardTitle>
-                <CardDescription className="text-xs">
-                  Manage independent and hospital-affiliated medical practitioners
-                </CardDescription>
-              </div>
-              <div className="flex items-center gap-2">
-                <div className="relative w-48 sm:w-64">
-                  <Search className="h-3.5 w-3.5 absolute left-2.5 top-2.5 text-slate-400" />
-                  <Input
-                    placeholder="Search doctor, specialization..."
-                    value={doctorSearch}
-                    onChange={(e) => setDoctorSearch(e.target.value)}
-                    className="pl-8 text-xs h-8"
-                  />
-                </div>
+          <CardHeader className="border-b border-slate-100 pb-4">
+            <div>
+              <CardTitle className="text-lg font-bold text-slate-900">All Doctors Directory</CardTitle>
+              <CardDescription className="text-xs text-slate-500 mt-1">
+                Verified physicians across Only Doctor and Hospital practices
+              </CardDescription>
+            </div>
+          </CardHeader>
+          <CardContent className="p-6">
+            <DataTable
+              columns={doctorColumns}
+              data={filteredDoctorsData}
+              searchPlaceholder="Search doctor, specialization, slug..."
+              pageSize={10}
+              toolbarExtra={
                 <select
+                  aria-label="Filter by affiliation"
                   value={doctorAffiliationFilter}
                   onChange={(e) => setDoctorAffiliationFilter(e.target.value)}
-                  className="text-xs h-8 border border-slate-300 rounded-md px-2 bg-white text-slate-700"
+                  className="text-xs h-9 border border-slate-200 rounded-lg px-2.5 bg-white text-slate-700 focus:outline-none focus:ring-1 focus:ring-indigo-500"
                 >
                   <option value="ALL">All Affiliations</option>
-                  <option value="INDEPENDENT">Independent</option>
+                  <option value="ONLY_DOCTOR">Only Doctor</option>
                   <option value="HOSPITAL">Hospital Doctor</option>
                 </select>
-              </div>
-            </div>
-          </CardHeader>
-          <CardContent className="p-0">
-            <div className="overflow-x-auto">
-              <Table>
-                <TableHeader>
-                  <TableRow>
-                    <TableHead className="text-xs font-semibold">Doctor Name</TableHead>
-                    <TableHead className="text-xs font-semibold">Specialization</TableHead>
-                    <TableHead className="text-xs font-semibold">Affiliation</TableHead>
-                    <TableHead className="text-xs font-semibold">Status</TableHead>
-                    <TableHead className="text-xs font-semibold text-right">Actions</TableHead>
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {filteredDoctors.map((doc) => (
-                    <TableRow key={doc.id}>
-                      <TableCell className="font-semibold text-xs text-slate-900">
-                        Dr. {doc.doctorName}
-                        <span className="block font-mono text-[10px] text-slate-500">
-                          {doc.organizationId ? `/${doc.organizationId.slug}/${doc.slug}` : `/${doc.slug}`}
-                        </span>
-                      </TableCell>
-                      <TableCell className="text-xs text-slate-700">
-                        {doc.specialization} ({doc.yearsOfExperience} yrs)
-                      </TableCell>
-                      <TableCell className="text-xs">
-                        {doc.organizationId ? (
-                          <span className="flex items-center gap-1 text-slate-800">
-                            <Building2 className="h-3 w-3 text-slate-400" />
-                            {doc.organizationId.name}
-                          </span>
-                        ) : (
-                          <Badge variant="outline" className="text-[10px] bg-slate-50">
-                            Independent Practice
-                          </Badge>
-                        )}
-                      </TableCell>
-                      <TableCell>
-                        <Badge
-                          variant="outline"
-                          className={`text-[10px] font-semibold ${
-                            doc.status === "ACTIVE"
-                              ? "bg-emerald-100 text-emerald-800 border-emerald-300"
-                              : "bg-slate-100 text-slate-800 border-slate-300"
-                          }`}
-                        >
-                          {doc.status}
-                        </Badge>
-                      </TableCell>
-                      <TableCell className="text-right space-x-1.5 whitespace-nowrap">
-                        <Button
-                          size="sm"
-                          variant="outline"
-                          onClick={() => handleToggleDoctor(doc.id, doc.status)}
-                          className="text-[10px] h-7 px-2"
-                        >
-                          {doc.status === "ACTIVE" ? "Deactivate" : "Activate"}
-                        </Button>
-                      </TableCell>
-                    </TableRow>
-                  ))}
-                  {filteredDoctors.length === 0 && (
-                    <TableRow>
-                      <TableCell colSpan={5} className="text-center py-6 text-slate-400 text-xs">
-                        No doctors match your query.
-                      </TableCell>
-                    </TableRow>
-                  )}
-                </TableBody>
-              </Table>
-            </div>
+              }
+            />
           </CardContent>
         </Card>
       )}
 
-      {/* TAB 4: WEBSITES DIRECTORY */}
-      {activeTab === "websites" && (
-        <Card className="bg-white border-slate-200">
-          <CardHeader>
-            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-              <div>
-                <CardTitle className="text-lg font-bold text-slate-900">Websites Directory</CardTitle>
-                <CardDescription className="text-xs">
-                  Manage website publication states across the multi-tenant engine
-                </CardDescription>
-              </div>
-              <div className="relative w-48 sm:w-64">
-                <Search className="h-3.5 w-3.5 absolute left-2.5 top-2.5 text-slate-400" />
-                <Input
-                  placeholder="Search slug..."
-                  value={websiteSearch}
-                  onChange={(e) => setWebsiteSearch(e.target.value)}
-                  className="pl-8 text-xs h-8"
-                />
-              </div>
-            </div>
-          </CardHeader>
-          <CardContent className="p-0">
-            <div className="overflow-x-auto">
-              <Table>
-                <TableHeader>
-                  <TableRow>
-                    <TableHead className="text-xs font-semibold">Slug URL</TableHead>
-                    <TableHead className="text-xs font-semibold">Website Type</TableHead>
-                    <TableHead className="text-xs font-semibold">Assigned Theme</TableHead>
-                    <TableHead className="text-xs font-semibold">Publish Status</TableHead>
-                    <TableHead className="text-xs font-semibold text-right">Actions</TableHead>
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {filteredWebsites.map((site) => (
-                    <TableRow key={site.id}>
-                      <TableCell className="font-mono text-xs text-emerald-800 font-semibold">
-                        <Link href={`/${site.slug}`} target="_blank" className="hover:underline flex items-center gap-1">
-                          /{site.slug}
-                          <ExternalLink className="h-3 w-3" />
-                        </Link>
-                      </TableCell>
-                      <TableCell>
-                        <Badge variant="secondary" className="text-[10px]">
-                          {site.websiteType}
-                        </Badge>
-                      </TableCell>
-                      <TableCell className="text-xs capitalize text-slate-700">
-                        {site.selectedTheme.replace("-", " ")}
-                      </TableCell>
-                      <TableCell>
-                        <Badge
-                          variant="outline"
-                          className={`text-[10px] font-semibold ${
-                            site.publishStatus === "PUBLISHED"
-                              ? "bg-emerald-100 text-emerald-800 border-emerald-300"
-                              : "bg-amber-100 text-amber-800 border-amber-300"
-                          }`}
-                        >
-                          {site.publishStatus}
-                        </Badge>
-                      </TableCell>
-                      <TableCell className="text-right space-x-1.5 whitespace-nowrap">
-                        <Button
-                          size="sm"
-                          variant="outline"
-                          onClick={() => handleToggleWebsite(site.id, site.publishStatus)}
-                          className="text-[10px] h-7 px-2"
-                        >
-                          {site.publishStatus === "PUBLISHED" ? "Unpublish to Draft" : "Publish Live"}
-                        </Button>
-                      </TableCell>
-                    </TableRow>
-                  ))}
-                  {filteredWebsites.length === 0 && (
-                    <TableRow>
-                      <TableCell colSpan={5} className="text-center py-6 text-slate-400 text-xs">
-                        No websites found.
-                      </TableCell>
-                    </TableRow>
-                  )}
-                </TableBody>
-              </Table>
-            </div>
-          </CardContent>
-        </Card>
-      )}
-
-      {/* TAB 5: USERS & ACCOUNTS */}
-      {activeTab === "users" && (
-        <Card className="bg-white border-slate-200">
-          <CardHeader>
-            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-              <div>
-                <CardTitle className="text-lg font-bold text-slate-900">User Accounts & Roles</CardTitle>
-                <CardDescription className="text-xs">
-                  Manage user authentication status and authorization access
-                </CardDescription>
-              </div>
-              <div className="relative w-48 sm:w-64">
-                <Search className="h-3.5 w-3.5 absolute left-2.5 top-2.5 text-slate-400" />
-                <Input
-                  placeholder="Search name or email..."
-                  value={userSearch}
-                  onChange={(e) => setUserSearch(e.target.value)}
-                  className="pl-8 text-xs h-8"
-                />
-              </div>
-            </div>
-          </CardHeader>
-          <CardContent className="p-0">
-            <div className="overflow-x-auto">
-              <Table>
-                <TableHeader>
-                  <TableRow>
-                    <TableHead className="text-xs font-semibold">User</TableHead>
-                    <TableHead className="text-xs font-semibold">Email</TableHead>
-                    <TableHead className="text-xs font-semibold">Role</TableHead>
-                    <TableHead className="text-xs font-semibold">Account State</TableHead>
-                    <TableHead className="text-xs font-semibold text-right">Actions</TableHead>
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {filteredUsers.map((user) => (
-                    <TableRow key={user.id}>
-                      <TableCell className="font-semibold text-xs text-slate-900">
-                        {user.name}
-                      </TableCell>
-                      <TableCell className="text-xs font-mono text-slate-600">
-                        {user.email}
-                      </TableCell>
-                      <TableCell>
-                        <Badge
-                          variant="secondary"
-                          className={`text-[10px] font-mono ${
-                            user.role === "SUPERADMIN" ? "bg-slate-900 text-white" : ""
-                          }`}
-                        >
-                          {user.role}
-                        </Badge>
-                      </TableCell>
-                      <TableCell>
-                        <Badge
-                          variant="outline"
-                          className={`text-[10px] ${
-                            user.isActive
-                              ? "bg-emerald-50 text-emerald-800 border-emerald-300"
-                              : "bg-rose-50 text-rose-800 border-rose-300"
-                          }`}
-                        >
-                          {user.isActive ? "Active" : "Inactive"}
-                        </Badge>
-                      </TableCell>
-                      <TableCell className="text-right space-x-1.5 whitespace-nowrap">
-                        {user.role !== "SUPERADMIN" ? (
-                          <Button
-                            size="sm"
-                            variant="outline"
-                            onClick={() => handleToggleUser(user.id, user.isActive)}
-                            className="text-[10px] h-7 px-2"
-                          >
-                            {user.isActive ? "Deactivate" : "Activate"}
-                          </Button>
-                        ) : (
-                          <span className="text-[10px] text-slate-400 italic">Protected</span>
-                        )}
-                      </TableCell>
-                    </TableRow>
-                  ))}
-                  {filteredUsers.length === 0 && (
-                    <TableRow>
-                      <TableCell colSpan={5} className="text-center py-6 text-slate-400 text-xs">
-                        No users match your query.
-                      </TableCell>
-                    </TableRow>
-                  )}
-                </TableBody>
-              </Table>
-            </div>
-          </CardContent>
-        </Card>
-      )}
-
-      {/* TAB 6: APPOINTMENTS */}
-      {activeTab === "appointments" && (
-        <Card className="bg-white border-slate-200">
-          <CardHeader>
-            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-              <div>
-                <CardTitle className="text-lg font-bold text-slate-900">Platform-Wide Patient Appointments</CardTitle>
-                <CardDescription className="text-xs">
-                  All bookings across hospitals, clinics, and independent doctors
-                </CardDescription>
-              </div>
-              <div className="relative w-48 sm:w-64">
-                <Search className="h-3.5 w-3.5 absolute left-2.5 top-2.5 text-slate-400" />
-                <Input
-                  placeholder="Search patient name, phone..."
-                  value={appointmentSearch}
-                  onChange={(e) => setAppointmentSearch(e.target.value)}
-                  className="pl-8 text-xs h-8"
-                />
-              </div>
-            </div>
-          </CardHeader>
-          <CardContent className="p-0">
-            <div className="overflow-x-auto">
-              <Table>
-                <TableHeader>
-                  <TableRow>
-                    <TableHead className="text-xs font-semibold">Patient</TableHead>
-                    <TableHead className="text-xs font-semibold">Phone</TableHead>
-                    <TableHead className="text-xs font-semibold">Doctor / Practice</TableHead>
-                    <TableHead className="text-xs font-semibold">Date & Slot</TableHead>
-                    <TableHead className="text-xs font-semibold">Status</TableHead>
-                    <TableHead className="text-xs font-semibold text-right">Actions</TableHead>
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {filteredAppointments.map((appt) => (
-                    <TableRow key={appt.id}>
-                      <TableCell className="font-semibold text-xs text-slate-900">
-                        {appt.patientName}
-                      </TableCell>
-                      <TableCell className="text-xs font-mono text-slate-600">
-                        {appt.patientPhone}
-                      </TableCell>
-                      <TableCell className="text-xs text-slate-700">
-                        {appt.doctorId?.doctorName ? `Dr. ${appt.doctorId.doctorName}` : "—"}
-                        {appt.organizationId?.name && (
-                          <span className="block text-[10px] text-slate-500">
-                            {appt.organizationId.name}
-                          </span>
-                        )}
-                      </TableCell>
-                      <TableCell className="text-xs text-slate-700">
-                        <span className="font-semibold block">{appt.appointmentDate}</span>
-                        <span className="text-[11px] text-slate-500">{appt.timeSlot}</span>
-                      </TableCell>
-                      <TableCell>
-                        <Badge
-                          variant="outline"
-                          className={`text-[10px] ${
-                            appt.status === "CONFIRMED"
-                              ? "bg-emerald-50 text-emerald-800 border-emerald-300"
-                              : appt.status === "PENDING"
-                              ? "bg-amber-50 text-amber-800 border-amber-300"
-                              : appt.status === "COMPLETED"
-                              ? "bg-sky-50 text-sky-800 border-sky-300"
-                              : "bg-rose-50 text-rose-800 border-rose-300"
-                          }`}
-                        >
-                          {appt.status}
-                        </Badge>
-                      </TableCell>
-                      <TableCell className="text-right space-x-1.5 whitespace-nowrap">
-                        {appt.status === "PENDING" && (
-                          <Button
-                            size="sm"
-                            variant="outline"
-                            onClick={() => handleUpdateAppt(appt.id, "CONFIRMED")}
-                            className="text-[10px] h-7 px-2 border-emerald-300 text-emerald-700 hover:bg-emerald-50"
-                          >
-                            Confirm
-                          </Button>
-                        )}
-                        {appt.status !== "CANCELLED" && (
-                          <Button
-                            size="sm"
-                            variant="ghost"
-                            onClick={() => handleUpdateAppt(appt.id, "CANCELLED")}
-                            className="text-[10px] h-7 px-2 text-rose-600 hover:bg-rose-50"
-                          >
-                            Cancel
-                          </Button>
-                        )}
-                      </TableCell>
-                    </TableRow>
-                  ))}
-                  {filteredAppointments.length === 0 && (
-                    <TableRow>
-                      <TableCell colSpan={6} className="text-center py-6 text-slate-400 text-xs">
-                        No appointments found.
-                      </TableCell>
-                    </TableRow>
-                  )}
-                </TableBody>
-              </Table>
-            </div>
-          </CardContent>
-        </Card>
-      )}
-
-      {/* TAB 7: SECURITY & AUDIT TRAIL */}
-      {activeTab === "audit" && (
-        <Card className="bg-white border-slate-200">
-          <CardHeader>
-            <CardTitle className="text-lg font-bold text-slate-900">Security Audit Trail</CardTitle>
-            <CardDescription className="text-xs">
-              Immutable chronological record of administrative actions and status updates
-            </CardDescription>
-          </CardHeader>
-          <CardContent className="p-0">
-            <div className="overflow-x-auto">
-              <Table>
-                <TableHeader>
-                  <TableRow>
-                    <TableHead className="text-xs font-semibold">Action</TableHead>
-                    <TableHead className="text-xs font-semibold">Actor Email</TableHead>
-                    <TableHead className="text-xs font-semibold">Role</TableHead>
-                    <TableHead className="text-xs font-semibold">Entity Type</TableHead>
-                    <TableHead className="text-xs font-semibold">Timestamp</TableHead>
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {auditLogs.map((log) => (
-                    <TableRow key={log.id}>
-                      <TableCell className="font-mono text-xs font-bold text-slate-900">
-                        {log.action}
-                      </TableCell>
-                      <TableCell className="text-xs font-mono text-slate-600">
-                        {log.userEmail}
-                      </TableCell>
-                      <TableCell>
-                        <Badge variant="secondary" className="text-[10px]">
-                          {log.userRole}
-                        </Badge>
-                      </TableCell>
-                      <TableCell className="text-xs text-slate-700">
-                        {log.entityType}
-                      </TableCell>
-                      <TableCell className="text-xs text-slate-500 font-mono">
-                        {new Date(log.timestamp).toLocaleString()}
-                      </TableCell>
-                    </TableRow>
-                  ))}
-                  {auditLogs.length === 0 && (
-                    <TableRow>
-                      <TableCell colSpan={5} className="text-center py-6 text-slate-400 text-xs">
-                        No audit events recorded yet.
-                      </TableCell>
-                    </TableRow>
-                  )}
-                </TableBody>
-              </Table>
-            </div>
-          </CardContent>
-        </Card>
-      )}
-
-      {/* TAB 8: DESIGN TEMPLATES PREVIEW */}
-      {activeTab === "templates" && (
+      {/* TAB 4: PLATFORM INFORMATION (FORMERLY PLATFORM SETTINGS) */}
+      {activeTab === "settings" && (
         <div className="space-y-6">
-          <div>
-            <h3 className="text-lg font-bold text-slate-900">Prebuilt Website Themes</h3>
-            <p className="text-xs text-slate-500">
-              Deterministic, non-AI templates powering all healthcare websites on Doczeno
-            </p>
-          </div>
+          <Card className="bg-white border-slate-200 shadow-xs">
+            <CardHeader className="border-b bg-slate-50/50 pb-4">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                <div>
+                  <CardTitle className="text-lg font-bold text-slate-900 flex items-center gap-2">
+                    <Globe className="h-5 w-5 text-primary" />
+                    Platform Information
+                  </CardTitle>
+                  <CardDescription className="text-xs text-slate-600 mt-1">
+                    Website domain & public healthcare URL address structure
+                  </CardDescription>
+                </div>
+              </div>
+            </CardHeader>
+            <CardContent className="p-6 space-y-6">
+              {/* Dynamic Live Link Preview Grid */}
+              <div className="space-y-3">
+                <div className="flex items-center justify-between">
+                  <h4 className="text-sm font-semibold text-slate-900 flex items-center gap-1.5">
+                    <Link2 className="h-4 w-4 text-primary" />
+                    Live Link Previews with Configured Domain
+                  </h4>
+                  <span className="text-[11px] text-slate-500">Live preview of how links appear to patients</span>
+                </div>
 
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-            <Card className="bg-white border-slate-200">
-              <CardHeader>
-                <Badge variant="secondary" className="w-fit text-[10px] mb-1">Theme 01</Badge>
-                <CardTitle className="text-base font-bold text-slate-900">Clinical Editorial</CardTitle>
-                <CardDescription className="text-xs">
-                  Academic, authoritative, serif accents, structured multi-column hero.
-                </CardDescription>
-              </CardHeader>
-              <CardContent className="space-y-2 text-xs text-slate-600">
-                <div className="p-2 bg-slate-50 rounded border text-[11px]">
-                  <strong>Layout:</strong> Split hero with clinical credentials & badge highlights.
-                </div>
-                <div className="p-2 bg-slate-50 rounded border text-[11px]">
-                  <strong>Target:</strong> Senior specialists, teaching hospitals, research clinics.
-                </div>
-              </CardContent>
-            </Card>
+                {(() => {
+                  const previewDomain = "doczeno.vercel.app";
+                  return (
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                      {/* Doctor Website Link */}
+                      <div className="p-4 rounded-lg border border-slate-200 bg-slate-50/60 space-y-1.5">
+                        <div className="flex items-center gap-2 text-xs font-semibold text-slate-800">
+                          <Stethoscope className="h-4 w-4 text-[#1a76d1]" />
+                          Autonomous Doctor Website
+                        </div>
+                        <p className="text-[11px] text-slate-500">
+                          Format: <code>/{'{doctor-slug}'}</code>
+                        </p>
+                        <div className="p-2 bg-white rounded border border-slate-200 font-mono text-xs text-[#1a76d1] font-semibold select-all break-all">
+                          https://{previewDomain}/dr-name
+                        </div>
+                      </div>
 
-            <Card className="bg-white border-slate-200">
-              <CardHeader>
-                <Badge variant="secondary" className="w-fit text-[10px] mb-1">Theme 02</Badge>
-                <CardTitle className="text-base font-bold text-slate-900">Modern Minimal</CardTitle>
-                <CardDescription className="text-xs">
-                  Clean sans-serif, high whitespace, centered hero with quick appointment modal.
-                </CardDescription>
-              </CardHeader>
-              <CardContent className="space-y-2 text-xs text-slate-600">
-                <div className="p-2 bg-slate-50 rounded border text-[11px]">
-                  <strong>Layout:</strong> Centered minimal hero with floating consultation stats.
-                </div>
-                <div className="p-2 bg-slate-50 rounded border text-[11px]">
-                  <strong>Target:</strong> Contemporary clinics, wellness centers, urban practices.
-                </div>
-              </CardContent>
-            </Card>
+                      {/* Hospital Website Link */}
+                      <div className="p-4 rounded-lg border border-slate-200 bg-slate-50/60 space-y-1.5">
+                        <div className="flex items-center gap-2 text-xs font-semibold text-slate-800">
+                          <Building2 className="h-4 w-4 text-sky-600" />
+                          Hospital & Clinic Website
+                        </div>
+                        <p className="text-[11px] text-slate-500">
+                          Format: <code>/{'{hospital-slug}'}</code>
+                        </p>
+                        <div className="p-2 bg-white rounded border border-slate-200 font-mono text-xs text-sky-700 font-medium select-all break-all">
+                          https://{previewDomain}/hospital-name
+                        </div>
+                      </div>
 
-            <Card className="bg-white border-slate-200">
-              <CardHeader>
-                <Badge variant="secondary" className="w-fit text-[10px] mb-1">Theme 03</Badge>
-                <CardTitle className="text-base font-bold text-slate-900">Vital Compact</CardTitle>
-                <CardDescription className="text-xs">
-                  High-contrast density, immediate emergency and booking CTA ribbon.
-                </CardDescription>
-              </CardHeader>
-              <CardContent className="space-y-2 text-xs text-slate-600">
-                <div className="p-2 bg-slate-50 rounded border text-[11px]">
-                  <strong>Layout:</strong> Full-width quick action bar, tabbed departments.
-                </div>
-                <div className="p-2 bg-slate-50 rounded border text-[11px]">
-                  <strong>Target:</strong> Multi-specialty hospitals, emergency centers, polyclinics.
-                </div>
-              </CardContent>
-            </Card>
-          </div>
+                      {/* Hospital-Affiliated Doctor */}
+                      <div className="p-4 rounded-lg border border-slate-200 bg-slate-50/60 space-y-1.5">
+                        <div className="flex items-center gap-2 text-xs font-semibold text-slate-800">
+                          <Link2 className="h-4 w-4 text-indigo-600" />
+                          Hospital-Affiliated Doctor Link
+                        </div>
+                        <p className="text-[11px] text-slate-500">
+                          Format: <code>/{'{hospital-slug}'}/{'{doctor-slug}'}</code>
+                        </p>
+                        <div className="p-2 bg-white rounded border border-slate-200 font-mono text-xs text-indigo-700 font-medium select-all break-all">
+                          https://{previewDomain}/hospital-name/dr-name
+                        </div>
+                      </div>
+
+                      {/* Patient Reception QR Code */}
+                      <div className="p-4 rounded-lg border border-slate-200 bg-slate-50/60 space-y-1.5">
+                        <div className="flex items-center gap-2 text-xs font-semibold text-slate-800">
+                          <QrCode className="h-4 w-4 text-amber-600" />
+                          Patient Reception QR Code Link
+                        </div>
+                        <p className="text-[11px] text-slate-500">
+                          Target URL embedded into desk standees & flyers
+                        </p>
+                        <div className="p-2 bg-white rounded border border-slate-200 font-mono text-xs text-amber-700 font-medium select-all break-all">
+                          https://{previewDomain}/dr-name
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })()}
+              </div>
+            </CardContent>
+          </Card>
         </div>
       )}
 
-      {/* TAB 9: PLATFORM SETTINGS */}
-      {activeTab === "settings" && (
-        <Card className="bg-white border-slate-200">
-          <CardHeader>
-            <CardTitle className="text-lg font-bold text-slate-900">Platform Settings</CardTitle>
-            <CardDescription className="text-xs">
-              Global Doczeno healthcare configuration and operational policies
-            </CardDescription>
-          </CardHeader>
-          <CardContent className="space-y-4 max-w-xl text-xs">
-            <div>
-              <span className="font-semibold text-slate-700 block">Platform Version</span>
-              <p className="font-mono text-slate-900 mt-1">Doczeno 2.0 (Strict Frontend / Backend Separation)</p>
+      {/* TAB 5: GEMINI AI OBSERVABILITY & USAGE (LAST TAB) */}
+      {activeTab === "gemini-api" && <GeminiAnalyticsView />}
+
+      {/* Website Modal Popup for Permanent Delete */}
+      <Dialog
+        open={!!deleteTarget}
+        onOpenChange={(open) => {
+          if (!open && !isDeleting) {
+            setDeleteTarget(null);
+          }
+        }}
+      >
+        <DialogContent className="sm:max-w-md bg-white border border-slate-200 shadow-2xl rounded-2xl p-6">
+          <DialogHeader className="space-y-3">
+            <div className="mx-auto sm:mx-0 flex h-12 w-12 items-center justify-center rounded-full bg-rose-100 text-rose-600 ring-8 ring-rose-50">
+              <AlertTriangle className="h-6 w-6" />
             </div>
             <div>
-              <span className="font-semibold text-slate-700 block">Backend Authority API</span>
-              <p className="font-mono text-slate-900 mt-1">Express API on port 5000 with JWT Auth</p>
+              <DialogTitle className="text-lg font-bold text-slate-900 tracking-tight">
+                Permanent Delete: {deleteTarget?.type === "doctor" ? `Dr. ${deleteTarget?.name}` : deleteTarget?.name}
+              </DialogTitle>
+              <DialogDescription className="text-sm text-slate-600 mt-1">
+                Are you sure you want to permanently delete{" "}
+                <span className="font-semibold text-slate-900">
+                  {deleteTarget?.type === "doctor" ? `Dr. ${deleteTarget?.name}` : deleteTarget?.name}
+                </span>
+                ?
+              </DialogDescription>
             </div>
-            <div>
-              <span className="font-semibold text-slate-700 block">Frontend Rendering System</span>
-              <p className="font-mono text-slate-900 mt-1">Next.js App Router on port 3000</p>
-            </div>
-            <div>
-              <span className="font-semibold text-slate-700 block">Doctor Name Prefix Standard</span>
-              <p className="text-slate-900 mt-1">Strict `Dr.` prefix normalization enforced across UI & API</p>
-            </div>
-          </CardContent>
-        </Card>
-      )}
+          </DialogHeader>
+
+          <div className="rounded-xl bg-rose-50/80 border border-rose-200/80 p-4 text-xs text-rose-900 space-y-2 my-2">
+            <p className="font-semibold flex items-center gap-1.5 text-rose-700">
+              <AlertTriangle className="h-4 w-4 shrink-0 text-rose-600" />
+              This action CANNOT be undone.
+            </p>
+            <p className="leading-relaxed text-slate-700">
+              {deleteTarget?.type === "org"
+                ? "This will permanently purge the hospital/clinic, all affiliated doctors, websites, appointments, reviews, user accounts, and media files from the database and Cloudinary."
+                : "This will permanently purge the doctor profile, website, appointments, reviews, user account, and media files from the database and Cloudinary."}
+            </p>
+          </div>
+
+          <DialogFooter className="flex flex-row justify-end gap-2.5 mt-4">
+            <Button
+              type="button"
+              variant="outline"
+              disabled={isDeleting}
+              onClick={() => setDeleteTarget(null)}
+              className="text-slate-700 hover:bg-slate-100 text-xs h-9 px-4 rounded-lg font-medium"
+            >
+              Cancel
+            </Button>
+            <Button
+              type="button"
+              disabled={isDeleting}
+              onClick={confirmPermanentDelete}
+              className="bg-rose-600 hover:bg-rose-700 text-white font-semibold text-xs h-9 px-4 rounded-lg shadow-sm transition-all"
+            >
+              {isDeleting ? (
+                "Deleting..."
+              ) : (
+                <span className="flex items-center gap-1.5">
+                  <Trash2 className="h-3.5 w-3.5" />
+                  Permanently Delete
+                </span>
+              )}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </AdminShell>
   );
 }

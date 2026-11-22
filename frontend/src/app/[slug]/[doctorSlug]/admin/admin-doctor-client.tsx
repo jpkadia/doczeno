@@ -10,6 +10,10 @@ import {
 import { apiClient } from "@/lib/api-client";
 import { useRouter } from "next/navigation";
 
+import { InactivityGuard } from "@/components/admin/inactivity-guard";
+import { SmartAdminLoadingSkeleton } from "@/components/admin/admin-skeleton";
+import { toast } from "sonner";
+
 interface AdminDoctorClientProps {
   initialWebsite: EffectiveWebsiteData;
   orgSlug: string;
@@ -22,32 +26,94 @@ export function AdminDoctorClient({
   doctorSlug,
 }: AdminDoctorClientProps) {
   const router = useRouter();
+  const [isAuthenticated, setIsAuthenticated] = React.useState(false);
+  const [isCheckingAuth, setIsCheckingAuth] = React.useState(true);
 
   React.useEffect(() => {
     async function verifyAuth() {
       try {
-        await apiClient.get("/auth/me");
-      } catch (err: unknown) {
-        if ((err as { status?: number })?.status === 401) {
-          router.replace(`/${orgSlug}/${doctorSlug}/admin/login`);
+        const res = await apiClient.get<{ success: boolean; data?: { authorized?: boolean } }>(
+          `/auth/me?targetSlug=${encodeURIComponent(orgSlug)}&doctorSlug=${encodeURIComponent(doctorSlug)}`
+        );
+        if (res.success && res.data?.authorized) {
+          setIsAuthenticated(true);
+        } else {
+          if (typeof window !== "undefined") {
+            window.location.replace(`/${orgSlug}/${doctorSlug}/admin/login?unauthorized=true`);
+          } else {
+            router.replace(`/${orgSlug}/${doctorSlug}/admin/login?unauthorized=true`);
+          }
         }
+      } catch (err: unknown) {
+        const status = (err as { status?: number })?.status;
+        if (status === 403) {
+          toast.error("Unauthorized: You do not have permission to manage this doctor portal.");
+          if (typeof window !== "undefined") {
+            window.location.replace(`/${orgSlug}/${doctorSlug}/admin/login?unauthorized=true`);
+          } else {
+            router.replace(`/${orgSlug}/${doctorSlug}/admin/login?unauthorized=true`);
+          }
+        } else {
+          if (typeof window !== "undefined") {
+            window.location.replace(`/${orgSlug}/${doctorSlug}/admin/login`);
+          } else {
+            router.replace(`/${orgSlug}/${doctorSlug}/admin/login`);
+          }
+        }
+      } finally {
+        setIsCheckingAuth(false);
       }
     }
     verifyAuth();
   }, [orgSlug, doctorSlug, router]);
 
+  const [appointments, setAppointments] = React.useState<DoctorAppointmentItem[]>([]);
+
+  React.useEffect(() => {
+    async function loadDoctorAppointments() {
+      try {
+        const res = await apiClient.get<{
+          success: boolean;
+          data?: { appointments?: any[] };
+        }>("/appointments");
+        if (res.success && res.data?.appointments) {
+          setAppointments(
+            res.data.appointments.map((a: any) => ({
+              id: a._id || a.id,
+              patientName: a.patientName,
+              patientPhone: a.patientPhone,
+              appointmentDate: a.appointmentDate ? (new Date(a.appointmentDate).toISOString().split("T")[0] || "") : "",
+              timeSlot: a.timeSlot || a.preferredTimeSlot || "Morning",
+              status: a.status,
+              notes: a.notes,
+            }))
+          );
+        }
+      } catch {
+        // Fallback to empty
+      }
+    }
+    if (isAuthenticated) {
+      loadDoctorAppointments();
+    }
+  }, [isAuthenticated]);
+
+  if (isCheckingAuth || !isAuthenticated) {
+    return <SmartAdminLoadingSkeleton />;
+  }
+
   const doctorData: HospitalDoctorData = {
-    id: doctorSlug,
+    id: initialWebsite.doctorId || doctorSlug,
     slug: doctorSlug,
-    doctorName: initialWebsite.doctorName || "Rajiv Shah",
+    doctorName: initialWebsite.doctorName || "Doctor",
     gender: initialWebsite.gender || "Male",
-    degree: initialWebsite.degree || "MBBS, DM (Cardiology)",
-    specialization: initialWebsite.specialization || "Interventional Cardiology",
-    yearsOfExperience: initialWebsite.yearsOfExperience || 14,
-    whatsApp: initialWebsite.whatsApp || "+91 9876543210",
+    degree: initialWebsite.degree || "",
+    specialization: initialWebsite.specialization || "",
+    yearsOfExperience: initialWebsite.yearsOfExperience || 0,
+    whatsApp: initialWebsite.whatsApp || "",
     email: initialWebsite.email || `${doctorSlug}@${orgSlug}.com`,
-    phone: initialWebsite.phone || "+91 9876543210",
-    bio: initialWebsite.bio || "Senior consultant cardiologist providing advanced clinical care.",
+    phone: initialWebsite.phone || "",
+    bio: initialWebsite.bio || "",
     doctorPhoto: initialWebsite.doctorPhoto,
     consultationHours: initialWebsite.consultationHours || "10:00 AM - 01:00 PM, 05:00 PM - 07:00 PM",
     weeklyOff: initialWebsite.weeklyOff || "Sunday",
@@ -55,47 +121,20 @@ export function AdminDoctorClient({
     status: "ACTIVE",
     inheritedHospitalData: {
       organizationId: initialWebsite.hospitalSlug || orgSlug,
-      organizationName: initialWebsite.organizationName || "Apollo Hospitals Ahmedabad",
+      organizationName: initialWebsite.organizationName || "Hospital",
       organizationSlug: orgSlug,
       organizationType: initialWebsite.organizationType || "HOSPITAL",
-      address: initialWebsite.address || {
-        street: "Plot 1A, GIDC Bhat",
-        city: "Ahmedabad",
-        state: "Gujarat",
-        pincode: "382428",
-        country: "India",
-      },
+      address: initialWebsite.address,
       logo: initialWebsite.logo,
       galleryPhotos: initialWebsite.galleryPhotos || [],
-      selectedTheme: initialWebsite.selectedTheme || "clinical-editorial",
+      selectedTheme: initialWebsite.selectedTheme || "hospital-classic",
       faviconUrl: initialWebsite.faviconUrl,
-      browserTabTitle: initialWebsite.browserTabTitle || `${initialWebsite.organizationName} — Healthcare`,
+      browserTabTitle: initialWebsite.browserTabTitle || `${initialWebsite.organizationName || "Hospital"} — Healthcare`,
       isLocked: true,
       lockMessage: "Managed by Hospital Admin",
     },
     publishStatus: "PUBLISHED",
   };
-
-  const initialAppointments: DoctorAppointmentItem[] = [
-    {
-      id: "doc-appt-1",
-      patientName: "Kavita Reddy",
-      patientPhone: "+91 98765 33333",
-      appointmentDate: "2026-10-14",
-      timeSlot: "10:00 AM",
-      status: "CONFIRMED",
-      notes: "Echo & consultation",
-    },
-    {
-      id: "doc-appt-2",
-      patientName: "Rohan Varma",
-      patientPhone: "+91 98765 44444",
-      appointmentDate: "2026-10-15",
-      timeSlot: "11:30 AM",
-      status: "PENDING",
-      notes: "Follow-up",
-    },
-  ];
 
   const handleSave = async (updated: Partial<HospitalDoctorData>) => {
     try {
@@ -113,12 +152,30 @@ export function AdminDoctorClient({
     }
   };
 
+  const handleLogout = async () => {
+    try {
+      await apiClient.post("/auth/logout");
+      toast.success("Logged out successfully.");
+    } catch {
+      // Ignore
+    } finally {
+      if (typeof window !== "undefined") {
+        window.location.replace(`/${orgSlug}/${doctorSlug}/admin/login`);
+      } else {
+        router.replace(`/${orgSlug}/${doctorSlug}/admin/login`);
+      }
+    }
+  };
+
   return (
-    <HospitalDoctorAdmin
-      initialData={doctorData}
-      initialAppointments={initialAppointments}
-      onSave={handleSave}
-      onUpdateAppointmentStatus={handleUpdateAppt}
-    />
+    <InactivityGuard logoutRedirectUrl={`/${orgSlug}/${doctorSlug}/admin/login`}>
+      <HospitalDoctorAdmin
+        initialData={doctorData}
+        initialAppointments={appointments}
+        onSave={handleSave}
+        onUpdateAppointmentStatus={handleUpdateAppt}
+        onLogout={handleLogout}
+      />
+    </InactivityGuard>
   );
 }

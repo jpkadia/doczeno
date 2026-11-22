@@ -1,7 +1,8 @@
 import { MetadataRoute } from "next";
 
 export default async function sitemap(): Promise<MetadataRoute.Sitemap> {
-  const baseUrl = "https://doctorwebsite.in";
+  const domain = "doczeno.vercel.app";
+  const baseUrl = `https://${domain}`;
 
   // Static routes
   const staticRoutes: MetadataRoute.Sitemap = [
@@ -10,12 +11,6 @@ export default async function sitemap(): Promise<MetadataRoute.Sitemap> {
       lastModified: new Date(),
       changeFrequency: "weekly",
       priority: 1.0,
-    },
-    {
-      url: `${baseUrl}/onboarding`,
-      lastModified: new Date(),
-      changeFrequency: "monthly",
-      priority: 0.8,
     },
     {
       url: `${baseUrl}/onboarding/doctor`,

@@ -24,6 +24,20 @@ export interface IPendingAction {
   expiresAt: Date;
 }
 
+export interface IAppointmentDraft {
+  step: "COLLECTING" | "AWAITING_CONFIRMATION" | "BOOKED";
+  patientName?: string;
+  patientAge?: number;
+  patientPhone?: string;
+  patientEmail?: string;
+  appointmentDate?: string;
+  timeSlot?: string;
+  notes?: string;
+  doctorId?: string;
+  doctorName?: string;
+  organizationId?: string;
+}
+
 export interface IChatbotConversation extends Document {
   conversationType: "PUBLIC" | "ADMIN";
   organizationId?: mongoose.Types.ObjectId | null;
@@ -33,6 +47,7 @@ export interface IChatbotConversation extends Document {
   sessionId: string;
   messages: IChatMessage[];
   pendingAction?: IPendingAction | null;
+  appointmentDraft?: IAppointmentDraft | null;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -86,6 +101,27 @@ const PendingActionSchema = new Schema<IPendingAction>(
   { _id: false }
 );
 
+const AppointmentDraftSchema = new Schema<IAppointmentDraft>(
+  {
+    step: {
+      type: String,
+      enum: ["COLLECTING", "AWAITING_CONFIRMATION", "BOOKED"],
+      default: "COLLECTING",
+    },
+    patientName: { type: String, trim: true },
+    patientAge: { type: Number, min: 1, max: 120 },
+    patientPhone: { type: String, trim: true },
+    patientEmail: { type: String, trim: true },
+    appointmentDate: { type: String, trim: true },
+    timeSlot: { type: String, trim: true },
+    notes: { type: String, trim: true },
+    doctorId: { type: String },
+    doctorName: { type: String },
+    organizationId: { type: String },
+  },
+  { _id: false }
+);
+
 const ChatbotConversationSchema = new Schema<IChatbotConversation>(
   {
     conversationType: {
@@ -131,15 +167,27 @@ const ChatbotConversationSchema = new Schema<IChatbotConversation>(
       type: PendingActionSchema,
       default: null,
     },
+    appointmentDraft: {
+      type: AppointmentDraftSchema,
+      default: null,
+    },
   },
   {
     timestamps: true,
   }
 );
 
-// Indexes for conversation history lookup and cleanup
+// Indexes for conversation history lookup, tenant filtering, and automatic 30-day cleanup
 ChatbotConversationSchema.index({ sessionId: 1, conversationType: 1 });
 ChatbotConversationSchema.index({ userId: 1, conversationType: 1 });
+ChatbotConversationSchema.index({ doctorId: 1, conversationType: 1, updatedAt: -1 });
+ChatbotConversationSchema.index({ organizationId: 1, conversationType: 1, updatedAt: -1 });
+
+// Automatically expire and delete conversations 30 days after last update
+ChatbotConversationSchema.index(
+  { updatedAt: 1 },
+  { expireAfterSeconds: 30 * 24 * 60 * 60 }
+);
 
 export const ChatbotConversation: Model<IChatbotConversation> =
   mongoose.models.ChatbotConversation ||

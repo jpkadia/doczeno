@@ -38,6 +38,10 @@ yarn-error.log*
 */.env.local
 *.pem
 
+# Local media uploads
+uploads/
+*/uploads/
+
 # Vercel & IDE
 .vercel
 .idea

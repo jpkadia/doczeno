@@ -19,9 +19,9 @@ export const faqItemSchema = z.object({
 });
 
 /**
- * 1. Independent Doctor Generated Content Schema
+ * 1. Only Doctor Generated Content Schema
  */
-export const independentDoctorContentSchema = z.object({
+export const onlyDoctorContentSchema = z.object({
   tagline: z.string().min(5).max(150),
   about: z.string().min(20).max(1500),
   shortIntro: z.string().min(10).max(400),
@@ -32,7 +32,7 @@ export const independentDoctorContentSchema = z.object({
   seoDescription: z.string().min(10).max(160),
 });
 
-export type IndependentDoctorGeneratedContent = z.infer<typeof independentDoctorContentSchema>;
+export type OnlyDoctorGeneratedContent = z.infer<typeof onlyDoctorContentSchema>;
 
 /**
  * 2. Hospital / Clinic Generated Content Schema
@@ -54,9 +54,11 @@ export type HospitalGeneratedContent = z.infer<typeof hospitalContentSchema>;
  * 3. Hospital Doctor Generated Content Schema
  */
 export const hospitalDoctorContentSchema = z.object({
+  tagline: z.string().min(5).max(150).optional(),
   professionalIntro: z.string().min(10).max(500),
   about: z.string().min(20).max(1500),
   expertiseSummary: z.string().min(10).max(600),
+  services: z.array(serviceItemSchema).min(1).max(12).optional(),
   faqs: z.array(faqItemSchema).min(1).max(10),
   seoTitle: z.string().min(5).max(70),
   seoDescription: z.string().min(10).max(160),
@@ -68,7 +70,8 @@ export type HospitalDoctorGeneratedContent = z.infer<typeof hospitalDoctorConten
  * Target Types
  */
 export const AiTargetType = {
-  INDEPENDENT_DOCTOR: "INDEPENDENT_DOCTOR",
+  ONLY_DOCTOR: "ONLY_DOCTOR",
+  INDEPENDENT_DOCTOR: "ONLY_DOCTOR",
   HOSPITAL: "HOSPITAL",
   HOSPITAL_DOCTOR: "HOSPITAL_DOCTOR",
 } as const;
@@ -92,15 +95,15 @@ export type AiContentStatus = (typeof AiContentStatus)[keyof typeof AiContentSta
 /**
  * Section Validation Maps
  */
-export const independentDoctorSectionSchemas: Record<string, z.ZodTypeAny> = {
-  tagline: independentDoctorContentSchema.shape.tagline,
-  about: independentDoctorContentSchema.shape.about,
-  shortIntro: independentDoctorContentSchema.shape.shortIntro,
-  clinicDescription: independentDoctorContentSchema.shape.clinicDescription,
-  services: independentDoctorContentSchema.shape.services,
-  faqs: independentDoctorContentSchema.shape.faqs,
-  seoTitle: independentDoctorContentSchema.shape.seoTitle,
-  seoDescription: independentDoctorContentSchema.shape.seoDescription,
+export const onlyDoctorSectionSchemas: Record<string, z.ZodTypeAny> = {
+  tagline: onlyDoctorContentSchema.shape.tagline,
+  about: onlyDoctorContentSchema.shape.about,
+  shortIntro: onlyDoctorContentSchema.shape.shortIntro,
+  clinicDescription: onlyDoctorContentSchema.shape.clinicDescription,
+  services: onlyDoctorContentSchema.shape.services,
+  faqs: onlyDoctorContentSchema.shape.faqs,
+  seoTitle: onlyDoctorContentSchema.shape.seoTitle,
+  seoDescription: onlyDoctorContentSchema.shape.seoDescription,
 };
 
 export const hospitalSectionSchemas: Record<string, z.ZodTypeAny> = {
@@ -115,17 +118,19 @@ export const hospitalSectionSchemas: Record<string, z.ZodTypeAny> = {
 };
 
 export const hospitalDoctorSectionSchemas: Record<string, z.ZodTypeAny> = {
+  tagline: hospitalDoctorContentSchema.shape.tagline,
   professionalIntro: hospitalDoctorContentSchema.shape.professionalIntro,
   about: hospitalDoctorContentSchema.shape.about,
   expertiseSummary: hospitalDoctorContentSchema.shape.expertiseSummary,
+  services: hospitalDoctorContentSchema.shape.services,
   faqs: hospitalDoctorContentSchema.shape.faqs,
   seoTitle: hospitalDoctorContentSchema.shape.seoTitle,
   seoDescription: hospitalDoctorContentSchema.shape.seoDescription,
 };
 
 export function getSectionSchema(targetType: string, section: string): z.ZodTypeAny | null {
-  if (targetType === "INDEPENDENT_DOCTOR") {
-    return independentDoctorSectionSchemas[section] || null;
+  if (targetType === "ONLY_DOCTOR") {
+    return onlyDoctorSectionSchemas[section] || null;
   }
   if (targetType === "HOSPITAL") {
     return hospitalSectionSchemas[section] || null;
@@ -141,8 +146,8 @@ export function validateFullContent(
   content: unknown
 ): { success: true; data: any } | { success: false; error: string } {
   let schema: z.ZodTypeAny;
-  if (targetType === "INDEPENDENT_DOCTOR") {
-    schema = independentDoctorContentSchema;
+  if (targetType === "ONLY_DOCTOR") {
+    schema = onlyDoctorContentSchema;
   } else if (targetType === "HOSPITAL") {
     schema = hospitalContentSchema;
   } else if (targetType === "HOSPITAL_DOCTOR") {
@@ -165,23 +170,29 @@ export function validateFullContent(
  * Request Payloads
  */
 export const aiGenerateRequestSchema = z.object({
-  targetType: z.enum(["INDEPENDENT_DOCTOR", "HOSPITAL", "HOSPITAL_DOCTOR"]),
+  targetType: z.enum(["ONLY_DOCTOR", "HOSPITAL", "HOSPITAL_DOCTOR"]),
   targetId: z.string().min(1, "Target ID is required"),
 });
 
 export const aiRegenerateRequestSchema = z.object({
-  targetType: z.enum(["INDEPENDENT_DOCTOR", "HOSPITAL", "HOSPITAL_DOCTOR"]),
+  targetType: z.enum(["ONLY_DOCTOR", "HOSPITAL", "HOSPITAL_DOCTOR"]),
   targetId: z.string().min(1, "Target ID is required"),
   section: z.string().min(1, "Section to regenerate is required"),
 });
 
 export const aiApproveRequestSchema = z.object({
-  targetType: z.enum(["INDEPENDENT_DOCTOR", "HOSPITAL", "HOSPITAL_DOCTOR"]),
+  targetType: z.enum(["ONLY_DOCTOR", "HOSPITAL", "HOSPITAL_DOCTOR"]),
   targetId: z.string().min(1, "Target ID is required"),
   editedContent: z.record(z.unknown()).optional(),
 });
 
 export const aiPublishRequestSchema = z.object({
-  targetType: z.enum(["INDEPENDENT_DOCTOR", "HOSPITAL", "HOSPITAL_DOCTOR"]),
+  targetType: z.enum(["ONLY_DOCTOR", "HOSPITAL", "HOSPITAL_DOCTOR"]),
   targetId: z.string().min(1, "Target ID is required"),
+});
+
+export const aiUpdateLiveContentSchema = z.object({
+  targetType: z.enum(["ONLY_DOCTOR", "HOSPITAL", "HOSPITAL_DOCTOR"]),
+  targetId: z.string().min(1, "Target ID is required"),
+  content: z.record(z.any()),
 });

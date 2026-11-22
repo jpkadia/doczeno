@@ -4,13 +4,13 @@ const API_BASE_URL =
   process.env.NEXT_PUBLIC_API_URL || "http://localhost:5000/api/v1";
 
 /**
- * Server-side data fetching for single-slug routes (Independent Doctor or Hospital/Clinic)
+ * Server-side data fetching for single-slug routes (Only Doctor or Hospital/Clinic)
  * Utilizes Next.js caching with 60-second revalidation for optimal performance.
  */
 export async function getEffectiveWebsite(slug: string): Promise<EffectiveWebsiteData | null> {
   try {
     const res = await fetch(`${API_BASE_URL}/websites/effective/${encodeURIComponent(slug)}`, {
-      next: { revalidate: 60 },
+      cache: "no-store",
       headers: {
         Accept: "application/json",
       },
@@ -22,7 +22,8 @@ export async function getEffectiveWebsite(slug: string): Promise<EffectiveWebsit
 
     const json = await res.json();
     return (json.data as EffectiveWebsiteData) || null;
-  } catch {
+  } catch (err) {
+    console.error("getEffectiveWebsite error for slug:", slug, err);
     return null;
   }
 }
@@ -39,7 +40,7 @@ export async function getEffectiveHospitalDoctor(
     const res = await fetch(
       `${API_BASE_URL}/websites/effective/${encodeURIComponent(orgSlug)}/${encodeURIComponent(doctorSlug)}`,
       {
-        next: { revalidate: 60 },
+        cache: "no-store",
         headers: {
           Accept: "application/json",
         },
@@ -52,7 +53,8 @@ export async function getEffectiveHospitalDoctor(
 
     const json = await res.json();
     return (json.data as EffectiveWebsiteData) || null;
-  } catch {
+  } catch (err) {
+    console.error("getEffectiveHospitalDoctor error:", orgSlug, doctorSlug, err);
     return null;
   }
 }

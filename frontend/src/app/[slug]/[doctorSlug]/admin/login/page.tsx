@@ -11,9 +11,16 @@ interface PageProps {
 }
 
 export async function generateMetadata({ params }: PageProps): Promise<Metadata> {
-  const { doctorSlug } = await params;
+  const { slug, doctorSlug } = await params;
+  const website = await getEffectiveHospitalDoctor(slug, doctorSlug);
+  if (!website) {
+    return {
+      title: "Doctor Profile Not Found | Doczeno",
+      robots: { index: false, follow: false },
+    };
+  }
   return {
-    title: `Doctor Admin Login | ${doctorSlug} | Doczeno`,
+    title: `Doctor Admin Login | ${website.doctorName ? `Dr. ${website.doctorName}` : doctorSlug} | Doczeno`,
     robots: { index: false, follow: false },
   };
 }
@@ -27,15 +34,21 @@ export default async function HospitalDoctorAdminLoginPage({ params }: PageProps
 
   const website = await getEffectiveHospitalDoctor(slug, doctorSlug);
 
-  const displayName = website?.doctorName ? `Dr. ${website.doctorName}` : doctorSlug;
-  const subtitle = `Affiliated Doctor &bull; ${website?.organizationName || slug}`;
+  if (!website) {
+    notFound();
+  }
+
+  const displayName = website.doctorName ? `Dr. ${website.doctorName}` : doctorSlug;
+  const subtitle = `Affiliated Doctor &bull; ${website.organizationName || slug}`;
 
   return (
     <SlugAdminLoginClient
-      slug={doctorSlug}
+      slug={slug}
+      doctorSlug={doctorSlug}
+      redirectPath={`/${slug}/${doctorSlug}/admin`}
       displayName={displayName}
       subtitle={subtitle}
-      logoUrl={website?.doctorPhoto?.url || website?.logo?.url}
+      logoUrl={website.doctorPhoto?.url || website.logo?.url}
     />
   );
 }

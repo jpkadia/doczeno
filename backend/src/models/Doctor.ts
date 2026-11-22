@@ -5,7 +5,7 @@ export interface IDoctor extends Document {
   userId?: mongoose.Types.ObjectId | string | null;
   websiteId?: mongoose.Types.ObjectId | string | null;
   doctorName: string;
-  gender: "MALE" | "FEMALE" | "OTHER";
+  gender: "MALE" | "FEMALE";
   degree: string;
   specialization: string;
   yearsOfExperience: number;
@@ -14,6 +14,8 @@ export interface IDoctor extends Document {
   consultationHours?: string;
   weeklyOff?: string;
   appointmentRequired: boolean;
+  newCaseFee?: number;
+  oldCaseFee?: number;
   doctorPhoto?: {
     url: string;
     publicId?: string;
@@ -69,7 +71,7 @@ const DoctorSchema = new Schema<IDoctor>(
     },
     gender: {
       type: String,
-      enum: ["MALE", "FEMALE", "OTHER"],
+      enum: ["MALE", "FEMALE"],
       required: true,
       default: "MALE",
     },
@@ -111,6 +113,14 @@ const DoctorSchema = new Schema<IDoctor>(
       type: Boolean,
       default: true,
     },
+    newCaseFee: {
+      type: Number,
+      min: 0,
+    },
+    oldCaseFee: {
+      type: Number,
+      min: 0,
+    },
     doctorPhoto: {
       url: { type: String },
       publicId: { type: String },
@@ -144,10 +154,8 @@ const DoctorSchema = new Schema<IDoctor>(
     slug: {
       type: String,
       required: true,
-      unique: true,
       lowercase: true,
       trim: true,
-      index: true,
     },
     status: {
       type: String,
@@ -162,7 +170,7 @@ const DoctorSchema = new Schema<IDoctor>(
 );
 
 DoctorSchema.index({ organizationId: 1, status: 1 });
-DoctorSchema.index({ organizationId: 1, slug: 1 });
+DoctorSchema.index({ organizationId: 1, slug: 1 }, { unique: true });
 DoctorSchema.index({ doctorName: "text", specialization: "text" });
 
 export const Doctor: Model<IDoctor> =

@@ -1,11 +1,23 @@
 "use client";
 
 import * as React from "react";
-import { X, ArrowLeft, ArrowRight, Loader2, Image as ImageIcon } from "lucide-react";
+import { X, ArrowLeft, ArrowRight, Loader2, Image as ImageIcon, ZoomIn, Trash2, Crop as CropIcon } from "lucide-react";
+import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { MediaAsset } from "@/types";
 import { apiClient } from "@/lib/api-client";
 import { cn } from "@/lib/utils";
+import { ImageCropperDialog } from "./image-cropper-dialog";
+import { ImageLightboxDialog } from "@/components/ui/image-lightbox-dialog";
+import { toast } from "sonner";
 
 interface GalleryUploaderProps {
   label?: string;
@@ -28,11 +40,35 @@ export function GalleryUploader({
 }: GalleryUploaderProps) {
   const [isUploading, setIsUploading] = React.useState(false);
   const [uploadError, setUploadError] = React.useState<string | null>(null);
+  const [isLightboxOpen, setIsLightboxOpen] = React.useState(false);
+  const [lightboxIndex, setLightboxIndex] = React.useState(0);
+
+  // 4:3 Aspect Ratio Cropper State (Task 5 & Sequential Multiple Crop)
+  const cropQueueRef = React.useRef<File[]>([]);
+  const cropTotalCountRef = React.useRef<number>(1);
+  const cropCurrentIndexRef = React.useRef<number>(1);
+  const valueRef = React.useRef<MediaAsset[]>(value);
+  valueRef.current = value;
+
+  const [currentCropFile, setCurrentCropFile] = React.useState<File | null>(null);
+  const [cropImageSrc, setCropImageSrc] = React.useState<string | null>(null);
+  const [isCropDialogOpen, setIsCropDialogOpen] = React.useState(false);
+  const [recropIndex, setRecropIndex] = React.useState<number | null>(null);
+
+  // Delete Confirmation State
+  const [deleteTargetIndex, setDeleteTargetIndex] = React.useState<number | null>(null);
+  const [isDeleting, setIsDeleting] = React.useState(false);
+
+  // Clean label for lightbox header (strips '(Max 6)', '(Optional)', etc.)
+  const cleanLabel = React.useMemo(() => {
+    return (label || "Facility & Clinic Gallery Photos").replace(/\s*\([^)]*\)/g, "").trim();
+  }, [label]);
+
   const fileInputRef = React.useRef<HTMLInputElement>(null);
 
   const maxMb = (maxSizeBytes / (1024 * 1024)).toFixed(0);
 
-  const handleFilesSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleFilesSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files;
     if (!files || files.length === 0) return;
 
@@ -49,43 +85,126 @@ export function GalleryUploader({
       setUploadError(`Only ${availableSlots} more photo(s) can be added (max ${maxFiles})`);
     }
 
+    const validFiles: File[] = [];
+    for (const file of filesToUpload) {
+      if (file.size > maxSizeBytes) {
+        setUploadError(`File ${file.name} exceeds maximum size of ${maxMb} MB`);
+        continue;
+      }
+      validFiles.push(file);
+    }
+
+    if (validFiles.length === 0) {
+      if (fileInputRef.current) fileInputRef.current.value = "";
+      return;
+    }
+
+    // Initialize 4:3 crop sequence with queue tracking
+    setRecropIndex(null);
+    cropTotalCountRef.current = validFiles.length;
+    cropCurrentIndexRef.current = 1;
+    cropQueueRef.current = validFiles.slice(1);
+
+    const first = validFiles[0];
+    if (!first) {
+      if (fileInputRef.current) fileInputRef.current.value = "";
+      return;
+    }
+    setCurrentCropFile(first);
+    setCropImageSrc(URL.createObjectURL(first));
+    setIsCropDialogOpen(true);
+    if (fileInputRef.current) fileInputRef.current.value = "";
+  };
+
+  const handleCropConfirmed = async (croppedFile: File, _previewUrl: string) => {
     try {
       setIsUploading(true);
-      const newAssets: MediaAsset[] = [];
+      const formData = new FormData();
+      formData.append("file", croppedFile);
+      formData.append("category", "GALLERY");
+      formData.append("ownerType", "ORGANIZATION");
 
-      for (const file of filesToUpload) {
-        if (file.size > maxSizeBytes) {
-          throw new Error(`File ${file.name} exceeds maximum size of ${maxMb} MB`);
-        }
+      const res = await apiClient.post<{ asset?: MediaAsset; data?: { asset: MediaAsset } }>("/media/upload", formData);
+      const uploadedAsset = res.asset || res.data?.asset;
 
-        const formData = new FormData();
-        formData.append("file", file);
-        formData.append("category", "GALLERY");
-        formData.append("ownerType", "ORGANIZATION");
-
-        const res = await apiClient.post<{ asset?: MediaAsset; data?: { asset: MediaAsset } }>("/media/upload", formData);
-        const uploadedAsset = res.asset || res.data?.asset;
-        if (uploadedAsset) {
-          newAssets.push(uploadedAsset);
+      if (uploadedAsset) {
+        if (recropIndex !== null && recropIndex >= 0 && recropIndex < valueRef.current.length) {
+          const updated = [...valueRef.current];
+          updated[recropIndex] = uploadedAsset;
+          valueRef.current = updated;
+          onChange(updated);
+          toast.success("Photo re-cropped to 4:3 successfully.");
+          setRecropIndex(null);
+        } else {
+          const updated = [...valueRef.current, uploadedAsset];
+          valueRef.current = updated;
+          onChange(updated);
+          toast.success(`Photo ${cropCurrentIndexRef.current} of ${cropTotalCountRef.current} cropped & uploaded.`);
         }
       }
-
-      onChange([...value, ...newAssets]);
     } catch (err) {
       setUploadError(err instanceof Error ? err.message : "Gallery upload failed");
+      toast.error("Failed to upload cropped photo. Continuing with remaining photos...");
     } finally {
       setIsUploading(false);
-      if (fileInputRef.current) {
-        fileInputRef.current.value = "";
+      // Process next in queue if any
+      if (cropQueueRef.current.length > 0) {
+        const next = cropQueueRef.current.shift()!;
+        cropCurrentIndexRef.current += 1;
+        setCurrentCropFile(next);
+        setCropImageSrc(URL.createObjectURL(next));
+        setIsCropDialogOpen(true);
+      } else {
+        setIsCropDialogOpen(false);
+        setCurrentCropFile(null);
+        setCropImageSrc(null);
+        setRecropIndex(null);
+        if (cropTotalCountRef.current > 1) {
+          toast.success(`All ${cropTotalCountRef.current} gallery photos cropped and added successfully!`);
+        }
       }
     }
   };
 
-  const handleRemove = (index: number) => {
-    const updated = [...value];
-    updated.splice(index, 1);
-    onChange(updated);
-    setUploadError(null);
+  const handleCropCancelled = () => {
+    if (cropQueueRef.current.length > 0) {
+      const next = cropQueueRef.current.shift()!;
+      cropCurrentIndexRef.current += 1;
+      setCurrentCropFile(next);
+      setCropImageSrc(URL.createObjectURL(next));
+      setIsCropDialogOpen(true);
+      toast.info(`Skipped photo. Now cropping photo ${cropCurrentIndexRef.current} of ${cropTotalCountRef.current}...`);
+    } else {
+      setIsCropDialogOpen(false);
+      setCurrentCropFile(null);
+      setCropImageSrc(null);
+      setRecropIndex(null);
+    }
+  };
+
+  const handleConfirmDelete = async () => {
+    if (deleteTargetIndex === null || deleteTargetIndex < 0 || deleteTargetIndex >= value.length) return;
+    const assetToRemove = value[deleteTargetIndex];
+    try {
+      setIsDeleting(true);
+      if (assetToRemove?.publicId || assetToRemove?.url) {
+        await apiClient.post("/media/delete-asset", {
+          publicId: assetToRemove.publicId || "",
+          assetUrl: assetToRemove.url || "",
+        });
+      }
+      const updated = [...value];
+      updated.splice(deleteTargetIndex, 1);
+      onChange(updated);
+      setUploadError(null);
+      toast.success("Gallery photo deleted successfully from storage and database.");
+      setDeleteTargetIndex(null);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : "Failed to delete gallery photo";
+      toast.error(msg);
+    } finally {
+      setIsDeleting(false);
+    }
   };
 
   const handleMove = (index: number, direction: "left" | "right") => {
@@ -107,7 +226,7 @@ export function GalleryUploader({
       <div className="flex items-center justify-between">
         <Label className="text-sm font-medium">{label}</Label>
         <span className="text-xs font-semibold text-primary">
-          {value.length} / {maxFiles} images
+          4:3 Crop • {value.length} / {maxFiles} images
         </span>
       </div>
 
@@ -116,7 +235,7 @@ export function GalleryUploader({
         {value.map((asset, index) => (
           <div
             key={asset.publicId || index}
-            className="group relative rounded-lg border border-border bg-card overflow-hidden aspect-square shadow-xs"
+            className="group relative rounded-lg border border-border bg-card overflow-hidden aspect-[4/3] shadow-xs"
           >
             {/* eslint-disable-next-line @next/next/no-img-element */}
             <img
@@ -131,16 +250,49 @@ export function GalleryUploader({
                 <span className="text-[10px] text-white font-mono font-bold bg-black/40 px-1 rounded">
                   #{index + 1}
                 </span>
-                <button
-                  type="button"
-                  disabled={disabled}
-                  onClick={() => handleRemove(index)}
-                  className="text-white hover:text-red-400 p-0.5 rounded transition-colors"
-                  title="Remove image"
-                >
-                  <X className="h-4 w-4" />
-                </button>
+                <div className="flex items-center gap-1">
+                  <button
+                    type="button"
+                    disabled={disabled || isUploading}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setRecropIndex(index);
+                      cropTotalCountRef.current = 1;
+                      cropCurrentIndexRef.current = 1;
+                      cropQueueRef.current = [];
+                      setCropImageSrc(asset.url);
+                      setIsCropDialogOpen(true);
+                    }}
+                    className="text-white hover:text-primary p-0.5 rounded transition-colors"
+                    title="Re-crop photo (4:3)"
+                  >
+                    <CropIcon className="h-3.5 w-3.5" />
+                  </button>
+                  <button
+                    type="button"
+                    disabled={disabled || isDeleting}
+                    onClick={() => setDeleteTargetIndex(index)}
+                    className="text-white hover:text-red-400 p-0.5 rounded transition-colors"
+                    title="Delete image"
+                  >
+                    <X className="h-4 w-4" />
+                  </button>
+                </div>
               </div>
+
+              {/* Center Clickable Area for Full-Size Popup */}
+              <button
+                type="button"
+                onClick={() => {
+                  setLightboxIndex(index);
+                  setIsLightboxOpen(true);
+                }}
+                className="flex-1 flex flex-col items-center justify-center text-white/90 hover:text-white transition-transform hover:scale-110"
+                title="Click to view full size (without clipping)"
+              >
+                <ZoomIn className="h-5 w-5 drop-shadow-sm" />
+                <span className="text-[9px] font-medium mt-0.5">View Full</span>
+              </button>
 
               {/* Reorder Buttons */}
               <div className="flex justify-between items-center">
@@ -172,7 +324,7 @@ export function GalleryUploader({
           <div
             onClick={() => !disabled && !isUploading && fileInputRef.current?.click()}
             className={cn(
-              "flex flex-col items-center justify-center rounded-lg border border-dashed border-border bg-card/40 p-3 text-center cursor-pointer aspect-square transition-colors hover:bg-card hover:border-primary/50",
+              "flex flex-col items-center justify-center rounded-lg border border-dashed border-border bg-card/40 p-3 text-center cursor-pointer aspect-[4/3] transition-colors hover:bg-card hover:border-primary/50",
               disabled && "opacity-50 cursor-not-allowed"
             )}
           >
@@ -201,6 +353,134 @@ export function GalleryUploader({
       {(error || uploadError) && (
         <p className="text-xs text-destructive font-medium">{error || uploadError}</p>
       )}
+
+      {/* Full-Size Un-cropped Gallery Lightbox Modal */}
+      <ImageLightboxDialog
+        open={isLightboxOpen}
+        onOpenChange={setIsLightboxOpen}
+        images={value.map((a, i) => ({
+          url: a.url,
+          altText: a.altText || `Gallery image ${i + 1}`,
+          title: value.length > 1 ? `${cleanLabel} (${i + 1} of ${value.length})` : cleanLabel,
+        }))}
+        currentIndex={lightboxIndex}
+        onIndexChange={setLightboxIndex}
+      />
+
+      {/* Delete Confirmation Modal */}
+      <Dialog
+        open={deleteTargetIndex !== null}
+        onOpenChange={(open) => {
+          if (!open && !isDeleting) {
+            setDeleteTargetIndex(null);
+          }
+        }}
+      >
+        <DialogContent className="sm:max-w-[420px] p-6 bg-white border-slate-200 shadow-xl">
+          <DialogHeader>
+            <div className="flex items-center gap-3">
+              <div className="h-10 w-10 rounded-full bg-rose-100 flex items-center justify-center text-rose-600 shrink-0">
+                <Trash2 className="h-5 w-5" />
+              </div>
+              <div>
+                <DialogTitle className="text-base font-bold text-slate-900">
+                  Delete Gallery Photo?
+                </DialogTitle>
+                <DialogDescription className="text-xs text-slate-500 mt-0.5">
+                  Confirm permanent deletion
+                </DialogDescription>
+              </div>
+            </div>
+          </DialogHeader>
+
+          <div className="py-3 space-y-3">
+            <p className="text-xs text-slate-600 leading-relaxed">
+              Are you sure you want to permanently delete this photo? It will be removed from Cloudinary storage, the database, and your live website gallery.
+            </p>
+
+            {deleteTargetIndex !== null && value[deleteTargetIndex] && (
+              <div className="flex items-center gap-3 p-2.5 rounded-lg border border-slate-200 bg-slate-50">
+                <div className="h-14 w-14 rounded-md overflow-hidden bg-slate-200 shrink-0 border border-slate-200">
+                  {/* eslint-disable-next-line @next/next/no-img-element */}
+                  <img
+                    src={value[deleteTargetIndex].url}
+                    alt={value[deleteTargetIndex].altText || `Photo #${deleteTargetIndex + 1}`}
+                    className="h-full w-full object-cover"
+                  />
+                </div>
+                <div className="min-w-0 flex-1">
+                  <p className="text-xs font-semibold text-slate-800 truncate">
+                    Photo #{deleteTargetIndex + 1}
+                  </p>
+                  <p
+                    className="text-[11px] text-slate-500 font-mono truncate max-w-[260px] mt-0.5"
+                    title={value[deleteTargetIndex].publicId || "gallery-photo"}
+                  >
+                    {value[deleteTargetIndex].publicId?.split("/").pop() || "gallery-photo"}
+                  </p>
+                </div>
+              </div>
+            )}
+          </div>
+
+          <DialogFooter className="gap-2 sm:gap-0">
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              disabled={isDeleting}
+              onClick={() => setDeleteTargetIndex(null)}
+              className="text-xs"
+            >
+              Cancel
+            </Button>
+            <Button
+              type="button"
+              variant="destructive"
+              size="sm"
+              disabled={isDeleting}
+              onClick={handleConfirmDelete}
+              className="text-xs gap-1.5 bg-rose-600 hover:bg-rose-700 text-white"
+            >
+              {isDeleting ? (
+                <>
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                  <span>Deleting...</span>
+                </>
+              ) : (
+                <>
+                  <Trash2 className="h-3.5 w-3.5" />
+                  <span>Delete Photo</span>
+                </>
+              )}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* 4:3 Aspect Ratio Cropper Dialog (Task 5 & Queue Sequential Cropping) */}
+      <ImageCropperDialog
+        open={isCropDialogOpen}
+        onOpenChange={(open) => {
+          if (!open) {
+            handleCropCancelled();
+          } else {
+            setIsCropDialogOpen(true);
+          }
+        }}
+        imageSrc={cropImageSrc}
+        title={
+          cropTotalCountRef.current > 1
+            ? `Crop Gallery Photo (4:3) — Photo ${cropCurrentIndexRef.current} of ${cropTotalCountRef.current}`
+            : "Crop Gallery Photo (4:3)"
+        }
+        description="Position, zoom, and adjust your facility photo in the 4:3 landscape frame."
+        aspect={4 / 3}
+        fileName={currentCropFile?.name || "gallery-photo.jpg"}
+        closeOnConfirm={false}
+        onCropConfirmed={handleCropConfirmed}
+        onCancel={handleCropCancelled}
+      />
     </div>
   );
 }

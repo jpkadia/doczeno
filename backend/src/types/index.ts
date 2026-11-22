@@ -2,13 +2,13 @@ export const UserRole = {
   SUPERADMIN: "SUPERADMIN",
   HOSPITAL_ADMIN: "HOSPITAL_ADMIN",
   HOSPITAL_DOCTOR: "HOSPITAL_DOCTOR",
-  INDEPENDENT_DOCTOR: "INDEPENDENT_DOCTOR",
+  ONLY_DOCTOR: "ONLY_DOCTOR",
 } as const;
 
 export type UserRole = (typeof UserRole)[keyof typeof UserRole];
 
 export const WebsiteType = {
-  INDEPENDENT_DOCTOR: "INDEPENDENT_DOCTOR",
+  ONLY_DOCTOR: "ONLY_DOCTOR",
   HOSPITAL_CLINIC: "HOSPITAL_CLINIC",
   HOSPITAL_DOCTOR: "HOSPITAL_DOCTOR",
 } as const;
@@ -59,6 +59,26 @@ export interface FaqItem {
   answer: string;
 }
 
+export interface ServiceItem {
+  title: string;
+  description: string;
+}
+
+export interface DepartmentDetailedItem {
+  name: string;
+  description: string;
+}
+
+export interface TestimonialItem {
+  id?: string;
+  patientName: string;
+  rating: number;
+  comment: string;
+  tag?: string;
+  isVerified?: boolean;
+  createdAt?: string;
+}
+
 export interface EffectiveWebsiteData {
   websiteType: WebsiteType;
   slug: string;
@@ -66,6 +86,7 @@ export interface EffectiveWebsiteData {
   organizationName: string;
   organizationType?: "HOSPITAL" | "CLINIC";
   logo?: MediaAsset;
+  buildingPhoto?: MediaAsset;
   galleryPhotos: MediaAsset[];
   address: AddressInfo;
   selectedTheme: string;
@@ -76,12 +97,21 @@ export interface EffectiveWebsiteData {
   email?: string;
   about?: string;
   workingHours?: string;
+  tagline?: string;
+  shortIntro?: string;
+  clinicDescription?: string;
+  services?: ServiceItem[];
+  departmentsDetailed?: DepartmentDetailedItem[];
   // Doctor info if doctor website
+  doctorId?: string;
+  organizationId?: string;
   doctorName?: string;
   gender?: string;
   degree?: string;
   specialization?: string;
   yearsOfExperience?: number;
+  newCaseFee?: number;
+  oldCaseFee?: number;
   bio?: string;
   consultationHours?: string;
   weeklyOff?: string;
@@ -92,10 +122,15 @@ export interface EffectiveWebsiteData {
   // Hospital affiliated doctor directory & services
   doctorDirectory?: DoctorDirectoryItem[];
   departments?: string[];
+  specialties?: string[];
   faqs?: FaqItem[];
+  testimonials?: TestimonialItem[];
   seoMetadata?: {
     title?: string;
     description?: string;
     ogImage?: string;
   };
+  websiteContent?: Record<string, any>;
+  isDeactivated?: boolean;
+  deactivationMessage?: string;
 }

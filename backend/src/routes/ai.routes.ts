@@ -1,4 +1,5 @@
 import { Router, Request, Response, NextFunction } from "express";
+import mongoose from "mongoose";
 import { requireAuthenticatedUser } from "@/middleware/auth";
 import { aiRateLimiter } from "@/middleware/ai-rate-limit";
 import { aiContentService } from "@/services/ai-content.service";
@@ -7,9 +8,10 @@ import {
   aiRegenerateRequestSchema,
   aiApproveRequestSchema,
   aiPublishRequestSchema,
+  aiUpdateLiveContentSchema,
   AiTargetType,
 } from "@/validations/ai";
-import { Doctor } from "@/models";
+import { Doctor, Organization } from "@/models";
 import { UserRole } from "@/types";
 
 export const aiRouter = Router();
@@ -29,6 +31,23 @@ async function requireAiTargetAccess(
   }
 
   if (user.role === UserRole.SUPERADMIN) {
+    const targetType = req.body?.targetType || req.params?.targetType;
+    const targetId = req.body?.targetId || req.params?.targetId;
+    if (targetId && !mongoose.Types.ObjectId.isValid(targetId)) {
+      if (targetType === AiTargetType.HOSPITAL) {
+        const org = await Organization.findOne({ slug: targetId.toLowerCase() });
+        if (org) {
+          if (req.params?.targetId) req.params.targetId = org._id.toString();
+          if (req.body?.targetId) req.body.targetId = org._id.toString();
+        }
+      } else {
+        const doc = await Doctor.findOne({ slug: targetId.toLowerCase() });
+        if (doc) {
+          if (req.params?.targetId) req.params.targetId = doc._id.toString();
+          if (req.body?.targetId) req.body.targetId = doc._id.toString();
+        }
+      }
+    }
     return next();
   }
 
@@ -42,10 +61,26 @@ async function requireAiTargetAccess(
 
   try {
     if (targetType === AiTargetType.HOSPITAL) {
+      let org: any = null;
+      if (mongoose.Types.ObjectId.isValid(targetId)) {
+        org = await Organization.findById(targetId);
+      }
+      if (!org) {
+        org = await Organization.findOne({ slug: targetId });
+      }
+      if (!org) {
+        res.status(404).json({ success: false, error: "Organization not found", code: "NOT_FOUND" });
+        return;
+      }
+
+      const realOrgId = org._id.toString();
+      if (req.params?.targetId) req.params.targetId = realOrgId;
+      if (req.body?.targetId) req.body.targetId = realOrgId;
+
       if (
         user.role !== UserRole.HOSPITAL_ADMIN ||
         !user.organizationId ||
-        user.organizationId.toString() !== targetId.toString()
+        user.organizationId.toString() !== realOrgId
       ) {
         res.status(403).json({
           success: false,
@@ -57,16 +92,26 @@ async function requireAiTargetAccess(
       return next();
     }
 
-    if (targetType === AiTargetType.INDEPENDENT_DOCTOR || targetType === AiTargetType.HOSPITAL_DOCTOR) {
-      const doctor = await Doctor.findById(targetId);
+    if (targetType === AiTargetType.ONLY_DOCTOR || targetType === AiTargetType.HOSPITAL_DOCTOR) {
+      let doctor: any = null;
+      if (mongoose.Types.ObjectId.isValid(targetId)) {
+        doctor = await Doctor.findById(targetId);
+      }
+      if (!doctor) {
+        doctor = await Doctor.findOne({ slug: targetId });
+      }
       if (!doctor) {
         res.status(404).json({ success: false, error: "Doctor not found", code: "NOT_FOUND" });
         return;
       }
 
+      const realDoctorId = doctor._id.toString();
+      if (req.params?.targetId) req.params.targetId = realDoctorId;
+      if (req.body?.targetId) req.body.targetId = realDoctorId;
+
       // Check if user is the doctor himself
       const isSelf =
-        (user.doctorProfileId && user.doctorProfileId.toString() === targetId.toString()) ||
+        (user.doctorProfileId && user.doctorProfileId.toString() === realDoctorId) ||
         (doctor.userId && doctor.userId.toString() === user.userId);
 
       if (isSelf) {
@@ -280,6 +325,49 @@ aiRouter.post(
         success: false,
         error: err?.message || "Failed to publish content",
         code: "AI_PUBLISH_FAILED",
+      });
+    }
+  }
+);
+
+/**
+ * POST /api/v1/ai/content/update-live
+ * Direct manual update of live website content (modifies live content directly)
+ */
+aiRouter.post(
+  "/content/update-live",
+  requireAuthenticatedUser,
+  requireAiTargetAccess,
+  async (req: Request, res: Response, _next: NextFunction) => {
+    try {
+      const parsed = aiUpdateLiveContentSchema.safeParse(req.body);
+      if (!parsed.success) {
+        res.status(400).json({
+          success: false,
+          error: parsed.error.issues.map((i) => i.message).join(", "),
+          code: "VALIDATION_ERROR",
+        });
+        return;
+      }
+
+      const { targetType, targetId, content } = parsed.data;
+      const record = await aiContentService.updateLiveContent(
+        targetType,
+        targetId,
+        content,
+        req.user
+      );
+
+      res.status(200).json({
+        success: true,
+        message: "Live website content updated successfully",
+        data: record,
+      });
+    } catch (err: any) {
+      res.status(400).json({
+        success: false,
+        error: err?.message || "Failed to update live website content",
+        code: "AI_UPDATE_FAILED",
       });
     }
   }

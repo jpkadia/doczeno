@@ -23,7 +23,15 @@ export interface RequestOptions extends Omit<RequestInit, "body"> {
 const API_BASE_URL =
   process.env.NEXT_PUBLIC_API_URL || "http://localhost:5000/api/v1";
 
-async function request<T>(endpoint: string, options: RequestOptions = {}): Promise<T> {
+const AUTH_TOKEN_KEY = "doczeno_auth_token";
+
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+async function request<T>(
+  endpoint: string,
+  options: RequestOptions = {},
+  retryCount = 0
+): Promise<T> {
   const { body, params, headers, ...customConfig } = options;
 
   let url = `${API_BASE_URL}${endpoint.startsWith("/") ? endpoint : `/${endpoint}`}`;
@@ -42,11 +50,21 @@ async function request<T>(endpoint: string, options: RequestOptions = {}): Promi
   }
 
   const defaultHeaders: Record<string, string> = {
-    "Accept": "application/json",
+    Accept: "application/json",
   };
 
   if (body && !(body instanceof FormData)) {
     defaultHeaders["Content-Type"] = "application/json";
+  }
+
+  // Cross-site fallback: Attach Bearer authorization header if token exists in localStorage
+  if (typeof window !== "undefined") {
+    try {
+      const savedToken = localStorage.getItem(AUTH_TOKEN_KEY);
+      if (savedToken && !defaultHeaders["Authorization"]) {
+        defaultHeaders["Authorization"] = `Bearer ${savedToken}`;
+      }
+    } catch {}
   }
 
   const config: RequestInit = {
@@ -65,6 +83,16 @@ async function request<T>(endpoint: string, options: RequestOptions = {}): Promi
 
   try {
     const response = await fetch(url, config);
+
+    // Auto-retry cold start statuses (502 Bad Gateway / 503 Service Unavailable / 504 Gateway Timeout)
+    if (
+      !response.ok &&
+      (response.status === 502 || response.status === 503 || response.status === 504) &&
+      retryCount < 2
+    ) {
+      await sleep(2500);
+      return request<T>(endpoint, options, retryCount + 1);
+    }
 
     if (!response.ok) {
       let errorData: unknown;
@@ -95,6 +123,25 @@ async function request<T>(endpoint: string, options: RequestOptions = {}): Promi
         errorMessage = errorData;
       }
 
+      if (
+        (response.status === 401 || response.status === 403) &&
+        typeof window !== "undefined"
+      ) {
+        // Clear saved token on 401
+        try {
+          localStorage.removeItem(AUTH_TOKEN_KEY);
+        } catch {}
+
+        if (
+          window.location.pathname.startsWith("/superadmin") &&
+          !window.location.pathname.startsWith("/superadmin/login")
+        ) {
+          window.location.replace("/superadmin/login");
+          // Return pending promise during navigation to prevent Next.js dev overlay from throwing
+          return new Promise(() => {}) as unknown as T;
+        }
+      }
+
       throw new ApiError(errorMessage, response.status, errorData);
     }
 
@@ -102,15 +149,56 @@ async function request<T>(endpoint: string, options: RequestOptions = {}): Promi
       return {} as T;
     }
 
-    return (await response.json()) as T;
+    const data = (await response.json()) as T;
+
+    // Automatically persist auth token from login/session responses into localStorage
+    if (typeof window !== "undefined" && typeof data === "object" && data !== null) {
+      const responseData = (data as Record<string, any>).data;
+      if (responseData && typeof responseData.token === "string" && responseData.token) {
+        try {
+          localStorage.setItem(AUTH_TOKEN_KEY, responseData.token);
+        } catch {}
+      } else if (typeof (data as Record<string, any>).token === "string") {
+        try {
+          localStorage.setItem(AUTH_TOKEN_KEY, (data as Record<string, any>).token);
+        } catch {}
+      }
+
+      // If logging out, remove token
+      if (endpoint.includes("/auth/logout")) {
+        try {
+          localStorage.removeItem(AUTH_TOKEN_KEY);
+        } catch {}
+      }
+    }
+
+    return data;
   } catch (err) {
     if (err instanceof ApiError) {
       throw err;
     }
-    throw new ApiError(
-      err instanceof Error ? err.message : "Network error or server unreachable",
-      0
-    );
+
+    // Auto-retry network failures caused by Render cold start wake-up
+    if (retryCount < 2) {
+      await sleep(2500);
+      return request<T>(endpoint, options, retryCount + 1);
+    }
+
+    const rawMsg = err instanceof Error ? err.message : "";
+    let friendlyMessage = "Network error: Unable to connect to backend server.";
+    if (
+      rawMsg.includes("Failed to fetch") ||
+      rawMsg.includes("fetch failed") ||
+      rawMsg.includes("ECONNREFUSED") ||
+      rawMsg.includes("NetworkError")
+    ) {
+      friendlyMessage =
+        "Unable to connect to the healthcare server. If the server is waking up from standby, please wait a few seconds and try again.";
+    } else if (rawMsg) {
+      friendlyMessage = rawMsg;
+    }
+
+    throw new ApiError(friendlyMessage, 0);
   }
 }
 

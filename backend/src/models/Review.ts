@@ -6,6 +6,7 @@ export interface IReview extends Document {
   patientName: string;
   rating: number;
   comment: string;
+  tag?: string;
   isVerified: boolean;
   isPublished: boolean;
   createdAt: Date;
@@ -36,19 +37,25 @@ const ReviewSchema = new Schema<IReview>(
       required: true,
       min: 1,
       max: 5,
+      default: 5,
     },
     comment: {
       type: String,
       required: true,
       trim: true,
     },
+    tag: {
+      type: String,
+      trim: true,
+      default: "Verified Patient",
+    },
     isVerified: {
       type: Boolean,
-      default: false,
+      default: true,
     },
     isPublished: {
       type: Boolean,
-      default: false,
+      default: true,
       index: true,
     },
   },

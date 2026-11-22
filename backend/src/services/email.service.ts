@@ -27,6 +27,12 @@ export class EmailService {
     const senderEmail = env.BREVO_SENDER_EMAIL || "kadiyaparth612@gmail.com";
     const senderName = "Doczeno Healthcare Websites";
 
+    const isPasswordReset = purpose.toLowerCase().includes("password");
+    const badgeText = isPasswordReset ? "Password Reset Verification" : "Healthcare Identity Verification";
+    const bodyInstructions = isPasswordReset
+      ? "We received a request to reset your administrator password. Please use the 6-digit verification code below to verify your identity and create your new password:"
+      : `Thank you for registering with Doczeno. Please use the verification code below to verify your email address and launch your official clinical website for <strong>${purpose}</strong>:`;
+
     const htmlContent = `
       <!DOCTYPE html>
       <html>
@@ -48,10 +54,10 @@ export class EmailService {
         <div class="card">
           <div class="header">
             <div class="logo">Doczeno</div>
-            <div class="badge">Healthcare Identity Verification</div>
+            <div class="badge">${badgeText}</div>
           </div>
           <p class="instructions">Hello <strong>${toName}</strong>,</p>
-          <p class="instructions">Thank you for registering your healthcare practice with Doczeno. Please use the verification code below to verify your email address and launch your official clinical website for <strong>${purpose}</strong>:</p>
+          <p class="instructions">${bodyInstructions}</p>
           
           <div class="otp-box">
             <div class="otp-code">${otp}</div>
@@ -61,7 +67,7 @@ export class EmailService {
             This verification code is strictly valid for <strong>10 minutes</strong>. Never share this code with anyone.
           </p>
           <div class="footer">
-            Doczeno Medical Platform &bull; Secure Clinical Practice Website System
+            Doczeno Medical Platform &bull; Secure Clinical Website System
           </div>
         </div>
       </body>

@@ -1,6 +1,8 @@
-import { Organization, IOrganization } from "@/models";
+import { Organization, IOrganization, Doctor, Website, Media } from "@/models";
 import { logAuditEvent } from "./audit.service";
+import { MediaService } from "./media.service";
 import { AuthUserPayload } from "@/types";
+import { RESERVED_SLUGS } from "@/constants/healthcare";
 
 export class OrganizationService {
   static async createOrganization(
@@ -38,6 +40,72 @@ export class OrganizationService {
     updateData: Partial<IOrganization>,
     actor?: AuthUserPayload
   ): Promise<IOrganization | null> {
+    const existingOrg = await Organization.findById(id);
+    if (!existingOrg) return null;
+
+    // Keep specialties and departments synchronized
+    if (updateData.departments && !updateData.specialties) {
+      updateData.specialties = updateData.departments;
+    } else if (updateData.specialties && !updateData.departments) {
+      updateData.departments = updateData.specialties;
+    }
+
+    if (updateData.slug && typeof updateData.slug === "string") {
+      const newSlug = updateData.slug.trim().toLowerCase().replace(/^-+|-+$/g, "");
+      if (newSlug !== existingOrg.slug) {
+        if (newSlug.length < 2 || newSlug.length > 60 || !/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(newSlug)) {
+          throw new Error("Invalid slug format. Must be 2-60 lowercase alphanumeric characters and single hyphens.");
+        }
+        if (RESERVED_SLUGS.includes(newSlug as any)) {
+          throw new Error("This URL identifier is reserved and cannot be used.");
+        }
+
+        const [existingOtherOrg, existingWebsite, existingDoc] = await Promise.all([
+          Organization.findOne({ slug: newSlug, _id: { $ne: existingOrg._id } }),
+          Website.findOne({ slug: newSlug, organizationId: { $ne: existingOrg._id } }),
+          Doctor.findOne({ organizationId: null, slug: newSlug }),
+        ]);
+
+        if (existingOtherOrg || existingWebsite || existingDoc) {
+          throw new Error("This website URL slug is already taken. Please choose another.");
+        }
+
+        updateData.slug = newSlug;
+
+        // Update hospital's website record
+        await Website.findOneAndUpdate(
+          { organizationId: existingOrg._id, websiteType: "HOSPITAL_CLINIC" },
+          { $set: { slug: newSlug } }
+        );
+
+        // Cascade update to all affiliated doctors' website records
+        const childDoctors = await Doctor.find({ organizationId: existingOrg._id });
+        for (const childDoc of childDoctors) {
+          await Website.findOneAndUpdate(
+            { doctorId: childDoc._id, organizationId: existingOrg._id },
+            { $set: { slug: `${newSlug}-${childDoc.slug}` } }
+          );
+        }
+      }
+    }
+
+    // Building photo replacement: Clean up old photo permanently from Cloudinary & Media collection
+    if (
+      updateData.buildingPhoto &&
+      updateData.buildingPhoto.publicId &&
+      existingOrg.buildingPhoto &&
+      existingOrg.buildingPhoto.publicId &&
+      updateData.buildingPhoto.publicId !== existingOrg.buildingPhoto.publicId
+    ) {
+      const oldPublicId = existingOrg.buildingPhoto.publicId;
+      await MediaService.destroyCloudinaryAsset(oldPublicId);
+      await Media.deleteMany({ publicId: oldPublicId });
+    }
+
+    if (updateData.buildingPhoto && updateData.buildingPhoto.publicId) {
+      await MediaService.markMediaAsAttached([updateData.buildingPhoto], existingOrg._id, "ORGANIZATION");
+    }
+
     const updated = await Organization.findByIdAndUpdate(
       id,
       { $set: updateData },

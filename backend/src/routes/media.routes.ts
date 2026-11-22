@@ -84,6 +84,63 @@ mediaRouter.post(
   }
 );
 
+/**
+ * POST /api/v1/media/delete-asset
+ * Public / Authenticated: Delete a media asset from Cloudinary and clean up DB references
+ */
+mediaRouter.post(
+  "/delete-asset",
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const { publicId, assetUrl, skipEntityUnset } = req.body;
+      if (!publicId && !assetUrl) {
+        res.status(400).json({ success: false, error: "publicId or assetUrl is required", code: "INVALID_IDENTIFIER" });
+        return;
+      }
+
+      await MediaService.deleteAssetByPublicId(
+        typeof publicId === "string" ? publicId.trim() : "",
+        req.user,
+        typeof assetUrl === "string" ? assetUrl.trim() : undefined,
+        { skipEntityUnset: Boolean(skipEntityUnset) }
+      );
+
+      res.status(200).json({
+        success: true,
+        message: "Asset permanently removed from storage and database",
+      });
+    } catch (error) {
+      next(error);
+    }
+  }
+);
+
+/**
+ * POST /api/v1/media/cleanup-orphans
+ * Authenticated: Superadmin manual trigger for cleaning up dangling Cloudinary uploads
+ */
+mediaRouter.post(
+  "/cleanup-orphans",
+  requireAuthenticatedUser,
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      if (req.user?.role !== "SUPERADMIN") {
+        res.status(403).json({ success: false, error: "Superadmin authority required", code: "FORBIDDEN" });
+        return;
+      }
+      const hours = Number(req.body.hoursThreshold) || 24;
+      const result = await MediaService.cleanupOrphanedMedia(hours);
+      res.status(200).json({
+        success: true,
+        message: `Purged ${result.deletedCount} orphaned media assets from Cloudinary and database`,
+        data: result,
+      });
+    } catch (error) {
+      next(error);
+    }
+  }
+);
+
 // Serve locally stored media files securely
 mediaRouter.get("/files/:category/:filename", (req: Request, res: Response) => {
   const categoryParam = String(req.params.category || "");

@@ -1,39 +1,52 @@
 import * as React from "react";
 import { EffectiveWebsiteData } from "@/types";
-import { ClinicalEditorialTheme } from "./clinical-editorial-theme";
-import { ModernMinimalTheme } from "./modern-minimal-theme";
-import { VitalCompactTheme } from "./vital-compact-theme";
+import { HospitalClassicTheme } from "./hospital-classic-theme";
 import { PublicChatbotWidget } from "@/components/chatbot/public-chatbot-widget";
+import { WebsiteThemeModeProvider } from "./shared/website-mode-context";
+import { resolveThemePalette } from "@/lib/theme-palettes";
 
 interface ThemeRendererProps {
   data: EffectiveWebsiteData;
+  initialThemeMode?: "light" | "dark";
 }
 
-export function ThemeRenderer({ data }: ThemeRendererProps) {
-  const theme = data.selectedTheme?.toLowerCase();
-
-  const renderSelectedTheme = () => {
-    switch (theme) {
-      case "modern-minimal":
-        return <ModernMinimalTheme data={data} />;
-      case "vital-compact":
-        return <VitalCompactTheme data={data} />;
-      case "clinical-editorial":
-      default:
-        return <ClinicalEditorialTheme data={data} />;
-    }
-  };
+export function ThemeRenderer({ data, initialThemeMode = "light" }: ThemeRendererProps) {
+  const theme = resolveThemePalette(data.selectedTheme);
 
   return (
-    <>
-      {renderSelectedTheme()}
+    <WebsiteThemeModeProvider defaultMode={initialThemeMode}>
+      {/* SSR inline style to immediately set the scrollbar color to active theme, eliminating blue flash on refresh */}
+      <style
+        dangerouslySetInnerHTML={{
+          __html: `
+            html.public-website {
+              --theme-primary: ${theme.primary};
+              --theme-primary-hover: ${theme.primaryHover};
+              --theme-primary-light: ${theme.primaryLight};
+              --scrollbar-thumb: ${initialThemeMode === "dark" ? theme.primaryLight : theme.primary};
+              --scrollbar-thumb-hover: ${initialThemeMode === "dark" ? theme.primary : theme.primaryHover};
+            }
+            .dark html.public-website, html.dark.public-website {
+              --scrollbar-thumb: ${theme.primaryLight};
+              --scrollbar-thumb-hover: ${theme.primary};
+            }
+          `,
+        }}
+      />
+      <script
+        dangerouslySetInnerHTML={{
+          __html: `(function(){try{document.documentElement.classList.add("public-website");var c=document.cookie.match(/doczeno_site_theme_mode=([^;]+)/);var m=c?c[1]:localStorage.getItem("doczeno_site_theme_mode");if(m==="dark"){document.documentElement.classList.add("dark");document.documentElement.setAttribute("data-theme","dark");document.documentElement.style.setProperty("--scrollbar-thumb","${theme.primaryLight}");document.documentElement.style.setProperty("--scrollbar-thumb-hover","${theme.primary}");}else{document.documentElement.classList.remove("dark");document.documentElement.setAttribute("data-theme","light");document.documentElement.style.setProperty("--scrollbar-thumb","${theme.primary}");document.documentElement.style.setProperty("--scrollbar-thumb-hover","${theme.primaryHover}");}document.documentElement.style.setProperty("--theme-primary","${theme.primary}");document.documentElement.style.setProperty("--theme-primary-hover","${theme.primaryHover}");document.documentElement.style.setProperty("--theme-primary-light","${theme.primaryLight}");}catch(e){}})()`,
+        }}
+      />
+      <HospitalClassicTheme data={data} />
       <PublicChatbotWidget
         slug={data.slug}
         doctorSlug={data.isHospitalChild ? data.slug : undefined}
         parentHospitalSlug={data.isHospitalChild ? data.hospitalSlug : undefined}
         displayName={data.doctorName ? `Dr. ${data.doctorName}` : data.organizationName}
         websiteType={data.websiteType}
+        selectedTheme={data.selectedTheme}
       />
-    </>
+    </WebsiteThemeModeProvider>
   );
 }
