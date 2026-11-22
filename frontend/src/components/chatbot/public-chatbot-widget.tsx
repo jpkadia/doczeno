@@ -307,7 +307,14 @@ export function PublicChatbotWidget({
   };
 
   return (
-    <div className="fixed bottom-6 right-6 z-50 font-sans print:hidden">
+    <div
+      className={cn(
+        "fixed z-50 font-sans print:hidden",
+        isOpen
+          ? "bottom-3 inset-x-3 sm:inset-x-auto sm:right-6 sm:bottom-6 flex justify-end"
+          : "bottom-5 right-5 sm:bottom-6 sm:right-6"
+      )}
+    >
       {/* Floating Toggle Button with Active Theme and Smooth Breathing Pulse Animation */}
       {!isOpen && (
         <button
@@ -345,7 +352,7 @@ export function PublicChatbotWidget({
       {isOpen && (
         <div
           className={cn(
-            "flex flex-col w-[360px] sm:w-[400px] h-[550px] max-h-[85vh] rounded-2xl shadow-2xl border overflow-hidden transition-all duration-200 animate-in fade-in slide-in-from-bottom-4",
+            "flex flex-col w-full sm:w-[400px] h-[520px] max-h-[82dvh] sm:h-[550px] sm:max-h-[85vh] rounded-2xl shadow-2xl border overflow-hidden transition-all duration-200 animate-in fade-in slide-in-from-bottom-4",
             isDark ? "shadow-black/70" : "shadow-2xl"
           )}
           style={{
@@ -355,7 +362,7 @@ export function PublicChatbotWidget({
         >
           {/* Header */}
           <div
-            className="p-3.5 sm:p-4 flex items-center justify-between shadow-xs border-b"
+            className="p-3.5 sm:p-4 flex items-center justify-between shadow-xs border-b shrink-0"
             style={{
               backgroundColor: isDark ? theme.headerBgDark || theme.innerCardBgDark : "#0f172a",
               borderColor: isDark ? theme.cardBorderDark : "transparent",
@@ -387,7 +394,7 @@ export function PublicChatbotWidget({
               </div>
             </div>
 
-            <div className="flex items-center gap-1">
+            <div className="flex items-center gap-1 shrink-0">
               <button
                 type="button"
                 onClick={handleClearChat}
@@ -412,7 +419,7 @@ export function PublicChatbotWidget({
           {/* Medical Safety Disclaimer Notice */}
           <div
             className={cn(
-              "border-b px-3.5 py-2 flex items-start gap-2 text-[11px] leading-tight",
+              "border-b px-3.5 py-2 flex items-start gap-2 text-[11px] leading-tight shrink-0",
               isDark
                 ? "bg-amber-950/30 border-amber-900/40 text-amber-300"
                 : "bg-amber-50 border-amber-200/60 text-amber-800"
@@ -426,7 +433,7 @@ export function PublicChatbotWidget({
 
           {/* Message Thread List */}
           <div
-            className="flex-1 p-4 overflow-y-auto space-y-3"
+            className="flex-1 min-h-0 p-4 overflow-y-auto space-y-3"
             style={{
               backgroundColor: isDark ? "rgba(0, 0, 0, 0.2)" : "#f8fafc",
             }}
@@ -559,7 +566,7 @@ export function PublicChatbotWidget({
           {/* Quick Suggestion Chips (shown when thread is short) */}
           {messages.length <= 2 && !loading && (
             <div
-              className="p-2.5 border-t flex flex-wrap gap-1.5"
+              className="p-2.5 border-t flex flex-wrap gap-1.5 shrink-0"
               style={{
                 backgroundColor: isDark ? theme.cardBgDark : "#ffffff",
                 borderColor: isDark ? theme.cardBorderDark : "#f1f5f9",
@@ -585,7 +592,7 @@ export function PublicChatbotWidget({
 
           {/* Input & Footer Controls */}
           <div
-            className="p-3 border-t"
+            className="p-3 border-t shrink-0"
             style={{
               backgroundColor: isDark ? theme.cardBgDark : "#ffffff",
               borderColor: isDark ? theme.cardBorderDark : "#e2e8f0",

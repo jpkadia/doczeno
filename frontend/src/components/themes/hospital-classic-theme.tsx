@@ -658,7 +658,7 @@ export function HospitalClassicTheme({ data }: HospitalClassicThemeProps) {
                 {isDoctor ? <Stethoscope className="h-6 w-6" /> : <Building2 className="h-6 w-6" />}
               </div>
             )}
-            <div>
+            <div className="hidden sm:block">
               <span
                 className={cn(
                   "text-xl font-bold transition-colors block tracking-tight",

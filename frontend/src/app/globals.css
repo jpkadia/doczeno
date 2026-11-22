@@ -79,10 +79,12 @@
   }
   html {
     scroll-behavior: smooth;
+    overflow-x: hidden;
   }
   body {
     @apply bg-background text-foreground antialiased;
     font-feature-settings: "rlig" 1, "calt" 1;
+    overflow-x: hidden;
   }
 
   /* Custom stylish theme-aware vertical scrollbar ONLY for public healthcare websites */
