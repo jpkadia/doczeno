@@ -35,7 +35,10 @@ export function createApp(): Application {
   // CORS Configuration supporting production cross-domain credentials
   app.use(
     cors({
-      origin: (origin, callback) => {
+      origin: (
+        origin: string | undefined,
+        callback: (err: Error | null, allow?: boolean) => void
+      ) => {
         // Allow requests with no origin (e.g. mobile apps, curl, Render health checks, server-to-server)
         if (!origin) {
           return callback(null, true);
