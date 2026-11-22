@@ -1,6 +1,5 @@
 import { Metadata } from "next";
-import { notFound, redirect } from "next/navigation";
-import { cookies } from "next/headers";
+import { notFound } from "next/navigation";
 import { getEffectiveWebsite } from "@/lib/website";
 import { AdminClient } from "./admin-client";
 
@@ -23,13 +22,6 @@ export default async function AdminPage({ params }: PageProps) {
 
   if (slug === "favicon.ico" || slug === "robots.txt") {
     notFound();
-  }
-
-  // Pre-check authentication on server: unauthenticated users redirect immediately to login
-  const cookieStore = await cookies();
-  const sessionCookie = cookieStore.get("doczeno_session")?.value;
-  if (!sessionCookie) {
-    redirect(`/${slug}/admin/login`);
   }
 
   const website = await getEffectiveWebsite(slug);

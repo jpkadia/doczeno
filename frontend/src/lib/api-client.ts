@@ -127,9 +127,10 @@ async function request<T>(
         (response.status === 401 || response.status === 403) &&
         typeof window !== "undefined"
       ) {
-        // Clear saved token on 401
+        // Clear saved token and session cookie on 401
         try {
           localStorage.removeItem(AUTH_TOKEN_KEY);
+          document.cookie = "doczeno_session=; path=/; max-age=0; SameSite=Lax; Secure";
         } catch {}
 
         if (
@@ -151,23 +152,25 @@ async function request<T>(
 
     const data = (await response.json()) as T;
 
-    // Automatically persist auth token from login/session responses into localStorage
+    // Automatically persist auth token from login/session responses into localStorage and document.cookie
     if (typeof window !== "undefined" && typeof data === "object" && data !== null) {
       const responseData = (data as Record<string, any>).data;
-      if (responseData && typeof responseData.token === "string" && responseData.token) {
+      const token =
+        (responseData && typeof responseData.token === "string" && responseData.token) ||
+        (typeof (data as Record<string, any>).token === "string" && (data as Record<string, any>).token);
+
+      if (token) {
         try {
-          localStorage.setItem(AUTH_TOKEN_KEY, responseData.token);
-        } catch {}
-      } else if (typeof (data as Record<string, any>).token === "string") {
-        try {
-          localStorage.setItem(AUTH_TOKEN_KEY, (data as Record<string, any>).token);
+          localStorage.setItem(AUTH_TOKEN_KEY, token);
+          document.cookie = `doczeno_session=${token}; path=/; max-age=${7 * 24 * 60 * 60}; SameSite=Lax; Secure`;
         } catch {}
       }
 
-      // If logging out, remove token
+      // If logging out, remove token and clear session cookie
       if (endpoint.includes("/auth/logout")) {
         try {
           localStorage.removeItem(AUTH_TOKEN_KEY);
+          document.cookie = "doczeno_session=; path=/; max-age=0; SameSite=Lax; Secure";
         } catch {}
       }
     }

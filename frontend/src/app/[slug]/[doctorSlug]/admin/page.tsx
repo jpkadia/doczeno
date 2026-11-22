@@ -1,6 +1,5 @@
 import { Metadata } from "next";
-import { notFound, redirect } from "next/navigation";
-import { cookies } from "next/headers";
+import { notFound } from "next/navigation";
 import { getEffectiveHospitalDoctor } from "@/lib/website";
 import { AdminDoctorClient } from "./admin-doctor-client";
 
@@ -24,13 +23,6 @@ export default async function HospitalDoctorAdminPage({ params }: PageProps) {
 
   if (slug === "favicon.ico" || doctorSlug === "favicon.ico") {
     notFound();
-  }
-
-  // Pre-check authentication on server: unauthenticated users redirect immediately to login
-  const cookieStore = await cookies();
-  const sessionCookie = cookieStore.get("doczeno_session")?.value;
-  if (!sessionCookie) {
-    redirect(`/${slug}/${doctorSlug}/admin/login`);
   }
 
   const website = await getEffectiveHospitalDoctor(slug, doctorSlug);

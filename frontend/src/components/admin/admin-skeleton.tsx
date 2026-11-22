@@ -172,15 +172,17 @@ export function AdminLoginSkeleton() {
 }
 
 /**
- * Smart Skeleton: Displays login card skeleton when unauthenticated,
- * and dashboard skeleton only when an active session cookie exists.
+ * Smart Skeleton: Displays dashboard skeleton when session cookie or localStorage token exists,
+ * or fallback login skeleton when unauthenticated.
  */
 export function SmartAdminLoadingSkeleton() {
   const [hasSession, setHasSession] = React.useState<boolean | null>(null);
 
   React.useEffect(() => {
-    if (typeof document !== "undefined") {
-      setHasSession(document.cookie.includes("doczeno_session"));
+    if (typeof window !== "undefined") {
+      const hasCookie = document.cookie.includes("doczeno_session");
+      const hasToken = Boolean(localStorage.getItem("doczeno_auth_token"));
+      setHasSession(hasCookie || hasToken);
     }
   }, []);
 
