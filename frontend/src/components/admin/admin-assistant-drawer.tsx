@@ -303,10 +303,10 @@ export function AdminAssistantDrawer({
   if (!isOpen) return null;
 
   return (
-    <div className="fixed bottom-6 right-6 z-50 font-sans print:hidden">
-      <div className="flex flex-col w-[360px] sm:w-[400px] h-[550px] max-h-[85vh] bg-white rounded-2xl shadow-2xl border border-slate-200 overflow-hidden transition-all duration-200 animate-in fade-in slide-in-from-bottom-4">
+    <div className="fixed bottom-3 inset-x-3 sm:inset-x-auto sm:right-6 sm:bottom-6 z-50 font-sans print:hidden flex justify-end">
+      <div className="flex flex-col w-full sm:w-[400px] h-[520px] max-h-[82dvh] sm:h-[550px] sm:max-h-[85vh] bg-white rounded-2xl shadow-2xl border border-slate-200 overflow-hidden transition-all duration-200 animate-in fade-in slide-in-from-bottom-4">
         {/* Header */}
-        <div className="bg-slate-900 text-white p-4 flex items-center justify-between shadow-xs">
+        <div className="bg-slate-900 text-white p-3.5 sm:p-4 flex items-center justify-between shadow-xs shrink-0">
           <div className="flex items-center gap-3">
             <div className="h-9 w-9 rounded-full bg-[#1a76d1]/20 text-[#60a5fa] border border-[#1a76d1]/40 flex items-center justify-center shrink-0">
               <Bot className="h-5 w-5" />
@@ -329,7 +329,7 @@ export function AdminAssistantDrawer({
             </div>
           </div>
 
-          <div className="flex items-center gap-1">
+          <div className="flex items-center gap-1 shrink-0">
             <button
               type="button"
               onClick={handleClearChat}
@@ -352,7 +352,7 @@ export function AdminAssistantDrawer({
         </div>
 
         {/* Security & Isolation Notice Banner */}
-        <div className="bg-blue-50/80 border-b border-blue-100 px-3.5 py-2 flex items-start gap-2 text-[11px] text-blue-900 leading-tight">
+        <div className="bg-blue-50/80 border-b border-blue-100 px-3.5 py-2 flex items-start gap-2 text-[11px] text-blue-900 leading-tight shrink-0">
           <ShieldCheck className="h-3.5 w-3.5 text-[#1a76d1] shrink-0 mt-0.5" />
           <span>
             Operating in protected clinic workspace. Your clinical records and settings remain private.
@@ -360,7 +360,7 @@ export function AdminAssistantDrawer({
         </div>
 
         {/* Message Thread List */}
-        <div className="flex-1 p-4 overflow-y-auto space-y-3 bg-slate-50/50">
+        <div className="flex-1 min-h-0 p-4 overflow-y-auto space-y-3 bg-slate-50/50">
           {messages.map((msg) => (
             <div
               key={msg.id}
@@ -443,7 +443,7 @@ export function AdminAssistantDrawer({
 
         {/* Quick Suggestion Chips */}
         {messages.length <= 2 && !loading && !pendingAction && (
-          <div className="p-2.5 bg-white border-t border-slate-100 flex flex-wrap gap-1.5">
+          <div className="p-2.5 bg-white border-t border-slate-100 flex flex-wrap gap-1.5 shrink-0">
             {quickPrompts.map((item, idx) => (
               <button
                 key={idx}
@@ -458,7 +458,7 @@ export function AdminAssistantDrawer({
         )}
 
         {/* Input & Footer Controls */}
-        <div className="p-3 bg-white border-t border-slate-200">
+        <div className="p-3 bg-white border-t border-slate-200 shrink-0">
           {errorMessage && (
             <div className="mb-2 text-[11px] text-rose-600 flex items-center gap-1">
               <AlertTriangle className="h-3 w-3 shrink-0" />

@@ -293,7 +293,7 @@ export function AdminShell({
 
       {/* Floating AI Copilot Trigger for All Admin Panels */}
       {!copilotOpen && (
-        <div className="fixed bottom-6 right-6 z-50 font-sans print:hidden">
+        <div className="fixed bottom-5 right-5 sm:bottom-6 sm:right-6 z-50 font-sans print:hidden">
           <button
             type="button"
             onClick={() => setCopilotOpen(true)}
