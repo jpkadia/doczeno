@@ -13,6 +13,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { PhoneInput } from "@/components/ui/phone-input";
+import { CalendarPicker } from "@/components/ui/calendar-picker";
 import { Phone, MessageSquare, CheckCircle2, AlertCircle, Calendar } from "lucide-react";
 import { apiClient } from "@/lib/api-client";
 import { toast } from "sonner";
@@ -64,7 +65,7 @@ export function AppointmentDialog({
   const [bookedAppointmentId, setBookedAppointmentId] = React.useState<string | null>(null);
 
   const inputClass = cn(
-    "rounded-xl border transition-all h-9 sm:h-9.5 text-xs sm:text-sm shadow-2xs",
+    "rounded-xl border transition-all h-10 text-xs sm:text-sm shadow-2xs",
     "focus:border-[var(--theme-primary)] focus-visible:border-[var(--theme-primary)]",
     "focus:ring-2 focus:ring-[var(--theme-primary)]/30 focus-visible:ring-2 focus-visible:ring-[var(--theme-primary)]/30 focus-visible:ring-offset-0",
     isDark ? "text-white placeholder:text-slate-500" : "text-slate-900 placeholder:text-slate-400"
@@ -378,7 +379,7 @@ export function AppointmentDialog({
             <form onSubmit={handleSubmitRequest} className="space-y-2 sm:space-y-2.5">
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 sm:gap-2.5">
                 <div className="space-y-1 sm:col-span-2">
-                  <Label htmlFor="patient-name" className={cn("text-xs font-semibold", isDark ? "text-slate-200" : "text-slate-700")}>
+                  <Label htmlFor="patient-name" className={cn("text-xs font-semibold h-5 flex items-center", isDark ? "text-slate-200" : "text-slate-700")}>
                     Patient Full Name *
                   </Label>
                   <Input
@@ -392,7 +393,7 @@ export function AppointmentDialog({
                   />
                 </div>
                 <div className="space-y-1 sm:col-span-1">
-                  <Label htmlFor="patient-age" className={cn("text-xs font-semibold", isDark ? "text-slate-200" : "text-slate-700")}>
+                  <Label htmlFor="patient-age" className={cn("text-xs font-semibold h-5 flex items-center", isDark ? "text-slate-200" : "text-slate-700")}>
                     Patient Age (Years) *
                   </Label>
                   <Input
@@ -412,7 +413,7 @@ export function AppointmentDialog({
 
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 sm:gap-2.5">
                 <div className="space-y-1">
-                  <Label htmlFor="patient-phone" className={cn("text-xs font-semibold", isDark ? "text-slate-200" : "text-slate-700")}>
+                  <Label htmlFor="patient-phone" className={cn("text-xs font-semibold h-5 flex items-center", isDark ? "text-slate-200" : "text-slate-700")}>
                     Phone / WhatsApp Number *
                   </Label>
                   <PhoneInput
@@ -423,23 +424,20 @@ export function AppointmentDialog({
                   />
                 </div>
                 <div className="space-y-1">
-                  <Label htmlFor="preferred-date" className={cn("text-xs font-semibold flex items-center gap-1.5", isDark ? "text-slate-200" : "text-slate-700")}>
-                    <Calendar className="h-3.5 w-3.5" style={{ color: isDark ? theme.primaryLight : theme.primary }} />
+                  <Label htmlFor="preferred-date" className={cn("text-xs font-semibold h-5 flex items-center gap-1.5", isDark ? "text-slate-200" : "text-slate-700")}>
+                    <Calendar className="h-3.5 w-3.5 shrink-0" style={{ color: isDark ? theme.primaryLight : theme.primary }} />
                     <span>Select Specific Date *</span>
                   </Label>
-                  <Input
+                  <CalendarPicker
                     id="preferred-date"
-                    type="date"
-                    min={minBookingDate}
-                    max={maxBookingDate}
                     value={preferredDate}
-                    onChange={(e) => setPreferredDate(e.target.value)}
-                    className={cn(
-                      inputClass,
-                      isDark ? "[color-scheme:dark]" : "[color-scheme:light]",
-                      dateValidation && !dateValidation.isValid ? "border-rose-500 focus-visible:ring-rose-500" : ""
-                    )}
-                    style={inputStyle}
+                    onChange={(val) => setPreferredDate(val)}
+                    minDate={minBookingDate}
+                    maxDate={maxBookingDate}
+                    bookingDays={bookingDays}
+                    isDark={isDark}
+                    theme={theme}
+                    error={dateValidation && !dateValidation.isValid ? dateValidation.errorMessage : undefined}
                     required
                   />
                 </div>
@@ -535,7 +533,7 @@ export function AppointmentDialog({
               </div>
 
               <div className="space-y-1">
-                <Label htmlFor="patient-notes" className={cn("text-xs font-semibold", isDark ? "text-slate-200" : "text-slate-700")}>
+                <Label htmlFor="patient-notes" className={cn("text-xs font-semibold h-5 flex items-center", isDark ? "text-slate-200" : "text-slate-700")}>
                   Medical Concern / Reason for Visit *
                 </Label>
                 <Input
