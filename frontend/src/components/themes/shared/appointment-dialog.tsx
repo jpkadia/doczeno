@@ -384,7 +384,7 @@ export function AppointmentDialog({
                   </Label>
                   <Input
                     id="patient-name"
-                    placeholder="e.g. Ramesh Patel"
+                    placeholder="Enter name"
                     value={patientName}
                     onChange={(e) => setPatientName(e.target.value)}
                     className={inputClass}
@@ -401,7 +401,7 @@ export function AppointmentDialog({
                     type="number"
                     min={1}
                     max={120}
-                    placeholder="e.g. 35"
+                    placeholder="Enter age"
                     value={patientAge}
                     onChange={(e) => setPatientAge(e.target.value)}
                     className={inputClass}
@@ -418,6 +418,7 @@ export function AppointmentDialog({
                   </Label>
                   <PhoneInput
                     id="patient-phone"
+                    placeholder="Enter mobile number"
                     value={patientPhone}
                     onChange={(val) => setPatientPhone(val)}
                     required
@@ -538,7 +539,7 @@ export function AppointmentDialog({
                 </Label>
                 <Input
                   id="patient-notes"
-                  placeholder="e.g. Routine consultation, checkup, follow-up or primary symptoms"
+                  placeholder="Enter reason for visit / symptoms"
                   value={notes}
                   onChange={(e) => setNotes(e.target.value)}
                   className={inputClass}
