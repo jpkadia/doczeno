@@ -6,6 +6,7 @@ let mongoServer: MongoMemoryServer;
 
 // Configure isolated test environment BEFORE importing application modules
 process.env.NODE_ENV = "test";
+process.env.MONGODB_URI = process.env.MONGODB_URI || "mongodb://127.0.0.1:27017/doczeno-vitest-placeholder";
 process.env.AUTH_SECRET = "doczeno-vitest-integration-secret-32chars";
 process.env.FRONTEND_URL = "http://localhost:3000";
 process.env.GEMINI_API_KEY = "";

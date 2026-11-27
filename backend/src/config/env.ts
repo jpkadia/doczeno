@@ -55,7 +55,7 @@ export type Env = z.infer<typeof envSchema>;
 let parsedEnv: Env | null = null;
 
 export function getEnv(): Env {
-  if (parsedEnv) return parsedEnv;
+  if (parsedEnv && process.env.NODE_ENV !== "test") return parsedEnv;
 
   const result = envSchema.safeParse(process.env);
   if (!result.success) {
@@ -65,6 +65,8 @@ export function getEnv(): Env {
     throw new Error(`[Doczeno Backend Config Error]: ${errorDetails}`);
   }
 
-  parsedEnv = result.data;
-  return parsedEnv;
+  if (process.env.NODE_ENV !== "test") {
+    parsedEnv = result.data;
+  }
+  return result.data;
 }
