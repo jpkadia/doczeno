@@ -25,6 +25,7 @@ export interface IAIContent extends Document {
   lastError?: string | null;
   reviewedBy?: mongoose.Types.ObjectId | null;
   publishedBy?: mongoose.Types.ObjectId | null;
+  regenerationTimestamps: Date[];
   history: IAIContentHistory[];
   createdAt: Date;
   updatedAt: Date;
@@ -120,6 +121,10 @@ const AIContentSchema = new Schema<IAIContent>(
       type: Schema.Types.ObjectId,
       ref: "User",
       default: null,
+    },
+    regenerationTimestamps: {
+      type: [Date],
+      default: [],
     },
     history: {
       type: [AIContentHistorySchema],

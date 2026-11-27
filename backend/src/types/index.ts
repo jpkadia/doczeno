@@ -22,6 +22,7 @@ export interface AuthUserPayload {
   role: UserRole;
   organizationId?: string | null;
   doctorProfileId?: string | null;
+  sessionId?: string;
 }
 
 export interface AddressInfo {
@@ -133,4 +134,12 @@ export interface EffectiveWebsiteData {
   websiteContent?: Record<string, any>;
   isDeactivated?: boolean;
   deactivationMessage?: string;
+  isPendingApproval?: boolean;
+  approvalMessage?: string;
+  isTempPreview?: boolean;
+  isWebsiteChatbotEnabled?: boolean;
+  isAdminChatbotEnabled?: boolean;
+  customDomain?: string;
+  customDomainStatus?: "NONE" | "PENDING" | "VERIFIED" | "FAILED";
+  customDomainRedirect?: boolean;
 }

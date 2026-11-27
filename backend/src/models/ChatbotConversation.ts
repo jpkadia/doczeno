@@ -35,6 +35,7 @@ export interface IAppointmentDraft {
   notes?: string;
   doctorId?: string;
   doctorName?: string;
+  specialization?: string;
   organizationId?: string;
 }
 

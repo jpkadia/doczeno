@@ -43,6 +43,11 @@ const envSchema = z.object({
   // Initial Platform Superadmin
   SUPERADMIN_EMAIL: z.string().email().optional(),
   SUPERADMIN_PASSWORD: z.string().min(6).optional(),
+
+  // Vercel Domains API (for automated custom domain attachment & SSL)
+  VERCEL_API_TOKEN: z.string().optional(),
+  VERCEL_PROJECT_ID: z.string().optional(),
+  VERCEL_TEAM_ID: z.string().optional(),
 });
 
 export type Env = z.infer<typeof envSchema>;

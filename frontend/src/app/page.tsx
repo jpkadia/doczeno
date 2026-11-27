@@ -10,7 +10,13 @@ import {
   UserCheck,
   ArrowRight,
   CheckCircle2,
+  Ban,
 } from "lucide-react";
+
+import { getOnboardingCategories } from "@/lib/onboarding-config";
+import { ServiceOffByAdmin } from "@/components/forms/service-off-by-admin";
+
+export const dynamic = "force-dynamic";
 
 export const metadata: Metadata = {
   title: "Healthcare Setup & Onboarding | Doczeno",
@@ -71,7 +77,20 @@ const ONBOARDING_FLOWS = [
   },
 ];
 
-export default function HomePage() {
+export default async function HomePage() {
+  const onboardingCategories = await getOnboardingCategories();
+
+  if (!onboardingCategories.portalEnabled) {
+    return <ServiceOffByAdmin />;
+  }
+
+  const isFlowEnabled = (id: string) => {
+    if (id === "doctor") return onboardingCategories.onlyDoctor;
+    if (id === "hospital") return onboardingCategories.hospital;
+    if (id === "hospital-doctor") return onboardingCategories.hospitalDoctor;
+    return true;
+  };
+
   return (
     <div className="min-h-screen lg:h-screen lg:max-h-screen lg:overflow-hidden bg-[#eaf4fd] bg-[url('/images/mobile.png')] md:bg-[url('/images/bg.png')] bg-cover bg-top md:bg-center bg-no-repeat text-slate-900 flex flex-col justify-between font-sans">
       {/* Top Navigation Bar - Transparent Glassmorphism with Rounded Angles */}
@@ -115,10 +134,16 @@ export default function HomePage() {
         <div className="grid grid-cols-1 md:grid-cols-3 gap-3.5 sm:gap-4 lg:gap-5">
           {ONBOARDING_FLOWS.map((flow) => {
             const Icon = flow.icon;
+            const enabled = isFlowEnabled(flow.id);
+
             return (
               <Card
                 key={flow.id}
-                className="flex flex-col justify-between border border-white/80 rounded-2xl bg-white/90 backdrop-blur-md hover:border-[#1a76d1]/60 hover:bg-white/95 transition-all duration-200 hover:shadow-xl shadow-md"
+                className={`flex flex-col justify-between border border-white/80 rounded-2xl backdrop-blur-md transition-all duration-200 shadow-md ${
+                  enabled
+                    ? "bg-white/90 hover:border-[#1a76d1]/60 hover:bg-white/95 hover:shadow-xl"
+                    : "bg-white/75 opacity-85"
+                }`}
               >
                 <div>
                   <CardHeader className="space-y-1.5 sm:space-y-2 p-4 sm:p-5 pb-1 lg:pb-1.5">
@@ -154,15 +179,40 @@ export default function HomePage() {
                 </div>
 
                 <div className="p-4 sm:p-5 pt-0">
-                  <Button
-                    asChild
-                    className="w-full group bg-[#1a76d1] hover:bg-[#1560aa] text-white font-semibold text-xs sm:text-sm h-9 sm:h-9.5 lg:h-10 rounded-xl shadow-xs transition-all"
-                  >
-                    <Link href={flow.href}>
-                      <span>{flow.cta}</span>
-                      <ArrowRight className="h-3.5 w-3.5 ml-1.5 group-hover:translate-x-1 transition-transform" />
-                    </Link>
-                  </Button>
+                  {enabled ? (
+                    <Button
+                      asChild
+                      className="w-full group bg-[#1a76d1] hover:bg-[#1560aa] text-white font-semibold text-xs sm:text-sm h-9 sm:h-9.5 lg:h-10 rounded-xl shadow-xs transition-all"
+                    >
+                      <Link href={flow.href}>
+                        <span>{flow.cta}</span>
+                        <ArrowRight className="h-3.5 w-3.5 ml-1.5 group-hover:translate-x-1 transition-transform" />
+                      </Link>
+                    </Button>
+                  ) : (
+                    <div
+                      className="relative group w-full cursor-not-allowed"
+                      title="This service is temporary disabled from the admin"
+                    >
+                      {/* Hover Tooltip */}
+                      <div
+                        role="tooltip"
+                        className="pointer-events-none absolute -top-11 left-1/2 -translate-x-1/2 z-30 w-max max-w-[240px] px-3 py-1.5 rounded-lg bg-slate-900 text-white text-[11px] font-medium text-center shadow-lg opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 transition-opacity duration-150"
+                      >
+                        This service is temporary disabled from the admin
+                        <span className="absolute top-full left-1/2 -translate-x-1/2 border-4 border-transparent border-t-slate-900" />
+                      </div>
+                      <Button
+                        type="button"
+                        disabled
+                        aria-label={`${flow.cta} - This service is temporary disabled from the admin`}
+                        className="w-full bg-slate-200 text-slate-500 border border-slate-300 font-semibold text-xs sm:text-sm h-9 sm:h-9.5 lg:h-10 rounded-xl shadow-none cursor-not-allowed opacity-90"
+                      >
+                        <Ban className="h-3.5 w-3.5 mr-1.5 shrink-0" />
+                        <span>{flow.cta}</span>
+                      </Button>
+                    </div>
+                  )}
                 </div>
               </Card>
             );

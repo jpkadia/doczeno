@@ -74,6 +74,8 @@ export interface TestimonialItem {
   createdAt?: string;
 }
 
+export type { CustomSectionConfig, ReorderableSectionId, CustomSectionLayout } from "@/constants/website-sections";
+
 export interface EffectiveWebsiteData {
   websiteType: WebsiteType;
   slug: string;
@@ -126,6 +128,14 @@ export interface EffectiveWebsiteData {
   websiteContent?: Record<string, any>;
   isDeactivated?: boolean;
   deactivationMessage?: string;
+  isPendingApproval?: boolean;
+  approvalMessage?: string;
+  isTempPreview?: boolean;
+  isWebsiteChatbotEnabled?: boolean;
+  isAdminChatbotEnabled?: boolean;
+  customDomain?: string;
+  customDomainStatus?: "NONE" | "PENDING" | "VERIFIED" | "FAILED";
+  customDomainRedirect?: boolean;
 }
 
 /**

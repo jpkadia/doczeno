@@ -7,7 +7,7 @@ import {
   HospitalDoctorData,
   DoctorAppointmentItem,
 } from "@/components/admin/views/hospital-doctor-admin";
-import { apiClient } from "@/lib/api-client";
+import { apiClient, clearClientAuthState } from "@/lib/api-client";
 import { useRouter } from "next/navigation";
 
 import { InactivityGuard } from "@/components/admin/inactivity-guard";
@@ -28,8 +28,15 @@ export function AdminDoctorClient({
   const router = useRouter();
   const [isAuthenticated, setIsAuthenticated] = React.useState(false);
   const [isCheckingAuth, setIsCheckingAuth] = React.useState(true);
+  const [loginPath, setLoginPath] = React.useState(`/${orgSlug}/${doctorSlug}/admin/login`);
 
   React.useEffect(() => {
+    const isCustomDomain =
+      typeof window !== "undefined" &&
+      (window.location.pathname === "/admin" || window.location.pathname.startsWith("/admin/"));
+    const targetLoginPath = isCustomDomain ? "/admin/login" : `/${orgSlug}/${doctorSlug}/admin/login`;
+    setLoginPath(targetLoginPath);
+
     async function verifyAuth() {
       try {
         const res = await apiClient.get<{ success: boolean; data?: { authorized?: boolean } }>(
@@ -39,25 +46,30 @@ export function AdminDoctorClient({
           setIsAuthenticated(true);
         } else {
           if (typeof window !== "undefined") {
-            window.location.replace(`/${orgSlug}/${doctorSlug}/admin/login?unauthorized=true`);
+            window.location.replace(`${targetLoginPath}?unauthorized=true`);
           } else {
-            router.replace(`/${orgSlug}/${doctorSlug}/admin/login?unauthorized=true`);
+            router.replace(`${targetLoginPath}?unauthorized=true`);
           }
         }
       } catch (err: unknown) {
         const status = (err as { status?: number })?.status;
+        const code = (err as { data?: { code?: string } })?.data?.code;
         if (status === 403) {
           toast.error("Unauthorized: You do not have permission to manage this doctor portal.");
           if (typeof window !== "undefined") {
-            window.location.replace(`/${orgSlug}/${doctorSlug}/admin/login?unauthorized=true`);
+            window.location.replace(`${targetLoginPath}?unauthorized=true`);
           } else {
-            router.replace(`/${orgSlug}/${doctorSlug}/admin/login?unauthorized=true`);
+            router.replace(`${targetLoginPath}?unauthorized=true`);
           }
         } else {
+          const redirectDest =
+            code === "SESSION_INACTIVITY_EXPIRED"
+              ? `${targetLoginPath}?reason=inactivity`
+              : targetLoginPath;
           if (typeof window !== "undefined") {
-            window.location.replace(`/${orgSlug}/${doctorSlug}/admin/login`);
+            window.location.replace(redirectDest);
           } else {
-            router.replace(`/${orgSlug}/${doctorSlug}/admin/login`);
+            router.replace(redirectDest);
           }
         }
       } finally {
@@ -80,8 +92,12 @@ export function AdminDoctorClient({
           setAppointments(
             res.data.appointments.map((a: any) => ({
               id: a._id || a.id,
+              appointmentId: a.appointmentId || "",
+              tokenNumber: typeof a.tokenNumber === "number" ? a.tokenNumber : undefined,
+              source: a.source || "WEBSITE_FORM",
               patientName: a.patientName,
               patientPhone: a.patientPhone,
+              patientAge: a.patientAge,
               appointmentDate: a.appointmentDate ? (new Date(a.appointmentDate).toISOString().split("T")[0] || "") : "",
               timeSlot: a.timeSlot || a.preferredTimeSlot || "Morning",
               status: a.status,
@@ -134,6 +150,8 @@ export function AdminDoctorClient({
       lockMessage: "Managed by Hospital Admin",
     },
     publishStatus: "PUBLISHED",
+    isWebsiteChatbotEnabled: initialWebsite.isWebsiteChatbotEnabled !== false,
+    isAdminChatbotEnabled: initialWebsite.isAdminChatbotEnabled !== false,
   };
 
   const handleSave = async (updated: Partial<HospitalDoctorData>) => {
@@ -159,16 +177,17 @@ export function AdminDoctorClient({
     } catch {
       // Ignore
     } finally {
+      clearClientAuthState();
       if (typeof window !== "undefined") {
-        window.location.replace(`/${orgSlug}/${doctorSlug}/admin/login`);
+        window.location.replace(loginPath);
       } else {
-        router.replace(`/${orgSlug}/${doctorSlug}/admin/login`);
+        router.replace(loginPath);
       }
     }
   };
 
   return (
-    <InactivityGuard logoutRedirectUrl={`/${orgSlug}/${doctorSlug}/admin/login`}>
+    <InactivityGuard logoutRedirectUrl={loginPath}>
       <HospitalDoctorAdmin
         initialData={doctorData}
         initialAppointments={appointments}

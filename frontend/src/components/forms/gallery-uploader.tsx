@@ -34,7 +34,7 @@ export function GalleryUploader({
   value = [],
   onChange,
   maxFiles = 6,
-  maxSizeBytes = 3 * 1024 * 1024, // 3MB
+  maxSizeBytes = 10 * 1024 * 1024, // 10MB per image
   error,
   disabled,
 }: GalleryUploaderProps) {
@@ -85,10 +85,19 @@ export function GalleryUploader({
       setUploadError(`Only ${availableSlots} more photo(s) can be added (max ${maxFiles})`);
     }
 
+    const allowedExtensions = [".jpg", ".jpeg", ".png", ".webp", ".heic", ".heif"];
     const validFiles: File[] = [];
     for (const file of filesToUpload) {
       if (file.size > maxSizeBytes) {
         setUploadError(`File ${file.name} exceeds maximum size of ${maxMb} MB`);
+        continue;
+      }
+      const ext = file.name.includes(".")
+        ? file.name.substring(file.name.lastIndexOf(".")).toLowerCase()
+        : "";
+      const isImageMime = file.type.startsWith("image/");
+      if (!allowedExtensions.includes(ext) && !isImageMime) {
+        setUploadError(`Unsupported format (${ext || file.type}). Allowed: JPG, JPEG, PNG, WebP, HEIC.`);
         continue;
       }
       validFiles.push(file);
@@ -332,7 +341,7 @@ export function GalleryUploader({
               ref={fileInputRef}
               type="file"
               multiple
-              accept=".jpeg,.jpg,.png,.webp"
+              accept="image/*,.jpeg,.jpg,.png,.webp,.heic,.heif"
               className="hidden"
               disabled={disabled || isUploading}
               onChange={handleFilesSelect}

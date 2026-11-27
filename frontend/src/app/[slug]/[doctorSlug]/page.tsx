@@ -62,25 +62,33 @@ export async function generateMetadata({ params }: HospitalDoctorPageProps): Pro
         apple: "/icon-round.png",
       };
 
+  const canonicalUrl =
+    data.customDomain && data.customDomainStatus === "VERIFIED"
+      ? `https://${data.customDomain}`
+      : `/${data.slug}`;
+
   return {
     title,
     description,
     alternates: {
-      canonical: `/${data.slug}`,
+      canonical: canonicalUrl,
     },
     icons,
     openGraph: {
       title,
       description,
-      url: `/${data.slug}`,
+      url: canonicalUrl,
       siteName: data.organizationName, // Inherited parent organization name
       images: ogImage ? [{ url: ogImage }] : [],
       type: "profile",
     },
-    robots: {
-      index: true,
-      follow: true,
-    },
+    robots:
+      data.isPendingApproval || data.isTempPreview || data.isDeactivated
+        ? { index: false, follow: false }
+        : {
+            index: true,
+            follow: true,
+          },
   };
 }
 
@@ -90,6 +98,39 @@ export default async function HospitalDoctorPage({ params }: HospitalDoctorPageP
 
   if (!data) {
     notFound();
+  }
+
+  if (data.isPendingApproval) {
+    return (
+      <div className="min-h-screen bg-slate-950 text-white flex flex-col items-center justify-center p-6 text-center">
+        <div className="max-w-md w-full p-8 sm:p-10 rounded-3xl bg-slate-900/90 border border-amber-500/30 shadow-2xl space-y-6">
+          <div className="h-16 w-16 mx-auto rounded-2xl bg-amber-500/10 border border-amber-500/30 flex items-center justify-center text-amber-400">
+            <AlertTriangle className="h-8 w-8" />
+          </div>
+          <div className="space-y-2.5">
+            <span className="inline-block px-3 py-1 rounded-full text-[11px] font-bold uppercase tracking-wider bg-amber-500/15 text-amber-300 border border-amber-500/25">
+              Pending Verification
+            </span>
+            <h1 className="text-xl sm:text-2xl font-bold text-white tracking-tight">
+              Under Approval
+            </h1>
+            <p className="text-sm text-slate-300 leading-relaxed font-medium">
+              {data.approvalMessage || "Under Approval, please contact your hospital admin."}
+            </p>
+          </div>
+          <div className="pt-4 border-t border-slate-800 space-y-1">
+            {data.doctorName && (
+              <p className="text-xs font-semibold text-slate-300">
+                Dr. {data.doctorName}
+              </p>
+            )}
+            <p className="text-xs text-slate-400">
+              {data.organizationName} &bull; Doczeno Healthcare
+            </p>
+          </div>
+        </div>
+      </div>
+    );
   }
 
   if (data.isDeactivated) {
@@ -117,7 +158,7 @@ export default async function HospitalDoctorPage({ params }: HospitalDoctorPageP
 
   const cookieStore = await cookies();
   const cookieTheme = cookieStore.get("doczeno_site_theme_mode")?.value;
-  const initialThemeMode: "light" | "dark" = cookieTheme === "dark" ? "dark" : "light";
+  const initialThemeMode: "light" | "dark" = cookieTheme === "light" ? "light" : "dark";
 
   return <ThemeRenderer data={data} initialThemeMode={initialThemeMode} />;
 }

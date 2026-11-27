@@ -16,6 +16,34 @@ import { UserRole, WebsiteType } from "@/types";
 import { RESERVED_SLUGS } from "@/constants/healthcare";
 import { authRateLimiter } from "@/middleware/rate-limiter";
 
+const TEMP_SLUG_ALPHABET = "abcdefghijklmnopqrstuvwxyz0123456789";
+
+/**
+ * Generates a unique 10-character lowercase alphanumeric temporary slug
+ * that has never been used as a slug or tempSlug before.
+ */
+async function generateUniqueTempSlug(): Promise<string> {
+  for (let attempt = 0; attempt < 15; attempt++) {
+    let candidate = "";
+    for (let i = 0; i < 10; i++) {
+      candidate += TEMP_SLUG_ALPHABET[crypto.randomInt(0, TEMP_SLUG_ALPHABET.length)];
+    }
+
+    if (RESERVED_SLUGS.includes(candidate as any)) continue;
+
+    const [existingDoc, existingOrg, existingWebsite] = await Promise.all([
+      Doctor.findOne({ $or: [{ slug: candidate }, { tempSlug: candidate }] }).select("_id"),
+      Organization.findOne({ slug: candidate }).select("_id"),
+      Website.findOne({ slug: candidate }).select("_id"),
+    ]);
+
+    if (!existingDoc && !existingOrg && !existingWebsite) {
+      return candidate;
+    }
+  }
+  throw new Error("Failed to generate a unique temporary preview slug. Please try again.");
+}
+
 function extractPublicIds(obj: any): string[] {
   const ids: string[] = [];
   function recurse(val: any) {
@@ -63,6 +91,16 @@ onboardingRouter.post(
   authRateLimiter,
   async (req: Request, res: Response, next: NextFunction) => {
     try {
+      const { onboardingCategories } = await PlatformConfigService.getConfig();
+      if (!onboardingCategories.portalEnabled) {
+        res.status(403).json({
+          success: false,
+          error: "This Services is off by admin...",
+          code: "SERVICE_OFF_BY_ADMIN",
+        });
+        return;
+      }
+
       const { email, name } = req.body;
       if (!email || typeof email !== "string" || !email.includes("@")) {
         res.status(400).json({
@@ -131,7 +169,10 @@ onboardingRouter.get(
   async (req: Request, res: Response, next: NextFunction) => {
     try {
       const q = typeof req.query.q === "string" ? req.query.q.trim() : "";
-      const filter: Record<string, any> = { status: "ACTIVE" };
+      const filter: Record<string, any> = {
+        status: "ACTIVE",
+        isVisibleInDoctorOnboarding: { $ne: false },
+      };
 
       if (q) {
         filter.$or = [
@@ -207,7 +248,10 @@ onboardingRouter.get(
           return;
         }
 
-        const query: any = { organizationId: orgId, slug };
+        const query: any = {
+          organizationId: orgId,
+          $or: [{ slug }, { tempSlug: slug }],
+        };
         if (excludeId) {
           query._id = { $ne: excludeId };
         }
@@ -447,6 +491,20 @@ onboardingRouter.post(
     try {
       const validated = onlyDoctorOnboardingSchema.parse(req.body);
 
+      if (!validated.isDraft) {
+        const { onboardingCategories } = await PlatformConfigService.getConfig();
+        if (!onboardingCategories.portalEnabled || !onboardingCategories.onlyDoctor) {
+          res.status(403).json({
+            success: false,
+            error: !onboardingCategories.portalEnabled
+              ? "This Services is off by admin..."
+              : "This service is temporarily disabled from the admin.",
+            code: "SERVICE_TEMPORARILY_DISABLED",
+          });
+          return;
+        }
+      }
+
       // Verify OTP if submitted during final publish
       if (!validated.isDraft && validated.otp) {
         await OtpService.verifyOtp({
@@ -547,17 +605,16 @@ onboardingRouter.post(
       await MediaService.markMediaAsAttached(doctorAssets, doctor._id, "DOCTOR");
 
       // Create or update User account for only doctor administration if password provided
-      let token: string | undefined;
       let userRecord: any;
 
       if (!validated.isDraft && validated.password) {
-        const docEmail = validated.email.toLowerCase();
+        const targetAdminEmail = (validated.adminEmail || validated.email).toLowerCase().trim();
         const passwordHash = await AuthService.hashPassword(validated.password);
 
         try {
           userRecord = await User.create({
             name: validated.doctorName,
-            email: docEmail,
+            email: targetAdminEmail,
             passwordHash,
             role: UserRole.ONLY_DOCTOR,
             doctorProfileId: doctor._id,
@@ -566,7 +623,7 @@ onboardingRouter.post(
         } catch (err: any) {
           if (err?.code === 11000) {
             userRecord = await User.findOneAndUpdate(
-              { email: docEmail, role: UserRole.ONLY_DOCTOR },
+              { email: targetAdminEmail, role: UserRole.ONLY_DOCTOR },
               {
                 name: validated.doctorName,
                 passwordHash,
@@ -586,8 +643,8 @@ onboardingRouter.post(
           await doctor.save();
         }
 
-        token = AuthService.generateToken(userRecord);
-
+        // Security: Do NOT issue an automatic session token on public website creation.
+        // The doctor must authenticate with their email and password on their first admin login.
         const isProd = process.env.NODE_ENV === "production";
         res.clearCookie("doczeno_session", {
           httpOnly: true,
@@ -619,7 +676,7 @@ onboardingRouter.post(
                 role: userRecord.role,
               }
             : undefined,
-          token,
+          token: undefined,
           publicUrl,
         },
       });
@@ -637,6 +694,20 @@ onboardingRouter.post(
   async (req: Request, res: Response, next: NextFunction) => {
     try {
       const validated = hospitalOnboardingSchema.parse(req.body);
+
+      if (!validated.isDraft) {
+        const { onboardingCategories } = await PlatformConfigService.getConfig();
+        if (!onboardingCategories.portalEnabled || !onboardingCategories.hospital) {
+          res.status(403).json({
+            success: false,
+            error: !onboardingCategories.portalEnabled
+              ? "This Services is off by admin..."
+              : "This service is temporarily disabled from the admin.",
+            code: "SERVICE_TEMPORARILY_DISABLED",
+          });
+          return;
+        }
+      }
 
       // Verify OTP if submitted during final publish
       if (!validated.isDraft && validated.otp) {
@@ -784,8 +855,8 @@ onboardingRouter.post(
       ];
       await MediaService.markMediaAsAttached(hospitalAssets, organization._id, "ORGANIZATION");
 
-      const token = AuthService.generateToken(adminUser);
-
+      // Security: Do NOT issue an automatic session token on public website creation.
+      // The hospital admin must authenticate with email & password on first login.
       const isProd = process.env.NODE_ENV === "production";
       res.clearCookie("doczeno_session", {
         httpOnly: true,
@@ -815,7 +886,7 @@ onboardingRouter.post(
             email: adminUser.email,
             role: adminUser.role,
           },
-          token,
+          token: undefined,
           publicUrl,
         },
       });
@@ -833,6 +904,24 @@ onboardingRouter.post(
   async (req: Request, res: Response, next: NextFunction) => {
     try {
       const validated = hospitalDoctorOnboardingSchema.parse(req.body);
+
+      const isAdminActor = Boolean(
+        req.user &&
+          (req.user.role === UserRole.HOSPITAL_ADMIN || req.user.role === UserRole.SUPERADMIN)
+      );
+      if (!validated.isDraft && !isAdminActor) {
+        const { onboardingCategories } = await PlatformConfigService.getConfig();
+        if (!onboardingCategories.portalEnabled || !onboardingCategories.hospitalDoctor) {
+          res.status(403).json({
+            success: false,
+            error: !onboardingCategories.portalEnabled
+              ? "This Services is off by admin..."
+              : "This service is temporarily disabled from the admin.",
+            code: "SERVICE_TEMPORARILY_DISABLED",
+          });
+          return;
+        }
+      }
 
       // Verify OTP if submitted during final publish
       if (!validated.isDraft && validated.otp) {
@@ -867,6 +956,15 @@ onboardingRouter.post(
           success: false,
           error: "Selected hospital organization is invalid or inactive",
           code: "INVALID_ORGANIZATION_ID",
+        });
+        return;
+      }
+
+      if (!validated.isDraft && !isAdminActor && parentHospital.isVisibleInDoctorOnboarding === false) {
+        res.status(403).json({
+          success: false,
+          error: "This hospital/clinic is currently hidden from public doctor registration. Please contact the administrator.",
+          code: "HOSPITAL_HIDDEN_FROM_ONBOARDING",
         });
         return;
       }
@@ -938,7 +1036,10 @@ onboardingRouter.post(
         `dr-${validated.doctorName.toLowerCase().replace(/[^a-z0-9]/g, "-")}`;
       let finalDocSlug = docSlugBase;
 
-      const existingDoc = await Doctor.findOne({ organizationId: parentHospital._id, slug: finalDocSlug });
+      const existingDoc = await Doctor.findOne({
+        organizationId: parentHospital._id,
+        $or: [{ slug: finalDocSlug }, { tempSlug: finalDocSlug }],
+      });
       if (existingDoc) {
         if (validated.customSlug) {
           res.status(409).json({
@@ -951,6 +1052,14 @@ onboardingRouter.post(
         finalDocSlug = `${docSlugBase}-${Math.floor(1000 + Math.random() * 9000)}`;
       }
       const childWebsiteSlug = `${parentHospital.slug}-${finalDocSlug}`;
+
+      const isCreatedByHospitalAdmin = Boolean(
+        req.user &&
+          req.user.role === UserRole.HOSPITAL_ADMIN &&
+          req.user.organizationId === validated.organizationId
+      );
+      const requiresApproval = !validated.isDraft && !isCreatedByHospitalAdmin;
+      const tempSlug = requiresApproval ? await generateUniqueTempSlug() : undefined;
 
       // 4. Create child Doctor record WITHOUT duplicating hospital address, logo, gallery, or theme
       const doctor = await Doctor.create({
@@ -969,7 +1078,10 @@ onboardingRouter.post(
         oldCaseFee: validated.oldCaseFee,
         organizationId: parentHospital._id, // Child relation
         slug: finalDocSlug,
-        status: validated.isDraft ? "INACTIVE" : "ACTIVE",
+        tempSlug,
+        approvalStatus: requiresApproval ? "PENDING" : "APPROVED",
+        approvedAt: requiresApproval ? undefined : new Date(),
+        status: validated.isDraft || requiresApproval ? "INACTIVE" : "ACTIVE",
       });
 
       // 5. Create Child Website Entity
@@ -981,7 +1093,7 @@ onboardingRouter.post(
         organizationId: parentHospital._id,
         slug: childWebsiteSlug,
         templateId: parentHospital.selectedTheme, // Inherited theme
-        publishStatus: validated.isDraft ? "DRAFT" : "PUBLISHED",
+        publishStatus: validated.isDraft ? "DRAFT" : requiresApproval ? "REVIEW" : "PUBLISHED",
         seoMetadata: {
           title: `Dr. ${doctor.doctorName} — ${parentHospital.name}`,
           description: `Consult Dr. ${doctor.doctorName} (${doctor.specialization}) at ${parentHospital.name}, ${parentHospital.address.city}.`,
@@ -996,16 +1108,15 @@ onboardingRouter.post(
 
       // Create or update User account for affiliated doctor if password provided
       let docUserRecord: any;
-      let token: string | undefined;
 
       if (!validated.isDraft && validated.password) {
         const passwordHash = await AuthService.hashPassword(validated.password);
-        const docEmail = validated.email.toLowerCase();
+        const targetAdminEmail = (validated.adminEmail || validated.email).toLowerCase().trim();
 
         try {
           docUserRecord = await User.create({
             name: validated.doctorName,
-            email: docEmail,
+            email: targetAdminEmail,
             passwordHash,
             role: UserRole.HOSPITAL_DOCTOR,
             organizationId: parentHospital._id,
@@ -1015,7 +1126,7 @@ onboardingRouter.post(
         } catch (err: any) {
           if (err?.code === 11000) {
             docUserRecord = await User.findOneAndUpdate(
-              { email: docEmail, role: UserRole.HOSPITAL_DOCTOR },
+              { email: targetAdminEmail, role: UserRole.HOSPITAL_DOCTOR },
               {
                 name: validated.doctorName,
                 passwordHash,
@@ -1036,8 +1147,8 @@ onboardingRouter.post(
           await doctor.save();
         }
 
-        token = AuthService.generateToken(docUserRecord);
-
+        // Security: Do NOT issue an automatic session token on public website creation.
+        // The doctor must authenticate with email & password on first login.
         const isProd = process.env.NODE_ENV === "production";
         res.clearCookie("doczeno_session", {
           httpOnly: true,
@@ -1051,17 +1162,26 @@ onboardingRouter.post(
       }
 
       const { platformDomain } = await PlatformConfigService.getConfig();
-      const publicUrl = `${platformDomain}/${parentHospital.slug}/${finalDocSlug}`;
+      const publicUrl = requiresApproval ? "" : `${platformDomain}/${parentHospital.slug}/${finalDocSlug}`;
+
+      // Never expose tempSlug in the public onboarding response
+      const safeDoctorResponse = doctor.toObject();
+      delete (safeDoctorResponse as any).tempSlug;
 
       res.status(201).json({
         success: true,
+        pendingApproval: requiresApproval,
         message: validated.isDraft
           ? "Hospital doctor profile saved as draft"
+          : requiresApproval
+          ? "Your request is sent to the admin for approval, kindly wait some time."
           : "Hospital doctor profile published successfully",
         publicUrl,
         data: {
-          doctor,
+          doctor: safeDoctorResponse,
           website,
+          pendingApproval: requiresApproval,
+          requestedSlug: finalDocSlug,
           user: docUserRecord
             ? {
                 id: docUserRecord._id,
@@ -1069,7 +1189,7 @@ onboardingRouter.post(
                 role: docUserRecord.role,
               }
             : undefined,
-          token,
+          token: undefined,
           publicUrl,
         },
       });

@@ -70,7 +70,6 @@ const AuditLogSchema = new Schema<IAuditLog>(
     timestamp: {
       type: Date,
       default: Date.now,
-      index: true,
     },
   },
   {
@@ -80,6 +79,12 @@ const AuditLogSchema = new Schema<IAuditLog>(
 
 AuditLogSchema.index({ organizationId: 1, timestamp: -1 });
 AuditLogSchema.index({ userId: 1, timestamp: -1 });
+
+// Automatically delete audit logs from MongoDB after 30 days
+AuditLogSchema.index(
+  { timestamp: 1 },
+  { expireAfterSeconds: 30 * 24 * 60 * 60 }
+);
 
 export const AuditLog: Model<IAuditLog> =
   mongoose.models.AuditLog || mongoose.model<IAuditLog>("AuditLog", AuditLogSchema);

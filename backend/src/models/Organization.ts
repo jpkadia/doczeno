@@ -36,6 +36,11 @@ export interface IOrganization extends Document {
   selectedTheme: string;
   faviconUrl?: string;
   browserTabTitle: string;
+  isWebsiteChatbotEnabled?: boolean;
+  isAdminChatbotEnabled?: boolean;
+  isChatbotBookingEnabled?: boolean;
+  isAiRegenerateEnabled?: boolean;
+  isVisibleInDoctorOnboarding?: boolean;
   status: "ACTIVE" | "INACTIVE";
   createdAt: Date;
   updatedAt: Date;
@@ -135,6 +140,27 @@ const OrganizationSchema = new Schema<IOrganization>(
       type: String,
       required: true,
       default: "Hospital & Healthcare Center",
+    },
+    isWebsiteChatbotEnabled: {
+      type: Boolean,
+      default: true,
+    },
+    isAdminChatbotEnabled: {
+      type: Boolean,
+      default: true,
+    },
+    isChatbotBookingEnabled: {
+      type: Boolean,
+      default: true,
+    },
+    isAiRegenerateEnabled: {
+      type: Boolean,
+      default: false,
+    },
+    isVisibleInDoctorOnboarding: {
+      type: Boolean,
+      default: true,
+      index: true,
     },
     status: {
       type: String,

@@ -38,11 +38,7 @@ interface ImageUploaderProps {
 export function ImageUploader({
   label,
   category,
-  maxSizeBytes = category === "DOCTOR_PHOTO"
-    ? 3 * 1024 * 1024
-    : category === "BUILDING_PHOTO"
-    ? 5 * 1024 * 1024
-    : 2 * 1024 * 1024,
+  maxSizeBytes = 10 * 1024 * 1024, // 10 MB per image
   value,
   onChange,
   error,
@@ -80,7 +76,7 @@ export function ImageUploader({
   const fileInputRef = React.useRef<HTMLInputElement>(null);
 
   const maxMb = (maxSizeBytes / (1024 * 1024)).toFixed(0);
-  const allowedExtensions = [".jpg", ".jpeg", ".png", ".webp"];
+  const allowedExtensions = [".jpg", ".jpeg", ".png", ".webp", ".heic", ".heif"];
 
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -95,9 +91,12 @@ export function ImageUploader({
       return;
     }
 
-    const ext = file.name.substring(file.name.lastIndexOf(".")).toLowerCase();
-    if (!allowedExtensions.includes(ext)) {
-      setUploadError(`Unsupported format (${ext}). Allowed: JPG, PNG, WebP.`);
+    const ext = file.name.includes(".")
+      ? file.name.substring(file.name.lastIndexOf(".")).toLowerCase()
+      : "";
+    const isImageMime = file.type.startsWith("image/");
+    if (!allowedExtensions.includes(ext) && !isImageMime) {
+      setUploadError(`Unsupported format (${ext || file.type}). Allowed: JPG, PNG, WebP, HEIC.`);
       if (fileInputRef.current) fileInputRef.current.value = "";
       return;
     }
@@ -206,11 +205,11 @@ export function ImageUploader({
 
   return (
     <div className="space-y-1.5">
-      {/* Hidden file input always available for initial upload & replacing */}
+      {/* Hidden file input with full iOS and Android camera / photo-library support */}
       <input
         ref={fileInputRef}
         type="file"
-        accept=".jpeg,.jpg,.png,.webp"
+        accept="image/*,.jpeg,.jpg,.png,.webp,.heic,.heif"
         className="hidden"
         disabled={disabled || isUploading}
         onChange={handleFileSelect}

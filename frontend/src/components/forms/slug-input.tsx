@@ -168,43 +168,45 @@ export function SlugInput({
         <span className="text-[11px] text-muted-foreground">Unique web address</span>
       </div>
 
-      <div className="relative flex rounded-md shadow-xs">
-        <span className="inline-flex items-center px-3 rounded-l-md border border-r-0 border-input bg-muted/60 text-muted-foreground text-xs font-mono select-none">
+      <div className="relative flex flex-col sm:flex-row rounded-md shadow-xs">
+        <span className="inline-flex items-center px-3 py-1.5 sm:py-0 rounded-t-md sm:rounded-t-none sm:rounded-l-md border border-input sm:border-r-0 border-b-0 sm:border-b bg-muted/70 text-muted-foreground text-xs font-mono select-none break-all">
           {effectivePrefix}
         </span>
 
-        <Input
-          id={id}
-          value={value}
-          onChange={handleChange}
-          onBlur={handleBlur}
-          placeholder={placeholder}
-          disabled={disabled}
-          className={cn(
-            "rounded-l-none lowercase font-mono text-sm tracking-tight pr-24",
-            error || status === "taken" ? "border-destructive focus-visible:ring-destructive" : "",
-            status === "available" ? "border-[#1a76d1] focus-visible:ring-[#1a76d1]" : ""
-          )}
-        />
+        <div className="relative flex-1 min-w-0">
+          <Input
+            id={id}
+            value={value}
+            onChange={handleChange}
+            onBlur={handleBlur}
+            placeholder={placeholder}
+            disabled={disabled}
+            className={cn(
+              "rounded-t-none sm:rounded-t-md sm:rounded-l-none rounded-b-md lowercase font-mono text-sm tracking-tight pr-24 w-full",
+              error || status === "taken" ? "border-destructive focus-visible:ring-destructive" : "",
+              status === "available" ? "border-[#1a76d1] focus-visible:ring-[#1a76d1]" : ""
+            )}
+          />
 
-        {/* Live status badge inside the input */}
-        <div className="absolute right-2.5 top-1/2 -translate-y-1/2 flex items-center gap-1 text-xs select-none pointer-events-none">
-          {checking ? (
-            <span className="inline-flex items-center gap-1 text-[11px] text-muted-foreground">
-              <Loader2 className="h-3.5 w-3.5 animate-spin text-[#1a76d1]" />
-              Checking...
-            </span>
-          ) : status === "available" ? (
-            <span className="inline-flex items-center gap-1 text-[11px] text-[#1a76d1] font-semibold">
-              <CheckCircle2 className="h-3.5 w-3.5" />
-              Available
-            </span>
-          ) : status === "taken" ? (
-            <span className="inline-flex items-center gap-1 text-[11px] text-destructive font-semibold">
-              <XCircle className="h-3.5 w-3.5" />
-              Taken
-            </span>
-          ) : null}
+          {/* Live status badge inside the input */}
+          <div className="absolute right-2.5 top-1/2 -translate-y-1/2 flex items-center gap-1 text-xs select-none pointer-events-none">
+            {checking ? (
+              <span className="inline-flex items-center gap-1 text-[11px] text-muted-foreground">
+                <Loader2 className="h-3.5 w-3.5 animate-spin text-[#1a76d1]" />
+                Checking...
+              </span>
+            ) : status === "available" ? (
+              <span className="inline-flex items-center gap-1 text-[11px] text-[#1a76d1] font-semibold">
+                <CheckCircle2 className="h-3.5 w-3.5" />
+                Available
+              </span>
+            ) : status === "taken" ? (
+              <span className="inline-flex items-center gap-1 text-[11px] text-destructive font-semibold">
+                <XCircle className="h-3.5 w-3.5" />
+                Taken
+              </span>
+            ) : null}
+          </div>
         </div>
       </div>
 

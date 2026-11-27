@@ -14,7 +14,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
-import { apiClient } from "@/lib/api-client";
+import { apiClient, warmUpBackend } from "@/lib/api-client";
 
 interface AdminAssistantMessage {
   id: string;
@@ -80,6 +80,12 @@ export function AdminAssistantDrawer({
     prompt: string;
   } | null>(null);
 
+  React.useEffect(() => {
+    if (isOpen) {
+      warmUpBackend();
+    }
+  }, [isOpen]);
+
   // Generate or retrieve persistent sessionId
   const [sessionId, setSessionId] = React.useState<string>(() => {
     if (typeof window !== "undefined") {
@@ -95,7 +101,7 @@ export function AdminAssistantDrawer({
   const defaultGreeting: AdminAssistantMessage = {
     id: "initial-assistant-prompt",
     role: "assistant",
-    content: `Hello! I am your administrative AI assistant for ${portalTitle}. I can fetch appointment summaries, review doctor rosters, check schedule settings, and assist with profile updates. You can ask in English, Hinglish, or Gujarati. What would you like to check?`,
+    content: `Hello! I am your read-only information assistant for ${portalTitle}. Ask me about doctors, specialties, timings, fees, active/deactive status, or booked appointments in English, Hindi, Hinglish, or Gujlish.`,
     timestamp: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
   };
 
@@ -191,12 +197,31 @@ export function AdminAssistantDrawer({
     }
   }, [messages, isOpen, pendingAction]);
 
-  const quickPrompts = [
-    { label: "Upcoming Appointments", prompt: "Show upcoming appointments" },
-    { label: "Clinic Profile", prompt: "Summarize current profile and contact info" },
-    { label: "Doctor Directory", prompt: "List active doctors" },
-    { label: "Working Hours", prompt: "What are our consultation and working hours?" },
-  ];
+  const quickPrompts = React.useMemo(() => {
+    const roleUpper = roleBadge.toUpperCase();
+    if (roleUpper.includes("SUPERADMIN")) {
+      return [
+        { label: "Active vs Deactive Sites", prompt: "Show count and list of active and deactive websites" },
+        { label: "Hospitals & Doctors", prompt: "List all hospitals and doctors with their status" },
+        { label: "Appointments Summary", prompt: "How many appointments are booked and who booked them?" },
+        { label: "Custom Domains", prompt: "Show connected custom domains and quota status" },
+      ];
+    }
+    if (roleUpper.includes("HOSPITAL ADMIN")) {
+      return [
+        { label: "Doctors, Time & Fees", prompt: "Show all doctors, their specialties, timings, and fees" },
+        { label: "Active / Deactive Status", prompt: "Which doctors and websites are active or deactive?" },
+        { label: "Booked Appointments", prompt: "How many appointments are booked and who booked them?" },
+        { label: "Hospital Overview", prompt: "Summarize hospital profile, departments, and working hours" },
+      ];
+    }
+    return [
+      { label: "Appointments Booked", prompt: "How many appointments are booked and who booked them?" },
+      { label: "Upcoming Appointments", prompt: "Show upcoming appointments with patient details" },
+      { label: "My Timings & Fees", prompt: "What are my consultation timings, weekly off, and fees?" },
+      { label: "Website & Status", prompt: "Is my website active or deactive? Share my profile summary" },
+    ];
+  }, [roleBadge]);
 
   const handleSendMessage = async (textToSend?: string, confirmActionId?: string) => {
     const text = (textToSend || input).trim();
@@ -355,7 +380,7 @@ export function AdminAssistantDrawer({
         <div className="bg-blue-50/80 border-b border-blue-100 px-3.5 py-2 flex items-start gap-2 text-[11px] text-blue-900 leading-tight shrink-0">
           <ShieldCheck className="h-3.5 w-3.5 text-[#1a76d1] shrink-0 mt-0.5" />
           <span>
-            Operating in protected clinic workspace. Your clinical records and settings remain private.
+            Read-only workspace assistant. View doctors, timings, fees, active status &amp; appointments safely.
           </span>
         </div>
 
@@ -479,7 +504,7 @@ export function AdminAssistantDrawer({
                 value={input}
                 onChange={(e) => setInput(e.target.value)}
                 onKeyDown={handleKeyDown}
-                placeholder="Ask assistant to fetch records or manage profile..."
+                placeholder="Ask about doctors, timings, fees, status, or appointments..."
                 maxLength={500}
                 disabled={loading || Boolean(pendingAction)}
                 className="w-full bg-slate-100 border border-slate-300 rounded-xl px-3.5 py-2 text-xs text-slate-800 placeholder-slate-400 focus:bg-white focus:outline-none focus:ring-2 focus:ring-[#1a76d1] focus:border-[#1a76d1] disabled:opacity-60"

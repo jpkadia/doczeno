@@ -14,7 +14,8 @@ import {
   forgotPasswordResetSchema,
 } from "@/validations";
 import { authRateLimiter } from "@/middleware/rate-limiter";
-import { requireAuthenticatedUser } from "@/middleware/auth";
+import { requireAuthenticatedUser, extractAuthToken } from "@/middleware/auth";
+import { getClientIp } from "@/utils/client-info";
 import {
   Website,
   Doctor,
@@ -25,6 +26,7 @@ import {
   Review,
   ChatbotConversation,
   PlatformConfig,
+  AdminSession,
 } from "@/models";
 import { UserRole } from "@/types";
 
@@ -385,10 +387,10 @@ authRouter.post(
   async (req: Request, res: Response, next: NextFunction) => {
     try {
       const validated = loginSchema.parse(req.body);
-      const ipAddress = req.ip || req.socket.remoteAddress;
+      const ipAddress = getClientIp(req);
       const userAgent = req.headers["user-agent"];
 
-      const { user, token } = await AuthService.login(
+      const { user, token, sessionId } = await AuthService.login(
         validated.email,
         validated.password,
         {
@@ -402,6 +404,7 @@ authRouter.post(
 
       // Enforce role restriction if requested (e.g. SUPERADMIN portal)
       if (validated.requiredRole && user.role !== validated.requiredRole) {
+        AdminSession.deleteOne({ sessionId }).catch(() => {});
         res.status(403).json({
           success: false,
           error:
@@ -428,10 +431,34 @@ authRouter.post(
         );
 
         if (!isAuthorized) {
+          AdminSession.deleteOne({ sessionId }).catch(() => {});
           res.status(403).json({
             success: false,
             error: "You are not authorized for this clinic/hospital admin portal. Please log in through your official clinic URL.",
             code: "TENANT_MISMATCH",
+          });
+          return;
+        }
+      }
+
+      // Block login for Hospital-Affiliated Doctors whose profile is still pending hospital admin approval
+      if (user.role === UserRole.HOSPITAL_DOCTOR && user.doctorProfileId) {
+        const docRecord = await Doctor.findById(user.doctorProfileId).select("approvalStatus");
+        if (docRecord && docRecord.approvalStatus === "PENDING") {
+          AdminSession.deleteOne({ sessionId }).catch(() => {});
+          res.status(403).json({
+            success: false,
+            error: "Your profile is currently under approval by the hospital admin. Please wait until it is approved.",
+            code: "APPROVAL_PENDING",
+          });
+          return;
+        }
+        if (docRecord && docRecord.approvalStatus === "REJECTED") {
+          AdminSession.deleteOne({ sessionId }).catch(() => {});
+          res.status(403).json({
+            success: false,
+            error: "Your affiliation request was not approved by the hospital admin.",
+            code: "APPROVAL_REJECTED",
           });
           return;
         }
@@ -527,7 +554,51 @@ authRouter.get(
   }
 );
 
-authRouter.post("/logout", (_req: Request, res: Response) => {
+authRouter.post(
+  "/heartbeat",
+  requireAuthenticatedUser,
+  async (req: Request, res: Response) => {
+    if (req.user?.sessionId) {
+      await AdminSession.updateOne(
+        { sessionId: req.user.sessionId, status: "ACTIVE" },
+        { $set: { lastActivityAt: new Date() } }
+      ).catch(() => {});
+    }
+    res.status(200).json({ success: true });
+  }
+);
+
+authRouter.post("/logout", async (req: Request, res: Response) => {
+  const reason = req.body?.reason === "INACTIVITY" ? "INACTIVITY" : "MANUAL";
+
+  // Identify sessionId from req.user or raw token so we accurately mark MANUAL vs INACTIVITY logout
+  let sessionId = req.user?.sessionId;
+  if (!sessionId) {
+    const rawToken = extractAuthToken(req);
+    if (rawToken) {
+      try {
+        const { AUTH_SECRET } = getEnv();
+        const decoded = jwt.verify(rawToken, AUTH_SECRET) as { sessionId?: string };
+        sessionId = decoded?.sessionId;
+      } catch {
+        // Ignore invalid/expired token
+      }
+    }
+  }
+
+  if (sessionId) {
+    await AdminSession.updateOne(
+      { sessionId, status: "ACTIVE" },
+      {
+        $set: {
+          status: "LOGGED_OUT",
+          logoutAt: new Date(),
+          logoutReason: reason,
+        },
+      }
+    ).catch(() => {});
+  }
+
   const isProd = process.env.NODE_ENV === "production";
   res.clearCookie("doczeno_session", {
     httpOnly: true,
@@ -540,6 +611,141 @@ authRouter.post("/logout", (_req: Request, res: Response) => {
     message: "Logged out successfully",
   });
 });
+
+/**
+ * GET /api/v1/auth/admin-logs
+ * Authenticated: Returns login/logout session logs scoped strictly to the caller's role & tenant.
+ */
+authRouter.get(
+  "/admin-logs",
+  requireAuthenticatedUser,
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const user = req.user!;
+      const now = new Date();
+
+      // Auto-expire any stale ACTIVE sessions past their JWT expiration
+      await AdminSession.updateMany(
+        { status: "ACTIVE", expiresAt: { $lte: now } },
+        {
+          $set: {
+            status: "EXPIRED",
+            logoutAt: now,
+            logoutReason: "SESSION_EXPIRED",
+          },
+        }
+      ).catch(() => {});
+
+      const filter: Record<string, any> = {};
+      if (user.role === UserRole.SUPERADMIN) {
+        // Superadmin sees all platform admin logs (optional role filter)
+        if (typeof req.query.role === "string" && req.query.role !== "ALL") {
+          filter.userRole = req.query.role;
+        }
+      } else if (user.role === UserRole.HOSPITAL_ADMIN) {
+        if (user.organizationId) {
+          filter.$or = [
+            { userId: user.userId },
+            { organizationId: user.organizationId, userRole: UserRole.HOSPITAL_ADMIN },
+          ];
+        } else {
+          filter.userId = user.userId;
+        }
+      } else {
+        // ONLY_DOCTOR or HOSPITAL_DOCTOR sees only their own admin logs
+        if (user.doctorProfileId) {
+          filter.$or = [{ userId: user.userId }, { doctorId: user.doctorProfileId }];
+        } else {
+          filter.userId = user.userId;
+        }
+      }
+
+      const sessions = await AdminSession.find(filter)
+        .sort({ loginAt: -1 })
+        .limit(200)
+        .lean();
+
+      const logs = sessions.map((s) => ({
+        id: s._id.toString(),
+        sessionId: s.sessionId,
+        userId: s.userId.toString(),
+        userEmail: s.userEmail,
+        userName: s.userName || "",
+        userRole: s.userRole,
+        portalSlug: s.portalSlug || "",
+        ipAddress: s.ipAddress,
+        browser: s.browser,
+        os: s.os,
+        deviceType: s.deviceType,
+        deviceLabel: s.deviceLabel,
+        loginAt: s.loginAt,
+        lastActivityAt: s.lastActivityAt,
+        expiresAt: s.expiresAt,
+        status: s.status,
+        isLoggedIn: s.status === "ACTIVE",
+        isCurrentSession: Boolean(user.sessionId && s.sessionId === user.sessionId),
+        logoutAt: s.logoutAt || null,
+        logoutReason: s.logoutReason || null,
+      }));
+
+      res.status(200).json({
+        success: true,
+        data: { logs },
+      });
+    } catch (error) {
+      next(error);
+    }
+  }
+);
+
+/**
+ * POST /api/v1/auth/admin-logs/:sessionId/revoke
+ * Authenticated: Remotely terminate an active admin session.
+ */
+authRouter.post(
+  "/admin-logs/:sessionId/revoke",
+  requireAuthenticatedUser,
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const user = req.user!;
+      const sessionId = String(req.params.sessionId || "");
+      const session = await AdminSession.findOne({ sessionId });
+
+      if (!session) {
+        res.status(404).json({ success: false, error: "Session not found", code: "NOT_FOUND" });
+        return;
+      }
+
+      // Enforce ownership unless SUPERADMIN
+      if (user.role !== UserRole.SUPERADMIN) {
+        const isOwnUser = session.userId.toString() === user.userId;
+        const isSameHospitalAdmin =
+          user.role === UserRole.HOSPITAL_ADMIN &&
+          user.organizationId &&
+          session.organizationId?.toString() === user.organizationId &&
+          session.userRole === UserRole.HOSPITAL_ADMIN;
+        if (!isOwnUser && !isSameHospitalAdmin) {
+          res.status(403).json({ success: false, error: "Forbidden", code: "FORBIDDEN" });
+          return;
+        }
+      }
+
+      if (session.status === "ACTIVE") {
+        session.status = "LOGGED_OUT";
+        session.logoutAt = new Date();
+        session.logoutReason = "REVOKED";
+        await session.save();
+      }
+
+      res.status(200).json({
+        success: true,
+        message: "Session terminated successfully",
+      });
+    } catch (error) {
+      next(error);
+    }
+  }
+);
 
 /**
  * Public: Step 1 of Forgot Password - Send OTP to registered admin email
@@ -973,6 +1179,210 @@ authRouter.post(
       res.status(200).json({
         success: true,
         message: "Password changed successfully.",
+      });
+    } catch (error) {
+      next(error);
+    }
+  }
+);
+
+/**
+ * Protected: Step 1 of Change Admin Email - Verify current password and send OTP to new email
+ */
+authRouter.post(
+  "/change-email/send-otp",
+  requireAuthenticatedUser,
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      if (!req.user) {
+        res.status(401).json({ success: false, error: "Unauthorized" });
+        return;
+      }
+
+      const { currentPassword, newEmail } = req.body;
+      if (!currentPassword || typeof currentPassword !== "string") {
+        res.status(400).json({
+          success: false,
+          error: "Please enter your current account password to proceed.",
+          code: "PASSWORD_REQUIRED",
+        });
+        return;
+      }
+
+      if (!newEmail || typeof newEmail !== "string") {
+        res.status(400).json({
+          success: false,
+          error: "Please provide a valid new email address.",
+          code: "EMAIL_REQUIRED",
+        });
+        return;
+      }
+
+      const cleanNewEmail = newEmail.trim().toLowerCase();
+      const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+      if (!emailRegex.test(cleanNewEmail)) {
+        res.status(400).json({
+          success: false,
+          error: "Invalid email format. Please enter a valid email address.",
+          code: "INVALID_EMAIL",
+        });
+        return;
+      }
+
+      const user = await User.findById(req.user.userId);
+      if (!user) {
+        res.status(404).json({
+          success: false,
+          error: "User account not found.",
+          code: "USER_NOT_FOUND",
+        });
+        return;
+      }
+
+      // 1. Verify current password
+      const isMatch = await AuthService.verifyPassword(currentPassword, user.passwordHash);
+      if (!isMatch) {
+        res.status(400).json({
+          success: false,
+          error: "Incorrect current password. Please enter your valid account password.",
+          code: "PASSWORD_INCORRECT",
+        });
+        return;
+      }
+
+      // 2. Disallow same email
+      if (cleanNewEmail === user.email.toLowerCase()) {
+        res.status(400).json({
+          success: false,
+          error: "The new email is identical to your current administrator email.",
+          code: "EMAIL_IDENTICAL",
+        });
+        return;
+      }
+
+      // 3. Check if email is already taken by another account with the same role
+      const existingUser = await User.findOne({
+        email: cleanNewEmail,
+        role: user.role,
+        _id: { $ne: user._id },
+      });
+      if (existingUser) {
+        res.status(409).json({
+          success: false,
+          error: "This email address is already registered to another administrator.",
+          code: "EMAIL_ALREADY_IN_USE",
+        });
+        return;
+      }
+
+      // 4. Send 6-digit OTP to the new email
+      await OtpService.generateAndSendOtp({
+        email: cleanNewEmail,
+        name: user.name,
+        purpose: "EMAIL_CHANGE",
+      });
+
+      res.status(200).json({
+        success: true,
+        message: `A 6-digit verification code has been sent to ${cleanNewEmail}. Please verify to confirm email change.`,
+      });
+    } catch (error) {
+      next(error);
+    }
+  }
+);
+
+/**
+ * Protected: Step 2 of Change Admin Email - Verify OTP and update User email
+ */
+authRouter.post(
+  "/change-email/verify-otp",
+  requireAuthenticatedUser,
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      if (!req.user) {
+        res.status(401).json({ success: false, error: "Unauthorized" });
+        return;
+      }
+
+      const { currentPassword, newEmail, otp } = req.body;
+      if (!currentPassword || !newEmail || !otp) {
+        res.status(400).json({
+          success: false,
+          error: "Current password, new email, and OTP code are required.",
+          code: "MISSING_FIELDS",
+        });
+        return;
+      }
+
+      const cleanNewEmail = newEmail.trim().toLowerCase();
+      const user = await User.findById(req.user.userId);
+      if (!user) {
+        res.status(404).json({
+          success: false,
+          error: "User account not found.",
+          code: "USER_NOT_FOUND",
+        });
+        return;
+      }
+
+      // 1. Verify password again for absolute security
+      const isMatch = await AuthService.verifyPassword(currentPassword, user.passwordHash);
+      if (!isMatch) {
+        res.status(400).json({
+          success: false,
+          error: "Incorrect current password.",
+          code: "PASSWORD_INCORRECT",
+        });
+        return;
+      }
+
+      // 2. Verify OTP
+      await OtpService.verifyOtp({
+        email: cleanNewEmail,
+        otp: String(otp).trim(),
+        purpose: "EMAIL_CHANGE",
+      });
+
+      const oldEmail = user.email;
+      user.email = cleanNewEmail;
+      await user.save();
+
+      // Issue refreshed JWT token with updated email while preserving active sessionId
+      const newToken = AuthService.generateToken(user, req.user?.sessionId);
+      if (req.user?.sessionId) {
+        AdminSession.updateOne(
+          { sessionId: req.user.sessionId },
+          { $set: { userEmail: cleanNewEmail, lastActivityAt: new Date() } }
+        ).catch(() => {});
+      }
+      const isProd = process.env.NODE_ENV === "production";
+      res.cookie("doczeno_session", newToken, {
+        httpOnly: true,
+        secure: isProd,
+        sameSite: isProd ? "none" : "lax",
+        maxAge: 7 * 24 * 60 * 60 * 1000,
+      });
+
+      logAuditEvent({
+        userId: user._id.toString(),
+        userEmail: cleanNewEmail,
+        userRole: user.role,
+        action: "ADMIN_EMAIL_CHANGED",
+        entityType: "User",
+        entityId: user._id.toString(),
+        organizationId: user.organizationId ? user.organizationId.toString() : null,
+        doctorId: user.doctorProfileId ? user.doctorProfileId.toString() : null,
+        details: { oldEmail, newEmail: cleanNewEmail },
+      }).catch(() => {});
+
+      res.status(200).json({
+        success: true,
+        message: "Administrator login email updated successfully.",
+        data: {
+          email: cleanNewEmail,
+          token: newToken,
+        },
       });
     } catch (error) {
       next(error);

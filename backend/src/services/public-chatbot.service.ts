@@ -6,8 +6,8 @@ import {
   Organization,
   Appointment,
   IAppointmentDraft,
-  getNextAppointmentId,
 } from "@/models";
+import { AppointmentBookingService } from "./appointment-booking.service";
 import {
   ragKnowledgeService,
   TenantRetrievalScope,
@@ -29,8 +29,307 @@ import {
   getOutsideTopicRefusal,
 } from "./admin-assistant.service";
 import { GeminiLoggerService } from "./gemini-logger.service";
+import { FIXED_PLATFORM_DOMAIN } from "./platform-config.service";
+import {
+  getOrderedCandidateModels,
+  markModelHealthy,
+  markModelUnhealthy,
+  generateContentBounded,
+} from "./gemini-fast-caller";
 
 const MAX_PUBLIC_TURNS = 20;
+const RAG_CACHE_TTL_MS = 60_000;
+const RAG_CACHE_MAX_SIZE = 200;
+
+interface RagCacheEntry {
+  expiresAt: number;
+  chunks: Array<{ title: string; chunkText: string }>;
+}
+
+const ragChunkCache = new Map<string, RagCacheEntry>();
+
+function buildRagCacheKey(scope: TenantRetrievalScope, query: string): string {
+  return `${scope.websiteType}:${scope.organizationId || ""}:${scope.doctorId || ""}:${query.trim().toLowerCase().slice(0, 120)}`;
+}
+
+function getCachedRagChunks(key: string): Array<{ title: string; chunkText: string }> | null {
+  const entry = ragChunkCache.get(key);
+  if (!entry) return null;
+  if (Date.now() > entry.expiresAt) {
+    ragChunkCache.delete(key);
+    return null;
+  }
+  return entry.chunks;
+}
+
+function setCachedRagChunks(key: string, chunks: Array<{ title: string; chunkText: string }>): void {
+  if (ragChunkCache.size >= RAG_CACHE_MAX_SIZE) {
+    const oldestKey = ragChunkCache.keys().next().value;
+    if (oldestKey) ragChunkCache.delete(oldestKey);
+  }
+  ragChunkCache.set(key, {
+    expiresAt: Date.now() + RAG_CACHE_TTL_MS,
+    chunks: chunks.map((c) => ({ title: c.title, chunkText: c.chunkText })),
+  });
+}
+
+function shouldSkipAiEntityExtraction(params: {
+  message: string;
+  localPhone?: string | null;
+  localDate?: unknown;
+  localTime?: string | null;
+  localAge?: number | null;
+  localName?: string | null;
+}): boolean {
+  const words = params.message.trim().split(/\s+/).filter(Boolean);
+  if (words.length === 0) return true;
+  if (words.length <= 2 && (params.localPhone || params.localDate || params.localTime || params.localAge)) {
+    return true;
+  }
+  const firstWord = words[0];
+  if (words.length === 1 && firstWord && !params.localName && /^[0-9+\-()]+$/.test(firstWord)) {
+    return true;
+  }
+  return false;
+}
+
+export function getChatbotBookingOffReply(message: string): string {
+  const lang = detectLanguage(message);
+  switch (lang) {
+    case "ENGLISH":
+      return "Online appointment booking via chatbot is currently turned off by the admin. Please fill out the appointment booking form on this website to schedule your visit.\n\nYou can still ask about doctor timings, fees, clinic services, or check an existing appointment status by entering your Appointment ID.";
+    case "HINDI_SCRIPT":
+      return "चैटबॉट के माध्यम से अपॉइंटमेंट बुक करने की यह सेवा वर्तमान में एडमिन द्वारा बंद कर दी गई है। कृपया अपॉइंटमेंट बुक करने के लिए इस वेबसाइट पर दिया गया अपॉइंटमेंट बुकिंग फॉर्म भरें।\n\nआप अभी भी डॉक्टर का समय, फीस, सेवाओं की जानकारी ले सकते हैं या अपनी Appointment ID भेजकर पहले से बुक अपॉइंटमेंट का स्टेटस चेक कर सकते हैं।";
+    case "GUJARATI_SCRIPT":
+      return "ચેટબોટ દ્વારા એપોઇન્ટમેન્ટ બુક કરવાની આ સેવા હાલ એડમિન દ્વારા બંધ કરવામાં આવી છે. કૃપા કરીને એપોઇન્ટમેન્ટ બુક કરવા માટે આ વેબસાઇટ પર આપેલ એપોઇન્ટમેન્ટ બુકિંગ ફોર્મ ભરો.\n\nતમે હજુ પણ ડોક્ટરનો સમય, ફી, સેવાઓ વિશે પૂછી શકો છો અથવા તમારી Appointment ID આપીને પહેલાથી બુક થયેલ એપોઇન્ટમેન્ટનું સ્ટેટસ ચેક કરી શકો છો.";
+    case "GUJLISH":
+      return "Chatbot dwara appointment book karvani aa service haal admin dwara bandh karvama aavi chhe. Kripa karine appointment book karva mate aa website par aapel appointment booking form bharo.\n\nTame haju pan doctor no samay, fees, sevao vishe puchhi shako chho athva tamari Appointment ID aapine pehle thi book thayel appointment nu status check kari shako chho.";
+    case "HINGLISH":
+    default:
+      return "Chatbot ke jariye appointment book karne ki yeh service abhi admin dwara off kar di gayi hai. Kripya appointment book karne ke liye is website par diya gaya appointment booking form bharein.\n\nAap abhi bhi doctor ka timing, fees, services ke baare mein puch sakte hain ya apni Appointment ID bhej kar pehle se book appointment ka status check kar sakte hain.";
+  }
+}
+
+function isPureTenDigitIndianPhone(token: string): boolean {
+  return /^[6-9]\d{9}$/.test(token.replace(/[\s\-+]/g, ""));
+}
+
+function isLikelyAppointmentDateId(token: string): boolean {
+  // Doczeno Appointment IDs start with DDMMYYYY (8 digits) + 1+ sequence digits (e.g. 261120261)
+  if (!/^\d{9,14}$/.test(token)) return false;
+  const dd = parseInt(token.slice(0, 2), 10);
+  const mm = parseInt(token.slice(2, 4), 10);
+  const yyyy = parseInt(token.slice(4, 8), 10);
+  return dd >= 1 && dd <= 31 && mm >= 1 && mm <= 12 && yyyy >= 2024 && yyyy <= 2035;
+}
+
+function extractAppointmentIdQuery(
+  message: string,
+  hasActiveCollectingDraftWithoutPhone: boolean
+): { isStatusIntent: boolean; appointmentId: string | null } {
+  const lower = message.trim().toLowerCase();
+  const hasStatusKeywords =
+    /(status|track|check\s*appointment|appointment\s*(?:id|no|number|status)|booking\s*(?:id|no|number|status)|appt\s*id|\bid\b|stetus|stutas)/i.test(
+      lower
+    );
+
+  // Explicit status / ID phrasing followed by alphanumeric/numeric ID token
+  const explicitMatch = message.match(
+    /(?:appointment\s*(?:id|no|number|#)?|appt\s*(?:id|no|#)?|booking\s*(?:id|no|number|#)?|track(?:ing)?\s*(?:id|no)?|\bid\b|status(?:\s*(?:for|of|ka|ki|check))?)\s*[:#\-]?\s*([A-Za-z0-9]{4,20})/i
+  );
+  if (explicitMatch && explicitMatch[1]) {
+    const token = explicitMatch[1].trim();
+    const skipWords = new Set(["check", "kya", "hai", "bataye", "batao", "karna", "karni", "che", "status", "dekhna", "please", "pls", "mera", "meri", "for", "the", "this", "that", "appointment"]);
+    if (!skipWords.has(token.toLowerCase()) && /\d/.test(token)) {
+      return { isStatusIntent: true, appointmentId: token.toUpperCase() };
+    }
+  }
+
+  // Scan numeric/ID tokens in the message
+  const rawTokens = message.match(/\b[A-Za-z0-9]{6,20}\b/g) || [];
+  for (const rawTok of rawTokens) {
+    const tok = rawTok.trim();
+    if (isPureTenDigitIndianPhone(tok)) {
+      // Only treat a 10-digit number starting with 6-9 as Appointment ID if NOT collecting a missing phone AND explicitly looks like DDMMYYYYxx with status keyword
+      if (!hasActiveCollectingDraftWithoutPhone && hasStatusKeywords && isLikelyAppointmentDateId(tok)) {
+        return { isStatusIntent: true, appointmentId: tok };
+      }
+      continue;
+    }
+    if (isLikelyAppointmentDateId(tok)) {
+      return { isStatusIntent: true, appointmentId: tok };
+    }
+    if (hasStatusKeywords && /\d{4,}/.test(tok)) {
+      return { isStatusIntent: true, appointmentId: tok.toUpperCase() };
+    }
+  }
+
+  // Visitor wants to check status ("appointment status check karna hai") without giving ID yet
+  if (
+    hasStatusKeywords &&
+    /(check|track|status|bata|dekh|chhe|che|hai|kya|know|find|show|verify)/i.test(lower) &&
+    !/(book|new\s+appointment|schedule|reschedule|cancel)/i.test(lower)
+  ) {
+    return { isStatusIntent: true, appointmentId: null };
+  }
+
+  return { isStatusIntent: false, appointmentId: null };
+}
+
+function formatAppointmentStatusLabel(status: string, lang: ReturnType<typeof detectLanguage>): string {
+  const upper = (status || "").toUpperCase();
+  if (lang === "ENGLISH") return upper || "CONFIRMED";
+  if (lang === "HINDI_SCRIPT") {
+    if (upper === "CONFIRMED") return "कन्फर्म (CONFIRMED)";
+    if (upper === "PENDING") return "पेंडिंग (PENDING)";
+    if (upper === "COMPLETED") return "पूर्ण (COMPLETED)";
+    if (upper === "CANCELLED") return "रद्द (CANCELLED)";
+    if (upper === "NO_SHOW") return "अनुपस्थित (NO_SHOW)";
+  }
+  if (lang === "GUJARATI_SCRIPT") {
+    if (upper === "CONFIRMED") return "કન્ફર્મ (CONFIRMED)";
+    if (upper === "PENDING") return "પેન્ડિંગ (PENDING)";
+    if (upper === "COMPLETED") return "પૂર્ણ (COMPLETED)";
+    if (upper === "CANCELLED") return "રદ (CANCELLED)";
+  }
+  return upper || "CONFIRMED";
+}
+
+async function lookupPublicAppointmentStatusReply(params: {
+  message: string;
+  scope: TenantRetrievalScope;
+  entityName: string;
+  appointmentId: string | null;
+}): Promise<string> {
+  const lang = detectLanguage(params.message);
+
+  if (!params.appointmentId) {
+    switch (lang) {
+      case "ENGLISH":
+        return `Sure! Please share your Appointment ID so I can check your appointment status at ${params.entityName}.`;
+      case "HINDI_SCRIPT":
+        return `जी बिल्कुल! अपनी अपॉइंटमेंट का स्टेटस चेक करने के लिए कृपया अपनी Appointment ID बताएं।`;
+      case "GUJARATI_SCRIPT":
+        return `જી બિલકુલ! તમારી એપોઇન્ટમેન્ટનું સ્ટેટસ ચેક કરવા માટે કૃપા કરીને તમારી Appointment ID આપો.`;
+      case "GUJLISH":
+        return `Ji bilkul! Tamari appointment nu status check karva mate kripa karine tamari Appointment ID aapo.`;
+      default:
+        return `Ji bilkul! Apni appointment ka status check karne ke liye kripya apni Appointment ID batayein.`;
+    }
+  }
+
+  const filter: Record<string, any> = {
+    appointmentId: params.appointmentId,
+  };
+  if (params.scope.doctorId) {
+    const dId = mongoose.Types.ObjectId.isValid(params.scope.doctorId)
+      ? new mongoose.Types.ObjectId(params.scope.doctorId)
+      : null;
+    if (dId) filter.doctorId = dId;
+  } else if (params.scope.organizationId) {
+    const oId = mongoose.Types.ObjectId.isValid(params.scope.organizationId)
+      ? new mongoose.Types.ObjectId(params.scope.organizationId)
+      : null;
+    if (oId) filter.organizationId = oId;
+  }
+
+  const appt: any = await Appointment.findOne(filter)
+    .populate("doctorId", "doctorName specialization")
+    .populate("organizationId", "name")
+    .lean();
+
+  if (!appt) {
+    switch (lang) {
+      case "ENGLISH":
+        return `No appointment was found with ID "${params.appointmentId}" for ${params.entityName}. Please verify your Appointment ID and try again.`;
+      case "HINDI_SCRIPT":
+        return `${params.entityName} में Appointment ID "${params.appointmentId}" से कोई अपॉइंटमेंट नहीं मिली। कृपया अपनी Appointment ID जांच कर दोबारा प्रयास करें।`;
+      case "GUJARATI_SCRIPT":
+        return `${params.entityName} માં Appointment ID "${params.appointmentId}" સાથે કોઈ એપોઇન્ટમેન્ટ મળી નથી. કૃપા કરીને તમારી Appointment ID ચકાસીને ફરી પ્રયાસ કરો.`;
+      case "GUJLISH":
+        return `${params.entityName} ma Appointment ID "${params.appointmentId}" sathe koi appointment nathi mali. Kripa karine tamari Appointment ID check karine fari try karo.`;
+      default:
+        return `${params.entityName} mein Appointment ID "${params.appointmentId}" se koi appointment nahi mili. Kripya apni Appointment ID check karke dobara try karein.`;
+    }
+  }
+
+  const docName = appt.doctorId?.doctorName
+    ? `Dr. ${appt.doctorId.doctorName}${appt.doctorId.specialization ? ` (${appt.doctorId.specialization})` : ""}`
+    : params.entityName;
+  const orgName = appt.organizationId?.name;
+  const dateDisplay = appt.appointmentDate
+    ? new Date(appt.appointmentDate).toLocaleDateString("en-IN", {
+        weekday: "short",
+        day: "numeric",
+        month: "short",
+        year: "numeric",
+      })
+    : "N/A";
+  const statusDisplay = formatAppointmentStatusLabel(appt.status, lang);
+  const queueInfo = await AppointmentBookingService.getAppointmentLiveQueueStatus(appt);
+  const tokenText = queueInfo.tokenNumber ? `#${queueInfo.tokenNumber}` : "N/A";
+
+  // Strict privacy: never expose patientPhone or patientEmail on unauthenticated public chat lookup
+  const lines: string[] = [];
+  if (lang === "ENGLISH") {
+    lines.push(`Appointment Details Found:`);
+    lines.push(`Appointment ID: ${appt.appointmentId}`);
+    lines.push(`Token Number: ${tokenText}`);
+    lines.push(`Status: ${statusDisplay}`);
+    lines.push(`Patient: ${appt.patientName || "Patient"}${appt.patientAge ? ` (${appt.patientAge} yrs)` : ""}`);
+    lines.push(`Doctor: ${docName}`);
+    if (orgName) lines.push(`Hospital/Clinic: ${orgName}`);
+    lines.push(`Date: ${dateDisplay}`);
+    lines.push(`Time Slot: ${appt.timeSlot || "N/A"}`);
+    lines.push(`Live OPD Queue: ${queueInfo.queueMessage}`);
+  } else if (lang === "HINDI_SCRIPT") {
+    lines.push(`आपकी अपॉइंटमेंट की जानकारी:`);
+    lines.push(`Appointment ID: ${appt.appointmentId}`);
+    lines.push(`टोकन नंबर (Token No.): ${tokenText}`);
+    lines.push(`स्टेटस (Status): ${statusDisplay}`);
+    lines.push(`मरीज का नाम: ${appt.patientName || "Patient"}${appt.patientAge ? ` (${appt.patientAge} वर्ष)` : ""}`);
+    lines.push(`डॉक्टर: ${docName}`);
+    if (orgName) lines.push(`अस्पताल/क्लिनिक: ${orgName}`);
+    lines.push(`तारीख: ${dateDisplay}`);
+    lines.push(`समय: ${appt.timeSlot || "N/A"}`);
+    lines.push(`लाइव OPD क्यू: ${queueInfo.queueMessage}`);
+  } else if (lang === "GUJARATI_SCRIPT") {
+    lines.push(`તમારી એપોઇન્ટમેન્ટની વિગતો:`);
+    lines.push(`Appointment ID: ${appt.appointmentId}`);
+    lines.push(`ટોકન નંબર (Token No.): ${tokenText}`);
+    lines.push(`સ્ટેટસ (Status): ${statusDisplay}`);
+    lines.push(`દર્દીનું નામ: ${appt.patientName || "Patient"}${appt.patientAge ? ` (${appt.patientAge} વર્ષ)` : ""}`);
+    lines.push(`ડોક્ટર: ${docName}`);
+    if (orgName) lines.push(`હોસ્પિટલ/ક્લિનિક: ${orgName}`);
+    lines.push(`તારીખ: ${dateDisplay}`);
+    lines.push(`સમય: ${appt.timeSlot || "N/A"}`);
+    lines.push(`લાઇવ OPD ક્યૂ: ${queueInfo.queueMessage}`);
+  } else if (lang === "GUJLISH") {
+    lines.push(`Tamari appointment ni mahiti:`);
+    lines.push(`Appointment ID: ${appt.appointmentId}`);
+    lines.push(`Token Number: ${tokenText}`);
+    lines.push(`Status: ${statusDisplay}`);
+    lines.push(`Patient: ${appt.patientName || "Patient"}${appt.patientAge ? ` (${appt.patientAge} yrs)` : ""}`);
+    lines.push(`Doctor: ${docName}`);
+    if (orgName) lines.push(`Hospital/Clinic: ${orgName}`);
+    lines.push(`Tarikh: ${dateDisplay}`);
+    lines.push(`Samay: ${appt.timeSlot || "N/A"}`);
+    lines.push(`Live OPD Queue: ${queueInfo.queueMessage}`);
+  } else {
+    lines.push(`Aapki appointment ki jankari:`);
+    lines.push(`Appointment ID: ${appt.appointmentId}`);
+    lines.push(`Token Number: ${tokenText}`);
+    lines.push(`Status: ${statusDisplay}`);
+    lines.push(`Patient: ${appt.patientName || "Patient"}${appt.patientAge ? ` (${appt.patientAge} yrs)` : ""}`);
+    lines.push(`Doctor: ${docName}`);
+    if (orgName) lines.push(`Hospital/Clinic: ${orgName}`);
+    lines.push(`Date: ${dateDisplay}`);
+    lines.push(`Time Slot: ${appt.timeSlot || "N/A"}`);
+    lines.push(`Live OPD Queue: ${queueInfo.queueMessage}`);
+  }
+
+  return lines.join("\n");
+}
 
 /**
  * Checks if a user message is attempting to seek medical diagnosis or prescription
@@ -831,13 +1130,16 @@ export function isBookingIntent(text: string): boolean {
   }
 
   const bookingPatterns = [
-    /\b(appointment\s+(book|chahiye|leni|karva|karwa|kara|karni|karein|kar do|kardo|mil|schedule|lena|chahie))\b/i,
-    /\b(book\s+(appointment|slot|kardo|kar do|karna|karni))\b/i,
+    /\b(appointment\s+(book|chahiye|leni|karva|karwa|kara|karni|karvi|karein|kar do|kardo|mil|schedule|lena|levi|chahie))\b/i,
+    /\b(book\s+(?:(?:an?|the|my)\s+)?(appointment|slot|visit|consultation|kardo|kar do|karna|karni|karvi))\b/i,
+    /\b((?:want|need|like|wish)\s+(?:to\s+)?(?:book|make|schedule|get|take)\s+(?:(?:an?|the|my)\s+)?(appointment|slot|visit))\b/i,
+    /\b((?:want|need)\s+(?:an?\s+)?appointment)\b/i,
     /\b(doctor\s+se\s+milna\s+(hai|chahta|chahti|tha|thi))\b/i,
     /\b(milna\s+hai|consult\s+karna\s+hai|checkup\s+karwana\s+hai)\b/i,
-    /\b(schedule\s+(appointment|an\s+appointment|a\s+visit))\b/i,
+    /\b(schedule\s+(?:(?:an?|the|my)\s+)?(appointment|visit|slot))\b/i,
     /\b(slot\s+(chahiye|book|available))\b/i,
-    /\b(mujhe\s+appointment|appointment\s+kar do|appointment\s+kardo)\b/i
+    /\b(mujhe\s+appointment|appointment\s+kar do|appointment\s+kardo)\b/i,
+    /(अपॉइंटमेंट\s*(बुक|लेना|लेनी|चाहिए|करना|करनी)|એપોઇન્ટમેન્ટ\s*(બુક|લેવી|જોઈએ|કરવી))/i,
   ];
 
   if (bookingPatterns.some((pat) => pat.test(norm))) {
@@ -921,8 +1223,9 @@ export function buildDoctorInfoReply(params: {
   orgDoc: any;
   entityName: string;
   hasPendingDraft?: boolean;
+  isChatbotBookingDisabled?: boolean;
 }): string {
-  const { query, doctorDoc, orgDoc, entityName, hasPendingDraft } = params;
+  const { query, doctorDoc, orgDoc, entityName, hasPendingDraft, isChatbotBookingDisabled } = params;
   const norm = query.toLowerCase();
   const lang = detectLanguage(query);
   const docName = doctorDoc?.doctorName ? `Dr. ${doctorDoc.doctorName}` : entityName;
@@ -953,27 +1256,50 @@ export function buildDoctorInfoReply(params: {
   }
 
   // 2. Fees / Charges
-  if (/\b(fees|charge|kitna charge|kitne paise|cost|consultation fee|fee kitni|કન્સલ્ટેશન ફી|ચાર્જ)\b/i.test(norm)) {
+  if (/\b(fees|fee|charge|charges|kitna charge|kitne paise|cost|consultation fee|fee kitni|કન્સલ્ટેશન ફી|ચાર્જ)\b/i.test(norm)) {
     const contact = orgDoc?.phone || orgDoc?.whatsApp || doctorDoc?.phone || "";
+    const newFee = doctorDoc?.newCaseFee;
+    const oldFee = doctorDoc?.oldCaseFee;
+    const hasFeeAmounts = typeof newFee === "number" || typeof oldFee === "number";
+
     if (lang === "ENGLISH") {
-      let reply = `Consultation fees for ${docName} follow standard clinic guidelines.`;
-      if (contact) reply += ` For exact fees, please contact the clinic at ${contact}.`;
-      reply += "\nWould you like to book an appointment?";
-      if (hasPendingDraft) reply += "\n(Your appointment booking is pending confirmation).";
+      let reply = hasFeeAmounts
+        ? `Consultation fees for ${docName}:${typeof newFee === "number" ? ` New Case: Rs. ${newFee}` : ""}${typeof oldFee === "number" ? `, Follow-up (Old Case): Rs. ${oldFee}` : ""}.`
+        : `Consultation fees for ${docName} follow standard clinic guidelines.${contact ? ` For exact fees, please contact the clinic at ${contact}.` : ""}`;
+      if (!isChatbotBookingDisabled) {
+        reply += "\nWould you like to book an appointment?";
+      }
+      if (hasPendingDraft && !isChatbotBookingDisabled) {
+        reply += "\n(Your appointment booking is pending confirmation).";
+      }
       return reply;
     }
     if (lang === "GUJARATI_SCRIPT") {
-      let reply = `${docName} ની કન્સલ્ટેશન ફી ક્લિનિકના નિયમો અનુસાર છે.`;
-      if (contact) reply += ` ચોક્કસ ફી માટે ક્લિનિક હેલ્પલાઇન (${contact}) પર સંપર્ક કરી શકો છો.`;
-      reply += "\nશું તમે એપોઇન્ટમેન્ટ બુક કરવા માંગો છો?";
-      if (hasPendingDraft) reply += "\n(તમારી એપોઇન્ટમેન્ટ બુકિંગ વિગતો બાકી છે).";
+      let reply = hasFeeAmounts
+        ? `${docName} ની કન્સલ્ટેશન ફી:${typeof newFee === "number" ? ` નવો કેસ: રૂ. ${newFee}` : ""}${typeof oldFee === "number" ? `, ફોલો-અપ (જૂનો કેસ): રૂ. ${oldFee}` : ""}.`
+        : `${docName} ની કન્સલ્ટેશન ફી ક્લિનિકના નિયમો અનુસાર છે.${contact ? ` ચોક્કસ ફી માટે ક્લિનિક હેલ્પલાઇન (${contact}) પર સંપર્ક કરી શકો છો.` : ""}`;
+      if (!isChatbotBookingDisabled) {
+        reply += "\nશું તમે એપોઇન્ટમેન્ટ બુક કરવા માંગો છો?";
+      }
+      if (hasPendingDraft && !isChatbotBookingDisabled) {
+        reply += "\n(તમારી એપોઇન્ટમેન્ટ બુકિંગ વિગતો બાકી છે).";
+      }
       return reply;
     }
-    let reply = `${docName} ki consultation fees clinic guidelines ke mutabik li jaati hai. Exact fee structure ke liye aap clinic reception par sampark kar sakte hain ya yahan appointment book kar sakte hain.`;
+    if (lang === "HINDI_SCRIPT") {
+      let reply = hasFeeAmounts
+        ? `${docName} की परामर्श फीस:${typeof newFee === "number" ? ` नया केस: ₹${newFee}` : ""}${typeof oldFee === "number" ? `, पुराना केस (फॉलो-अप): ₹${oldFee}` : ""} है।`
+        : `${docName} की परामर्श फीस क्लिनिक के नियमों के अनुसार है।`;
+      if (contact) reply += `\nसंपर्क हेल्पलाइन: ${contact}`;
+      return reply;
+    }
+    let reply = hasFeeAmounts
+      ? `${docName} ki consultation fees:${typeof newFee === "number" ? ` New Case: Rs. ${newFee}` : ""}${typeof oldFee === "number" ? `, Old Case (Follow-up): Rs. ${oldFee}` : ""} hai.`
+      : `${docName} ki consultation fees clinic guidelines ke mutabik li jaati hai. Exact fee structure ke liye aap clinic reception par sampark kar sakte hain${isChatbotBookingDisabled ? "." : " ya yahan appointment book kar sakte hain."}`;
     if (contact) {
       reply += `\nContact Helpline: ${contact}`;
     }
-    if (hasPendingDraft) {
+    if (hasPendingDraft && !isChatbotBookingDisabled) {
       reply += "\n\nAapki appointment booking pending hai. Kya aap iski booking continue karna chahte hain?";
     }
     return reply;
@@ -1236,7 +1562,7 @@ export function matchHospitalDoctorForCondition(
   }
 
   // 3. Cardiology / Heart / BP / Palpitations
-  const isCardio = /\b(heart|chest pain|chhati me dard|chhati me ghabrahat|dil me dard|bp|blood pressure|hypertension|palpitations|dhadkan|heartbeat|pulse|arrhythmia|angina|cardiac|ecg|cholesterol)\b/i.test(norm);
+  const isCardio = /\b(cardiology|cardiologist|heart|chest pain|chhati me dard|chhati me ghabrahat|dil me dard|bp|blood pressure|hypertension|palpitations|dhadkan|heartbeat|pulse|arrhythmia|angina|cardiac|ecg|cholesterol)\b/i.test(norm);
   if (isCardio) {
     const cardioDoc = doctors.find((d) => {
       const s = (d.specialization || "").toLowerCase();
@@ -1260,7 +1586,7 @@ export function matchHospitalDoctorForCondition(
   }
 
   // 4. Orthopedics / Bone / Joint
-  const isOrtho = /\b(bone|joint|haddi|fracture|knee|back pain|kamar dard|ghutne|arthritis|ligament|sprain)\b/i.test(norm);
+  const isOrtho = /\b(orthopedics?|orthopaedics?|ortho|bone|joint|haddi|fracture|knee|back pain|kamar dard|ghutne|arthritis|ligament|sprain)\b/i.test(norm);
   if (isOrtho) {
     const orthoDoc = doctors.find((d) => {
       const s = (d.specialization || "").toLowerCase();
@@ -1276,7 +1602,7 @@ export function matchHospitalDoctorForCondition(
   }
 
   // 5. Dermatology / Skin
-  const isDerma = /\b(skin|rash|khujli|itching|pimples|acne|hair|dandruff|allergy|eczema|twacha)\b/i.test(norm);
+  const isDerma = /\b(dermatology|dermatologist|skin|rash|khujli|itching|pimples|acne|hair|dandruff|allergy|eczema|twacha)\b/i.test(norm);
   if (isDerma) {
     const dermaDoc = doctors.find((d) => {
       const s = (d.specialization || "").toLowerCase();
@@ -1292,7 +1618,7 @@ export function matchHospitalDoctorForCondition(
   }
 
   // 6. Gynecology / Women
-  const isGyn = /\b(pregnancy|period|menstrual|women|pcos|pcod|uterus|delivery|mahila)\b/i.test(norm);
+  const isGyn = /\b(gynecology|gynecologist|gynaecology|gynaecologist|gynec|pregnancy|period|menstrual|women|pcos|pcod|uterus|delivery|mahila)\b/i.test(norm);
   if (isGyn) {
     const gynDoc = doctors.find((d) => {
       const s = (d.specialization || "").toLowerCase();
@@ -1308,7 +1634,7 @@ export function matchHospitalDoctorForCondition(
   }
 
   // 7. Pediatrics / Child
-  const isPed = /\b(bachha|bachhe|baby|child|infant|pediatric)\b/i.test(norm);
+  const isPed = /\b(pediatrics?|pediatrician|paediatrics?|paediatrician|bachha|bachhe|baby|child|infant|pediatric)\b/i.test(norm);
   if (isPed) {
     const pedDoc = doctors.find((d) => {
       const s = (d.specialization || "").toLowerCase();
@@ -1518,8 +1844,8 @@ export class PublicChatbotService {
       }
     }
 
-    // Fast Check 3: Cardiovascular Symptoms
-    const isCardioSymptom = /\b(heart|chest pain|chhati me dard|chhati me ghabrahat|dil me dard|bp|blood pressure|hypertension|palpitations|dhadkan|heartbeat|pulse|arrhythmia|angina|cardiac|ecg|cholesterol|sidiya chadhne|sidi chadhne|stairs chadhne|chadhne me taklif|chadhne me takleef|saans phoolna|sans phoolna)\b/i.test(norm);
+    // Fast Check 3: Cardiovascular Symptoms & Direct Cardiology Inquiries
+    const isCardioSymptom = /\b(cardiology|cardiologist|heart|chest pain|chhati me dard|chhati me ghabrahat|dil me dard|bp|blood pressure|hypertension|palpitations|dhadkan|heartbeat|pulse|arrhythmia|angina|cardiac|ecg|cholesterol|sidiya chadhne|sidi chadhne|stairs chadhne|chadhne me taklif|chadhne me takleef|saans phoolna|sans phoolna)\b/i.test(norm);
     const isCardiologist = sLower.includes("cardio") || sLower.includes("heart");
     if (isCardioSymptom) {
       let specificCondition = "Heart concern";
@@ -1585,7 +1911,7 @@ export class PublicChatbotService {
     }
 
     // Fast Check 6: Eye / Ophthalmology
-    const isEyeSymptom = /\b(aankh|motiyabind|cataract|retina|vision|nazar kamjori|eye pain)\b/i.test(norm);
+    const isEyeSymptom = /\b(ophthalmology|ophthalmologist|aankh|motiyabind|cataract|retina|vision|nazar kamjori|eye pain|eye specialist)\b/i.test(norm);
     const isEye = sLower.includes("ophthal") || sLower.includes("eye");
     if (isEyeSymptom) {
       return {
@@ -1600,7 +1926,7 @@ export class PublicChatbotService {
     }
 
     // Fast Check 7: Dental
-    const isDentalSymptom = /\b(daant|tooth|teeth|cavity|masuda|root canal|rct)\b/i.test(norm);
+    const isDentalSymptom = /\b(dentist|dental|daant|tooth|teeth|cavity|masuda|root canal|rct)\b/i.test(norm);
     const isDent = sLower.includes("dent");
     if (isDentalSymptom) {
       return {
@@ -1615,7 +1941,7 @@ export class PublicChatbotService {
     }
 
     // Fast Check 8: ENT
-    const isEntSymptom = /\b(kaan me dard|kaan behna|naak se khun|nosebleed|sinus|tonsils|gala kharab|throat pain)\b/i.test(norm);
+    const isEntSymptom = /\b(ent|kaan me dard|kaan behna|naak se khun|nosebleed|sinus|tonsils|gala kharab|throat pain)\b/i.test(norm);
     const isEnt = sLower.includes("ent");
     if (isEntSymptom) {
       return {
@@ -1630,7 +1956,7 @@ export class PublicChatbotService {
     }
 
     // Fast Check 9: Gynecology & Obstetrics
-    const isGynSymptom = /\b(pregnancy|pregnant|garbhwati|delivery|period problem|periods nahi aate|menses|mahawari|pcod|pcos)\b/i.test(norm);
+    const isGynSymptom = /\b(gynecology|gynecologist|gynaecology|gynaecologist|gynec|pregnancy|pregnant|garbhwati|delivery|period problem|periods nahi aate|menses|mahawari|pcod|pcos)\b/i.test(norm);
     const isGyn = sLower.includes("gynec") || sLower.includes("obste") || sLower.includes("women");
     if (isGynSymptom) {
       return {
@@ -1645,7 +1971,7 @@ export class PublicChatbotService {
     }
 
     // Fast Check 10: Orthopedic Symptoms
-    const isOrthoSymptom = /\b(haddi|fracture|bone|joint pain|knee pain|ghutne me dard|kamar dard|back pain|arthritis|sidiya chadhne|sidi chadhne|chalne me taklif|chalne me dikkat)\b/i.test(norm);
+    const isOrthoSymptom = /\b(orthopedics?|orthopaedics?|ortho|haddi|fracture|bone|joint pain|knee pain|ghutne me dard|kamar dard|back pain|arthritis|sidiya chadhne|sidi chadhne|chalne me taklif|chalne me dikkat)\b/i.test(norm);
     const isOrtho = sLower.includes("ortho") || sLower.includes("bone") || sLower.includes("joint");
     if (isOrthoSymptom) {
       return {
@@ -1660,7 +1986,7 @@ export class PublicChatbotService {
     }
 
     // Fast Check 11: Dermatology Symptoms
-    const isDermaSymptom = /\b(skin|khujli|itching|rash|twacha|acne|pimples|hair fall|baal girna|dandruff|eczema|fungal|allergy)\b/i.test(norm);
+    const isDermaSymptom = /\b(dermatology|dermatologist|skin|khujli|itching|rash|twacha|acne|pimples|hair fall|baal girna|dandruff|eczema|fungal|allergy)\b/i.test(norm);
     const isDerma = sLower.includes("derma") || sLower.includes("skin");
     if (isDermaSymptom) {
       return {
@@ -1674,8 +2000,23 @@ export class PublicChatbotService {
       };
     }
 
-    // Fast Check 12: General Physician Symptoms (Fever, cold, cough, weakness, infection)
-    const isGpSymptom = /\b(bukhar|fever|tap|weakness|kamjori|cold|cough|khasi|sardi|zukaam|zukam|pet dard|acidity|vomiting|ulti|loose motion|dast|dengue|malaria|typhoid|infection)\b/i.test(norm);
+    // Fast Check 12: Pediatrics
+    const isPedSymptom = /\b(pediatrics?|pediatrician|paediatrics?|paediatrician|child specialist)\b/i.test(norm);
+    const isPed = sLower.includes("pediat") || sLower.includes("paediat") || sLower.includes("child");
+    if (isPedSymptom) {
+      return {
+        hasMedicalConcern: true,
+        isEmergencyOrTrauma: false,
+        conditionIdentified: "Bachhon ki bimari / Pediatrics",
+        matchesSpecialty: Boolean(isPed),
+        doctorSpecialtyName: docSpec,
+        explanation: isPed ? `${docName} ek Pediatrician hain aur bachhon ka ilaj karte hain.` : `${docName} ek ${docSpec} hain aur pediatric samasyaon ka ilaj nahi karte.`,
+        suggestedDepartmentOrDoctor: "Pediatrician (Bachhon ke doctor)",
+      };
+    }
+
+    // Fast Check 13: General Physician Symptoms (Fever, cold, cough, weakness, infection)
+    const isGpSymptom = /\b(general physician|general medicine|md medicine|bukhar|fever|tap|weakness|kamjori|cold|cough|khasi|sardi|zukaam|zukam|pet dard|acidity|vomiting|ulti|loose motion|dast|dengue|malaria|typhoid|infection)\b/i.test(norm);
     const isGP = sLower.includes("general physician") || sLower.includes("internal medicine") || sLower.includes("family medicine") || sLower.includes("family physician") || sLower.includes("mbbs") || sLower.includes("md medicine");
     if (isGpSymptom) {
       if (isGP) {
@@ -1750,31 +2091,56 @@ Reply ONLY in valid JSON:
 }
 `.trim();
 
-      const activeModel = this.model || "gemini-3.5-flash-lite";
-      const startTime = Date.now();
-      const res = await client.models.generateContent({
-        model: activeModel,
-        contents: prompt,
-        config: {
-          responseMimeType: "application/json",
-          temperature: 0,
-          maxOutputTokens: 120,
-        },
-      });
-
-      const latencyMs = Date.now() - startTime;
-      const usage = (res as any)?.usageMetadata;
-      GeminiLoggerService.logCall({
-        feature: "CLINICAL_TRIAGE",
-        model: activeModel,
-        status: "SUCCESS",
-        statusCode: 200,
-        latencyMs,
-        promptTokens: usage?.promptTokenCount || 0,
-        candidatesTokens: usage?.candidatesTokenCount || 0,
-        totalTokens: usage?.totalTokenCount || 0,
-        metadata: { docName, docSpec, orgName },
-      });
+      const candidateModels = getOrderedCandidateModels(this.model);
+      let res: any = null;
+      let lastTriageErr: any = null;
+      for (const activeModel of candidateModels) {
+        const startTime = Date.now();
+        try {
+          res = await generateContentBounded({
+            client,
+            model: activeModel,
+            contents: prompt,
+            config: {
+              responseMimeType: "application/json",
+              temperature: 0,
+              maxOutputTokens: 120,
+            },
+            timeoutMs: 5500,
+          });
+          markModelHealthy(activeModel);
+          const latencyMs = Date.now() - startTime;
+          const usage = (res as any)?.usageMetadata;
+          GeminiLoggerService.logCall({
+            feature: "CLINICAL_TRIAGE",
+            model: activeModel,
+            status: "SUCCESS",
+            statusCode: 200,
+            latencyMs,
+            promptTokens: usage?.promptTokenCount || 0,
+            candidatesTokens: usage?.candidatesTokenCount || 0,
+            totalTokens: usage?.totalTokenCount || 0,
+            metadata: { docName, docSpec, orgName },
+          });
+          break;
+        } catch (modelErr: any) {
+          lastTriageErr = modelErr;
+          const latencyMs = Date.now() - startTime;
+          const parsedErr = GeminiLoggerService.parseError(modelErr);
+          markModelUnhealthy(activeModel, parsedErr.statusCode);
+          GeminiLoggerService.logCall({
+            feature: "CLINICAL_TRIAGE",
+            model: activeModel,
+            status: "FAILED",
+            statusCode: parsedErr.statusCode,
+            latencyMs,
+            errorCode: parsedErr.errorCode,
+            errorMessage: parsedErr.errorMessage,
+            metadata: { docName, docSpec, orgName },
+          });
+        }
+      }
+      if (!res) throw lastTriageErr || new Error("Clinical triage failed");
 
       const parsed = JSON.parse(res.text || "{}");
       return {
@@ -1786,19 +2152,7 @@ Reply ONLY in valid JSON:
         explanation: parsed.explanation || "",
         suggestedDepartmentOrDoctor: parsed.suggestedCare || "General Physician",
       };
-    } catch (err: any) {
-      const activeModel = this.model || "gemini-3.5-flash-lite";
-      const parsedErr = GeminiLoggerService.parseError(err);
-      GeminiLoggerService.logCall({
-        feature: "CLINICAL_TRIAGE",
-        model: activeModel,
-        status: "FAILED",
-        statusCode: parsedErr.statusCode,
-        latencyMs: 0,
-        errorCode: parsedErr.errorCode,
-        errorMessage: parsedErr.errorMessage,
-        metadata: { docName, docSpec, orgName },
-      });
+    } catch {
       return {
         hasMedicalConcern: true,
         isEmergencyOrTrauma: false,
@@ -1878,16 +2232,29 @@ Reply strictly in JSON:
 }
 `.trim();
 
-      const activeModel = this.model || "gemini-3.5-flash-lite";
-      const res = await client.models.generateContent({
-        model: activeModel,
-        contents: prompt,
-        config: {
-          responseMimeType: "application/json",
-          temperature: 0,
-          maxOutputTokens: 200,
-        },
-      });
+      const candidateModels = getOrderedCandidateModels(this.model);
+      let res: any = null;
+      for (const activeModel of candidateModels) {
+        try {
+          res = await generateContentBounded({
+            client,
+            model: activeModel,
+            contents: prompt,
+            config: {
+              responseMimeType: "application/json",
+              temperature: 0,
+              maxOutputTokens: 200,
+            },
+            timeoutMs: 5500,
+          });
+          markModelHealthy(activeModel);
+          break;
+        } catch (modelErr: any) {
+          const parsedErr = GeminiLoggerService.parseError(modelErr);
+          markModelUnhealthy(activeModel, parsedErr.statusCode);
+        }
+      }
+      if (!res) return {};
 
       const parsed = JSON.parse(res.text || "{}");
       const cleanPatient = extractPatientName(parsed.patientName || "", doctorName, clinicName);
@@ -2110,6 +2477,182 @@ Reply strictly in JSON:
   }
 
   /**
+   * Matches an affiliated hospital doctor based on patient symptoms/complaint (Takleef)
+   */
+  public async matchHospitalDoctorBySymptom(
+    organizationId: string | mongoose.Types.ObjectId,
+    complaint: string
+  ): Promise<any | null> {
+    if (!complaint || !complaint.trim()) return null;
+    const doctors = await Doctor.find({
+      organizationId,
+      status: "ACTIVE",
+    }).lean();
+
+    if (!doctors || doctors.length === 0) return null;
+
+    const lowerComplaint = complaint.toLowerCase();
+
+    // Map common specialties to symptom keywords (English, Hinglish & Hindi)
+    const specialtyKeywords: Record<string, string[]> = {
+      cardio: [
+        "heart", "chest pain", "bp", "blood pressure", "cardiac", "attack", "palpitation", "dil", "seena", "angina", "cholesterol"
+      ],
+      derma: [
+        "skin", "rash", "itching", "khujli", "pimple", "acne", "hair fall", "bald", "eczema", "psoriasis", "fungal", "twacha", "chhamdi"
+      ],
+      ortho: [
+        "bone", "fracture", "joint", "knee", "back pain", "spine", "arthritis", "haddi", "kamar dard", "ghutna", "jod", "shoulder", "ligament"
+      ],
+      pedia: [
+        "child", "baby", "kid", "bachha", "infant", "toddler", "vaccination", "pediatric", "teeka"
+      ],
+      gynae: [
+        "pregnancy", "delivery", "period", "menstrual", "pcod", "pcos", "mahila", "garbh", "gynae", "uterus", "infertility", "bleeding"
+      ],
+      neuro: [
+        "brain", "nerve", "migraine", "headache", "seizure", "stroke", "paralysis", "sir dard", "dizziness", "chakkr", "epilepsy"
+      ],
+      ophthal: [
+        "eye", "vision", "sight", "cataract", "spectacle", "aankh", "motiyabind", "chashma", "glaucoma"
+      ],
+      ent: [
+        "ear", "nose", "throat", "sinus", "tonsil", "hearing", "kaan", "naak", "gala", "voice", "pharyngitis"
+      ],
+      dent: [
+        "tooth", "teeth", "toothache", "cavity", "gum", "daant", "rct", "mukh", "masuda", "root canal"
+      ],
+      gastro: [
+        "stomach", "acidity", "gas", "constipation", "liver", "pet dard", "vomit", "diarrhea", "ulcer", "digestion", "kabz", "pet"
+      ],
+      pulmo: [
+        "asthma", "cough", "lung", "breath", "saans", "khansi", "chest congestion", "pneumonia", "bronchitis"
+      ],
+      urol: [
+        "urine", "kidney", "stone", "prostate", "mutra", "pathri", "peshab"
+      ],
+      psych: [
+        "depression", "anxiety", "stress", "sleep", "insomnia", "mental", "neend", "tension"
+      ],
+      general: [
+        "fever", "cold", "flu", "weakness", "infection", "bukhar", "sardi", "kamzori"
+      ],
+    };
+
+    let bestDoc = null;
+    let maxScore = 0;
+
+    for (const doc of doctors) {
+      let score = 0;
+      const docSpec = (doc.specialization || "").toLowerCase();
+      const docBio = (doc.bio || "").toLowerCase();
+
+      // Check direct specialization word match
+      if (docSpec && lowerComplaint.includes(docSpec)) {
+        score += 15;
+      }
+
+      // Check keywords across specialty mappings
+      for (const [key, keywords] of Object.entries(specialtyKeywords)) {
+        const docMatchesSpecialty = docSpec.includes(key) || docBio.includes(key);
+        if (docMatchesSpecialty) {
+          for (const kw of keywords) {
+            if (lowerComplaint.includes(kw)) {
+              score += 5;
+            }
+          }
+        }
+      }
+
+      if (score > maxScore) {
+        maxScore = score;
+        bestDoc = doc;
+      }
+    }
+
+    if (bestDoc && maxScore > 0) {
+      return bestDoc;
+    }
+
+    // Fallback: General physician or first active doctor
+    const generalDoc = doctors.find((d) =>
+      (d.specialization || "").toLowerCase().includes("general") ||
+      (d.specialization || "").toLowerCase().includes("physician")
+    );
+    return generalDoc || doctors[0];
+  }
+
+  /**
+   * Finds a matching ACTIVE + APPROVED specialist doctor strictly within the SAME hospital
+   * and resolves their direct website URL (custom domain if verified, else /orgSlug/doctorSlug).
+   * Never matches doctors from other hospitals or external clinics.
+   */
+  private async findSameHospitalSpecialistWebsite(params: {
+    orgDoc: any;
+    hospitalDoctors: any[];
+    currentDoctorId?: string;
+    message: string;
+    suggestedDepartmentOrDoctor?: string;
+  }): Promise<{ doctor: any; websiteUrl: string } | null> {
+    const { orgDoc, hospitalDoctors, currentDoctorId, message, suggestedDepartmentOrDoctor } = params;
+    if (!orgDoc?._id || !orgDoc?.slug || !Array.isArray(hospitalDoctors) || hospitalDoctors.length === 0) {
+      return null;
+    }
+
+    const peerDoctors = hospitalDoctors.filter(
+      (d) =>
+        d &&
+        String(d.organizationId || "") === String(orgDoc._id) &&
+        (!currentDoctorId || String(d._id) !== String(currentDoctorId)) &&
+        d.slug
+    );
+    if (peerDoctors.length === 0) return null;
+
+    // 1. Try condition/specialty keyword match against peer doctors in the SAME hospital
+    let matchedPeer = matchHospitalDoctorForCondition(peerDoctors, message).matchedDoctor;
+
+    // 2. Fallback: match against suggestedDepartmentOrDoctor (e.g. from Gemini triage)
+    if (!matchedPeer && suggestedDepartmentOrDoctor) {
+      matchedPeer = matchHospitalDoctorForCondition(peerDoctors, suggestedDepartmentOrDoctor).matchedDoctor;
+      if (!matchedPeer) {
+        const sugLower = suggestedDepartmentOrDoctor.toLowerCase();
+        const tokens = sugLower.split(/[^a-z]+/).filter((t) => t.length >= 4);
+        matchedPeer =
+          peerDoctors.find((d) => {
+            const spec = (d.specialization || "").toLowerCase();
+            return tokens.some((t) => spec.includes(t.slice(0, 5)));
+          }) || null;
+      }
+    }
+
+    if (!matchedPeer || !matchedPeer.slug) return null;
+
+    const peerWebsite = await Website.findOne({
+      doctorId: matchedPeer._id,
+      organizationId: orgDoc._id,
+    })
+      .select("slug publishStatus customDomain customDomainStatus")
+      .lean();
+
+    if (peerWebsite?.publishStatus === "SUSPENDED") {
+      return null;
+    }
+
+    const envFrontend = (getEnv().FRONTEND_URL || "")
+      .split(",")[0]
+      ?.trim()
+      .replace(/\/+$/, "");
+    const baseOrigin = envFrontend || `https://${FIXED_PLATFORM_DOMAIN}`;
+
+    const websiteUrl =
+      peerWebsite?.customDomain && peerWebsite.customDomainStatus === "VERIFIED"
+        ? `https://${peerWebsite.customDomain}`
+        : `${baseOrigin}/${orgDoc.slug}/${matchedPeer.slug}`;
+
+    return { doctor: matchedPeer, websiteUrl };
+  }
+
+  /**
    * Processes a public visitor query with strict tenant pre-filtering RAG
    */
   public async handlePublicMessage(params: {
@@ -2121,6 +2664,7 @@ Reply strictly in JSON:
     response: string;
     sessionId: string;
     appointmentId?: string;
+    tokenNumber?: number;
     isAppointmentBooked?: boolean;
   }> {
     const { slug, doctorSlug, sessionId, message } = params;
@@ -2136,6 +2680,23 @@ Reply strictly in JSON:
 
     // 2. Resolve Tenant Scope (security boundary)
     const { scope, entityName, websiteDoc, doctorDoc, orgDoc } = await this.resolveTenantScope(slug, doctorSlug);
+
+    // 2.1 Enforce Website Chatbot status
+    const isWebsiteChatbotDisabled =
+      (doctorDoc && doctorDoc.isWebsiteChatbotEnabled === false) ||
+      (orgDoc && orgDoc.isWebsiteChatbotEnabled === false);
+
+    if (isWebsiteChatbotDisabled) {
+      const err: any = new Error("Website AI Chatbot is currently disabled by administrator.");
+      err.status = 403;
+      err.code = "CHATBOT_DISABLED";
+      throw err;
+    }
+
+    const isChatbotBookingDisabled = Boolean(
+      (doctorDoc && doctorDoc.isChatbotBookingEnabled === false) ||
+      (orgDoc && orgDoc.isChatbotBookingEnabled === false)
+    );
 
     // 3. Conversation management & turn limit
     let conversation = await ChatbotConversation.findOne({
@@ -2230,6 +2791,40 @@ Reply strictly in JSON:
       };
     }
 
+    // 3b2. Public In-Chat Appointment Status Check (works even when chatbot booking is OFF)
+    const hasCollectingWithoutPhone = Boolean(
+      conversation.appointmentDraft &&
+      conversation.appointmentDraft.step === "COLLECTING" &&
+      !conversation.appointmentDraft.patientPhone
+    );
+    const apptStatusQuery = extractAppointmentIdQuery(trimmedMessage, hasCollectingWithoutPhone);
+    if (apptStatusQuery.isStatusIntent) {
+      const statusReply = sanitizeToPlainText(
+        await lookupPublicAppointmentStatusReply({
+          message: trimmedMessage,
+          scope,
+          entityName,
+          appointmentId: apptStatusQuery.appointmentId,
+        })
+      );
+      conversation.messages.push({
+        role: "user",
+        content: trimmedMessage,
+        timestamp: new Date(),
+      });
+      conversation.messages.push({
+        role: "assistant",
+        content: statusReply,
+        timestamp: new Date(),
+      });
+      await conversation.save();
+
+      return {
+        response: statusReply,
+        sessionId,
+      };
+    }
+
     let activeDoctorDoc = doctorDoc;
     if (!activeDoctorDoc && conversation.appointmentDraft?.doctorId) {
       activeDoctorDoc = await Doctor.findById(conversation.appointmentDraft.doctorId);
@@ -2264,6 +2859,7 @@ Reply strictly in JSON:
             orgDoc,
             entityName,
             hasPendingDraft: Boolean(conversation.appointmentDraft && conversation.appointmentDraft.step === "COLLECTING"),
+            isChatbotBookingDisabled,
           })
         );
         conversation.messages.push({ role: "user", content: trimmedMessage, timestamp: new Date() });
@@ -2273,8 +2869,29 @@ Reply strictly in JSON:
       }
     }
 
+    // 3c2. Enforce Superadmin "Book Appointment on Chatbot" OFF toggle
+    if (isChatbotBookingDisabled) {
+      if (conversation.appointmentDraft) {
+        conversation.appointmentDraft = null;
+      }
+      const wantsToBookViaChat =
+        isBookingIntent(trimmedMessage) ||
+        (Boolean(extractPhoneNumber(trimmedMessage)) && Boolean(parseNaturalDate(trimmedMessage) || extractTimeSlot(trimmedMessage)));
+      if (wantsToBookViaChat) {
+        const offReply = sanitizeToPlainText(getChatbotBookingOffReply(trimmedMessage));
+        conversation.messages.push({ role: "user", content: trimmedMessage, timestamp: new Date() });
+        conversation.messages.push({ role: "assistant", content: offReply, timestamp: new Date() });
+        await conversation.save();
+        return { response: offReply, sessionId };
+      }
+    }
+
     const hospitalDoctors = orgDoc?._id
-      ? await Doctor.find({ organizationId: orgDoc._id, status: "ACTIVE" })
+      ? await Doctor.find({
+          organizationId: orgDoc._id,
+          status: "ACTIVE",
+          approvalStatus: { $nin: ["PENDING", "REJECTED"] },
+        })
       : [];
 
     // For Hospital Websites: Ensure patient's complaint is understood first and assigned to an active hospital doctor
@@ -2284,6 +2901,29 @@ Reply strictly in JSON:
       // Case 1: Visitor mentioned symptoms/disease
       if (matchResult.conditionIdentified) {
         if (matchResult.matchedDoctor) {
+          if (isChatbotBookingDisabled) {
+            conversation.appointmentDraft = null;
+            const docDisplay = `Dr. ${matchResult.matchedDoctor.doctorName}${matchResult.matchedDoctor.specialization ? ` (${matchResult.matchedDoctor.specialization})` : ""}`;
+            const visitorLang = detectLanguage(trimmedMessage);
+            let offHospitalReply = "";
+            if (visitorLang === "ENGLISH") {
+              offHospitalReply = `${docDisplay} handles ${matchResult.conditionIdentified} at ${orgDoc?.name || entityName}.\n\n${getChatbotBookingOffReply(trimmedMessage)}`;
+            } else if (visitorLang === "HINDI_SCRIPT") {
+              offHospitalReply = `${orgDoc?.name || entityName} में ${matchResult.conditionIdentified} के लिए ${docDisplay} उपलब्ध हैं।\n\n${getChatbotBookingOffReply(trimmedMessage)}`;
+            } else if (visitorLang === "GUJARATI_SCRIPT") {
+              offHospitalReply = `${orgDoc?.name || entityName} માં ${matchResult.conditionIdentified} માટે ${docDisplay} ઉપલબ્ધ છે.\n\n${getChatbotBookingOffReply(trimmedMessage)}`;
+            } else if (visitorLang === "GUJLISH") {
+              offHospitalReply = `${orgDoc?.name || entityName} ma ${matchResult.conditionIdentified} mate ${docDisplay} uplabdh chhe.\n\n${getChatbotBookingOffReply(trimmedMessage)}`;
+            } else {
+              offHospitalReply = `${orgDoc?.name || entityName} me ${matchResult.conditionIdentified} ke liye ${docDisplay} uplabdh hain.\n\n${getChatbotBookingOffReply(trimmedMessage)}`;
+            }
+            const cleanOffHospital = sanitizeToPlainText(offHospitalReply);
+            conversation.messages.push({ role: "user", content: trimmedMessage, timestamp: new Date() });
+            conversation.messages.push({ role: "assistant", content: cleanOffHospital, timestamp: new Date() });
+            await conversation.save();
+            return { response: cleanOffHospital, sessionId };
+          }
+
           activeDoctorDoc = matchResult.matchedDoctor;
           const draft: IAppointmentDraft = conversation.appointmentDraft || {
             step: "COLLECTING",
@@ -2293,8 +2933,28 @@ Reply strictly in JSON:
           draft.doctorName = matchResult.matchedDoctor.doctorName;
           draft.notes = matchResult.conditionIdentified;
 
+          const localPhonePre = extractPhoneNumber(trimmedMessage);
+          const localDatePre = parseNaturalDate(trimmedMessage);
+          const localTimePre = extractTimeSlot(trimmedMessage);
+          const localNamePre = extractPatientName(
+            trimmedMessage,
+            matchResult.matchedDoctor.doctorName,
+            orgDoc?.name
+          );
+          const localAgePre = extractPatientAge(trimmedMessage);
+
           let aiExtracted: any = {};
-          if (trimmedMessage.length >= 2) {
+          if (
+            trimmedMessage.length >= 2 &&
+            !shouldSkipAiEntityExtraction({
+              message: trimmedMessage,
+              localPhone: localPhonePre,
+              localDate: localDatePre,
+              localTime: localTimePre,
+              localAge: localAgePre,
+              localName: localNamePre,
+            })
+          ) {
             aiExtracted = await this.extractAppointmentEntitiesWithAI({
               message: trimmedMessage,
               doctorName: matchResult.matchedDoctor.doctorName,
@@ -2303,18 +2963,14 @@ Reply strictly in JSON:
             });
           }
 
-          const extractedPhone = extractPhoneNumber(trimmedMessage) || aiExtracted.patientPhone;
+          const extractedPhone = localPhonePre || aiExtracted.patientPhone;
           const extractedDate =
             (aiExtracted.appointmentDateObj && aiExtracted.appointmentDate
               ? { dateObj: aiExtracted.appointmentDateObj, dateStr: aiExtracted.appointmentDate, displayDate: formatDisplayDate(aiExtracted.appointmentDate) }
-              : null) || parseNaturalDate(aiExtracted.preferredDate || trimmedMessage);
-          const extractedTime = aiExtracted.timeSlot || extractTimeSlot(trimmedMessage);
-          const extractedName = aiExtracted.patientName || extractPatientName(
-            trimmedMessage,
-            matchResult.matchedDoctor.doctorName,
-            orgDoc?.name
-          );
-          const extractedAge = aiExtracted.patientAge || extractPatientAge(trimmedMessage);
+              : null) || (aiExtracted.preferredDate ? parseNaturalDate(aiExtracted.preferredDate) : null) || localDatePre;
+          const extractedTime = aiExtracted.timeSlot || localTimePre;
+          const extractedName = aiExtracted.patientName || localNamePre;
+          const extractedAge = aiExtracted.patientAge || localAgePre;
 
           if (extractedPhone) draft.patientPhone = extractedPhone;
           if (extractedDate) {
@@ -2391,7 +3047,7 @@ Reply strictly in JSON:
       }
 
       // Case 2: Visitor expresses booking intent WITHOUT stating problem/disease
-      if (isBookingIntent(trimmedMessage)) {
+      if (!isChatbotBookingDisabled && isBookingIntent(trimmedMessage)) {
         const draft: IAppointmentDraft = conversation.appointmentDraft || {
           step: "COLLECTING",
           organizationId: String(orgDoc?._id),
@@ -2448,11 +3104,25 @@ Reply strictly in JSON:
         (scope.websiteType !== "ONLY_DOCTOR" && Boolean(effectiveDoctor?.organizationId));
 
       if (!clinicalEval.matchesSpecialty) {
-        // SPECIALTY MISMATCH OR ACUTE TRAUMA -> REFUSE BOOKING!
+        // SPECIALTY MISMATCH OR ACUTE TRAUMA -> REFUSE BOOKING ON THIS DOCTOR'S CHATBOT!
         // Immediately clear any active appointment draft so user is never trapped:
         conversation.appointmentDraft = null;
 
+        // Check if a matching specialist exists within THIS SAME hospital (never across other hospitals)
+        const sameHospitalMatch =
+          isHospitalAffiliated && orgDoc?._id
+            ? await this.findSameHospitalSpecialistWebsite({
+                orgDoc,
+                hospitalDoctors,
+                currentDoctorId: effectiveDoctor?._id ? String(effectiveDoctor._id) : undefined,
+                message: trimmedMessage,
+                suggestedDepartmentOrDoctor: clinicalEval.suggestedDepartmentOrDoctor,
+              })
+            : null;
+
+        const visitorLang = detectLanguage(trimmedMessage);
         let refusalText = "";
+
         if (clinicalEval.isEmergencyOrTrauma) {
           refusalText = `Yeh emergency aur gambhir chot ka mamla hai. ${docName} ek ${clinicalEval.doctorSpecialtyName} hain aur wo chot, fracture, bleeding ya trauma ka ilaj nahi karte, isliye unke sath yeh appointment book nahi ho sakti.`;
           if (isHospitalAffiliated) {
@@ -2460,11 +3130,30 @@ Reply strictly in JSON:
             if (helpContact) {
               refusalText += `\nHospital Emergency Helpline: ${helpContact}`;
             }
+            if (sameHospitalMatch) {
+              refusalText += `\n\nOPD appointment ke liye ${orgName} me Dr. ${sameHospitalMatch.doctor.doctorName} (${sameHospitalMatch.doctor.specialization}) uplabdh hain. Unki website par jakar appointment book karein:\n${sameHospitalMatch.websiteUrl}`;
+            }
           } else {
             refusalText += ` Kripya bina kisi deri ke turant nazdiki hospital ke Emergency / Trauma department ya kisi sambandhit specialist / surgeon ke paas le jayein taaki ilaj turant shuru ho sake.`;
           }
+        } else if (sameHospitalMatch) {
+          const peerName = `Dr. ${sameHospitalMatch.doctor.doctorName}`;
+          const peerSpec = sameHospitalMatch.doctor.specialization || clinicalEval.suggestedDepartmentOrDoctor || "Specialist";
+          const peerUrl = sameHospitalMatch.websiteUrl;
+
+          if (visitorLang === "ENGLISH") {
+            refusalText = `${docName} is a ${clinicalEval.doctorSpecialtyName} and does not treat ${clinicalEval.conditionIdentified || "this condition"}, so your appointment cannot be booked on this page.\n\nHowever, ${orgName} has ${peerName} (${peerSpec}) available for this specialty. Please open their website below to book your appointment directly:\n${peerUrl}`;
+          } else if (visitorLang === "GUJARATI_SCRIPT") {
+            refusalText = `${docName} એ ${clinicalEval.doctorSpecialtyName} છે અને આ તકલીફની સારવાર કરતા નથી, તેથી અહીં એપોઇન્ટમેન્ટ બુક થઈ શકશે નહીં.\n\nજો કે, ${orgName} માં ${peerName} (${peerSpec}) ઉપલબ્ધ છે. કૃપા કરીને નીચેની તેમની વેબસાઇટ લિંક ખોલીને સીધી તેમની સાથે એપોઇન્ટમેન્ટ બુક કરો:\n${peerUrl}`;
+          } else if (visitorLang === "HINDI_SCRIPT") {
+            refusalText = `${docName} एक ${clinicalEval.doctorSpecialtyName} हैं और इस समस्या का इलाज नहीं करते, इसलिए इस वेबसाइट पर यह अपॉइंटमेंट बुक नहीं हो सकती।\n\nहालाँकि, ${orgName} में ${peerName} (${peerSpec}) उपलब्ध हैं। कृपया नीचे दिए गए उनके वेबसाइट लिंक पर जाकर सीधे उनसे अपॉइंटमेंट बुक करें:\n${peerUrl}`;
+          } else if (visitorLang === "GUJLISH") {
+            refusalText = `${docName} ek ${clinicalEval.doctorSpecialtyName} chhe ane aa takleef nu ilaj nathi karta, etle ahi appointment book nahi thai shake.\n\nPan ${orgName} ma j ${peerName} (${peerSpec}) uplabdh chhe. Kripa karine niche aapeli temni website link kholine sidhi temni sathe appointment book karo:\n${peerUrl}`;
+          } else {
+            refusalText = `${docName} ek ${clinicalEval.doctorSpecialtyName} hain aur wo ${clinicalEval.conditionIdentified || "is takleef"} ka ilaj nahi karte, isliye unke sath yeh appointment yahan book nahi ho sakti.\n\nLekin ${orgName} me hi ${peerName} (${peerSpec}) uplabdh hain. Kripya niche di gayi unki website link par click karke sidhe unki website se appointment book karein:\n${peerUrl}`;
+          }
         } else {
-          // General Illness Mismatch (e.g. fever or cancer for a Cardiologist)
+          // General Illness Mismatch & no matching specialist in this same hospital (never suggest other hospitals)
           refusalText = `${docName} ek ${clinicalEval.doctorSpecialtyName} hain aur wo ${clinicalEval.conditionIdentified || "is takleef"} ka ilaj nahi karte, isliye unke sath yeh appointment book nahi ho sakti.`;
           if (isHospitalAffiliated) {
             refusalText += ` Lekin kyunki yeh doctor ${orgName} se jude hain, aap hospital helpdesk par inquiry ya sampark kar sakte hain taki aapko wahan ke ${clinicalEval.suggestedDepartmentOrDoctor || "sambandhit visheshagya"} department ya duty doctor se consult karwaya ja sake.`;
@@ -2483,6 +3172,30 @@ Reply strictly in JSON:
         await conversation.save();
         return { response: cleanRefusal, sessionId };
       } else {
+        if (isChatbotBookingDisabled) {
+          conversation.appointmentDraft = null;
+          const docDisplay = `Dr. ${doctorDoc?.doctorName || effectiveDoctor?.doctorName || entityName}`;
+          const visitorLang = detectLanguage(trimmedMessage);
+          const condText = clinicalEval.conditionIdentified || "this condition";
+          let offMatchReply = "";
+          if (visitorLang === "ENGLISH") {
+            offMatchReply = `Yes, ${docDisplay} handles ${condText} in-clinic.\n\n${getChatbotBookingOffReply(trimmedMessage)}`;
+          } else if (visitorLang === "HINDI_SCRIPT") {
+            offMatchReply = `जी हां, ${docDisplay} इस समस्या (${condText}) का परामर्श एवं जांच करते हैं।\n\n${getChatbotBookingOffReply(trimmedMessage)}`;
+          } else if (visitorLang === "GUJARATI_SCRIPT") {
+            offMatchReply = `જી હા, ${docDisplay} આ તકલીફ (${condText}) ની તપાસ અને સારવાર કરે છે.\n\n${getChatbotBookingOffReply(trimmedMessage)}`;
+          } else if (visitorLang === "GUJLISH") {
+            offMatchReply = `Ji haa, ${docDisplay} aa takleef (${condText}) ni tapas ane ilaj kare chhe.\n\n${getChatbotBookingOffReply(trimmedMessage)}`;
+          } else {
+            offMatchReply = `Ji haan, ${docDisplay} is takleef (${condText}) ka checkup aur ilaj karte hain.\n\n${getChatbotBookingOffReply(trimmedMessage)}`;
+          }
+          const cleanOffMatch = sanitizeToPlainText(offMatchReply);
+          conversation.messages.push({ role: "user", content: trimmedMessage, timestamp: new Date() });
+          conversation.messages.push({ role: "assistant", content: cleanOffMatch, timestamp: new Date() });
+          await conversation.save();
+          return { response: cleanOffMatch, sessionId };
+        }
+
         // SPECIALTY MATCHES! (Doctor treats this!)
         const draft: IAppointmentDraft = conversation.appointmentDraft || {
           step: "COLLECTING",
@@ -2496,9 +3209,26 @@ Reply strictly in JSON:
         const docNameStr = doctorDoc?.doctorName || effectiveDoctor?.doctorName || entityName;
         const clinicNameStr = doctorDoc?.clinicName || orgDoc?.name;
 
-        // Run AI-assisted entity extraction for conversational inputs
+        const localPhone = extractPhoneNumber(trimmedMessage);
+        const localDate = parseNaturalDate(trimmedMessage);
+        const localTime = extractTimeSlot(trimmedMessage);
+        const localName = extractPatientName(trimmedMessage, docNameStr, clinicNameStr);
+        const localAge = extractPatientAge(trimmedMessage);
+        const localNotes = extractNotesOrSymptom(trimmedMessage);
+
+        // Run AI-assisted entity extraction only when local parsers leave ambiguity
         let aiExtracted: any = {};
-        if (trimmedMessage.length >= 2) {
+        if (
+          trimmedMessage.length >= 2 &&
+          !shouldSkipAiEntityExtraction({
+            message: trimmedMessage,
+            localPhone,
+            localDate,
+            localTime,
+            localAge,
+            localName,
+          })
+        ) {
           aiExtracted = await this.extractAppointmentEntitiesWithAI({
             message: trimmedMessage,
             doctorName: docNameStr,
@@ -2507,15 +3237,15 @@ Reply strictly in JSON:
           });
         }
 
-        const extractedPhone = extractPhoneNumber(trimmedMessage) || aiExtracted.patientPhone;
+        const extractedPhone = localPhone || aiExtracted.patientPhone;
         const extractedDate =
           (aiExtracted.appointmentDateObj && aiExtracted.appointmentDate
             ? { dateObj: aiExtracted.appointmentDateObj, dateStr: aiExtracted.appointmentDate, displayDate: formatDisplayDate(aiExtracted.appointmentDate) }
-            : null) || parseNaturalDate(aiExtracted.preferredDate || trimmedMessage);
-        const extractedTime = aiExtracted.timeSlot || extractTimeSlot(trimmedMessage);
-        const extractedName = aiExtracted.patientName || extractPatientName(trimmedMessage, docNameStr, clinicNameStr);
-        const extractedAge = aiExtracted.patientAge || extractPatientAge(trimmedMessage);
-        const extractedNotes = aiExtracted.notes || extractNotesOrSymptom(trimmedMessage);
+            : null) || (aiExtracted.preferredDate ? parseNaturalDate(aiExtracted.preferredDate) : null) || localDate;
+        const extractedTime = aiExtracted.timeSlot || localTime;
+        const extractedName = aiExtracted.patientName || localName;
+        const extractedAge = aiExtracted.patientAge || localAge;
+        const extractedNotes = aiExtracted.notes || localNotes;
 
         if (extractedPhone) draft.patientPhone = extractedPhone;
         if (extractedDate) {
@@ -2540,6 +3270,17 @@ Reply strictly in JSON:
         if (extractedAge) draft.patientAge = extractedAge;
         if (extractedNotes) draft.notes = extractedNotes;
 
+        // Auto-assign matching hospital doctor by patient's symptom / takleef
+        if (scope.organizationId && !scope.doctorId) {
+          const symptomText = [draft.notes, clinicalEval.conditionIdentified, trimmedMessage].filter(Boolean).join(" ");
+          const matchedDoc = await this.matchHospitalDoctorBySymptom(scope.organizationId, symptomText);
+          if (matchedDoc) {
+            draft.doctorId = String(matchedDoc._id);
+            draft.doctorName = matchedDoc.doctorName;
+            draft.specialization = matchedDoc.specialization;
+          }
+        }
+
         conversation.appointmentDraft = draft;
 
         const hasName = Boolean(draft.patientName && draft.patientName.length >= 2);
@@ -2553,8 +3294,11 @@ Reply strictly in JSON:
           draft.step = "AWAITING_CONFIRMATION";
           conversation.appointmentDraft = draft;
           const displayDateStr = formatDisplayDate(draft.appointmentDate);
+          const docLabel = draft.doctorName
+            ? `Dr. ${draft.doctorName}${draft.specialization ? ` (${draft.specialization})` : ""}`
+            : `Dr. ${docName}`;
           const summaryReply = sanitizeToPlainText(
-            `Aapki appointment ki jankari:\nDoctor: Dr. ${draft.doctorName || docName}\nPatient: ${draft.patientName}\nAge: ${draft.patientAge} years\nPhone: ${draft.patientPhone}\nTakleef / Problem: ${draft.notes}\nDate: ${displayDateStr}\nTime: ${draft.timeSlot}\n\nKya main aapki yeh appointment confirm book kar doon? Kripya 'Haa' ya 'Confirm' likh kar batayein.`
+            `Aapki appointment ki jankari:\nDoctor: ${docLabel}\nPatient: ${draft.patientName}\nAge: ${draft.patientAge} years\nPhone: ${draft.patientPhone}\nTakleef / Problem: ${draft.notes}\nDate: ${displayDateStr}\nTime: ${draft.timeSlot}\n\nKya main aapki yeh appointment confirm book kar doon? Kripya 'Haa' ya 'Confirm' likh kar batayein.`
           );
           conversation.messages.push({ role: "user", content: trimmedMessage, timestamp: new Date() });
           conversation.messages.push({ role: "assistant", content: summaryReply, timestamp: new Date() });
@@ -2588,7 +3332,7 @@ Reply strictly in JSON:
     }
 
     // 4. Ongoing Conversational Appointment Booking (runs when message was not a new medical concern triage)
-    if (!clinicalEval.hasMedicalConcern && conversation.appointmentDraft && conversation.appointmentDraft.step !== "BOOKED") {
+    if (!isChatbotBookingDisabled && !clinicalEval.hasMedicalConcern && conversation.appointmentDraft && conversation.appointmentDraft.step !== "BOOKED") {
       const draft = conversation.appointmentDraft;
 
       // Case A: Awaiting final verification confirmation ("Haa" / "Confirm")
@@ -2596,12 +3340,24 @@ Reply strictly in JSON:
         if (isPositiveConfirmation(trimmedMessage)) {
           let targetDoctorId: mongoose.Types.ObjectId | null = toObjectIdSafe(draft.doctorId) || toObjectIdSafe(scope.doctorId);
           if (!targetDoctorId && scope.organizationId) {
-            const orgDocFound = await Doctor.findOne({
-              organizationId: scope.organizationId,
-              status: "ACTIVE",
-            });
-            if (orgDocFound) {
-              targetDoctorId = orgDocFound._id as mongoose.Types.ObjectId;
+            const matchedDoc = await this.matchHospitalDoctorBySymptom(scope.organizationId, draft.notes || trimmedMessage);
+            if (matchedDoc) {
+              targetDoctorId = matchedDoc._id as mongoose.Types.ObjectId;
+              draft.doctorId = String(matchedDoc._id);
+              draft.doctorName = matchedDoc.doctorName;
+              draft.specialization = matchedDoc.specialization;
+            } else {
+              const orgDocFound = await Doctor.findOne({
+                organizationId: scope.organizationId,
+                status: "ACTIVE",
+                approvalStatus: { $nin: ["PENDING", "REJECTED"] },
+              });
+              if (orgDocFound) {
+                targetDoctorId = orgDocFound._id as mongoose.Types.ObjectId;
+                draft.doctorId = String(orgDocFound._id);
+                draft.doctorName = orgDocFound.doctorName;
+                draft.specialization = orgDocFound.specialization;
+              }
             }
           }
 
@@ -2625,62 +3381,59 @@ Reply strictly in JSON:
             apptDateObj = new Date();
           }
 
-          const currentDocSchedule = effectiveDoctor?.consultationHours || doctorDoc?.consultationHours || orgDoc?.workingHours;
-          const currentDocWeeklyOff = effectiveDoctor?.weeklyOff || doctorDoc?.weeklyOff || orgDoc?.weeklyOff;
-          const currentDocName = draft.doctorName || effectiveDoctor?.doctorName || doctorDoc?.doctorName || entityName;
+          const orgId = toObjectIdSafe(draft.organizationId || scope.organizationId);
 
-          const finalScheduleCheck = validateAppointmentBookingDate(
-            apptDateObj,
-            currentDocSchedule,
-            currentDocWeeklyOff,
-            currentDocName
-          );
-
-          if (!finalScheduleCheck.isValid) {
-            const failReply = sanitizeToPlainText(
-              finalScheduleCheck.errorMessage || "Selected date par clinic band hai ya booking limit se bahar hai. Kripya naye din ki date batayein."
-            );
+          let bookingResult;
+          try {
+            bookingResult = await AppointmentBookingService.bookAppointment({
+              doctorId: targetDoctorId.toString(),
+              organizationId: orgId ? orgId.toString() : null,
+              patientName: draft.patientName || "Patient",
+              patientAge: draft.patientAge || 30,
+              patientPhone: draft.patientPhone || "0000000000",
+              patientEmail: draft.patientEmail || undefined,
+              appointmentDate: draft.appointmentDate || apptDateObj,
+              timeSlot: draft.timeSlot || "Regular Consultation",
+              notes: draft.notes || "Booked via Website AI Chatbot",
+              source: "AI_CHATBOT",
+            });
+          } catch (bookErr: any) {
+            const errCode = bookErr?.code;
+            if (errCode === "SLOT_FULL" || errCode === "INVALID_SLOT") {
+              draft.step = "COLLECTING";
+              draft.timeSlot = undefined;
+              conversation.appointmentDraft = draft;
+              const slotErrReply = sanitizeToPlainText(
+                bookErr.message ||
+                  "Selected time slot full ho gaya hai. Kripya uplabdh samay me se koi aur slot batayein."
+              );
+              conversation.messages.push({ role: "user", content: trimmedMessage, timestamp: new Date() });
+              conversation.messages.push({ role: "assistant", content: slotErrReply, timestamp: new Date() });
+              await conversation.save();
+              return { response: slotErrReply, sessionId };
+            }
             draft.step = "COLLECTING";
             draft.appointmentDate = undefined;
             conversation.appointmentDraft = draft;
+            const dateErrReply = sanitizeToPlainText(
+              bookErr?.message ||
+                "Selected date par clinic band hai ya booking uplabdh nahi hai. Kripya agle 3 khule dino me se koi date batayein."
+            );
             conversation.messages.push({ role: "user", content: trimmedMessage, timestamp: new Date() });
-            conversation.messages.push({ role: "assistant", content: failReply, timestamp: new Date() });
+            conversation.messages.push({ role: "assistant", content: dateErrReply, timestamp: new Date() });
             await conversation.save();
-            return { response: failReply, sessionId };
+            return { response: dateErrReply, sessionId };
           }
 
-          const orgId = toObjectIdSafe(draft.organizationId || scope.organizationId);
-          const scopeType = orgId ? "ORGANIZATION" : "DOCTOR";
-          const scopeId = orgId || targetDoctorId;
-
-          const appointmentId = await getNextAppointmentId({
-            scopeType,
-            scopeId,
-            date: apptDateObj,
-          });
-
-          await Appointment.create({
-            appointmentId,
-            doctorId: targetDoctorId,
-            organizationId: orgId,
-            patientName: draft.patientName || "Patient",
-            patientAge: draft.patientAge || 30,
-            patientPhone: draft.patientPhone || "0000000000",
-            patientEmail: draft.patientEmail || undefined,
-            appointmentDate: apptDateObj,
-            timeSlot: draft.timeSlot || "Morning",
-            notes: draft.notes || "Booked via Website AI Chatbot",
-            status: "PENDING",
-          });
-
           draft.step = "BOOKED";
+          draft.timeSlot = bookingResult.timeSlot;
           conversation.appointmentDraft = draft;
 
           const doctorNameStr = draft.doctorName || effectiveDoctor?.doctorName || doctorDoc?.doctorName || "Doctor";
-          const displayDateStr = formatDisplayDate(draft.appointmentDate || apptDateObj);
+          const displayDateStr = formatDisplayDate(draft.appointmentDate || bookingResult.dateKey);
 
           const successReply = sanitizeToPlainText(
-            `Aapki appointment safaltapoorvak book ho gayi hai!\n\nAppointment ID: ${appointmentId}\nDoctor: Dr. ${doctorNameStr}\nPatient: ${draft.patientName}\nAge: ${draft.patientAge || 30} years\nPhone: ${draft.patientPhone}\nDate: ${displayDateStr}\nTime: ${draft.timeSlot}\n\nAapki appointment darj kar li gayi hai. Kripya nirdharit samay par clinic/hospital pahunchein. Aap is Appointment ID (${appointmentId}) ka upyog karke website ke 'Appointment Status' section me apni booking ka live status dekh sakte hain.`
+            `Aapki appointment safaltapoorvak book ho gayi hai!\n\nAppointment ID: ${bookingResult.appointmentId}\nToken Number: #${bookingResult.tokenNumber}\nDoctor: Dr. ${doctorNameStr}\nPatient: ${draft.patientName}\nAge: ${draft.patientAge || 30} years\nPhone: ${draft.patientPhone}\nDate: ${displayDateStr}\nTime Slot: ${bookingResult.timeSlot}\n\nKripya nirdharit samay par clinic/hospital pahunchein. Aap Appointment ID (${bookingResult.appointmentId}) se website ke 'Appointment Status' section ya chat me apna Token # aur live OPD queue position dekh sakte hain.`
           );
 
           conversation.messages.push({ role: "user", content: trimmedMessage, timestamp: new Date() });
@@ -2690,7 +3443,8 @@ Reply strictly in JSON:
           return {
             response: successReply,
             sessionId,
-            appointmentId: String(appointmentId),
+            appointmentId: bookingResult.appointmentId,
+            tokenNumber: bookingResult.tokenNumber,
             isAppointmentBooked: true,
           };
         }
@@ -2710,8 +3464,25 @@ Reply strictly in JSON:
         const docNameStr = draft.doctorName || effectiveDoctor?.doctorName || doctorDoc?.doctorName || entityName;
         const clinicNameStr = doctorDoc?.clinicName || orgDoc?.name;
 
+        const localPhoneCorr = extractPhoneNumber(trimmedMessage);
+        const localDateCorr = parseNaturalDate(trimmedMessage);
+        const localTimeCorr = extractTimeSlot(trimmedMessage);
+        const localNameCorr = extractPatientName(trimmedMessage, docNameStr, clinicNameStr);
+        const localAgeCorr = extractPatientAge(trimmedMessage);
+        const localNotesCorr = extractNotesOrSymptom(trimmedMessage);
+
         let aiExtracted: any = {};
-        if (trimmedMessage.length >= 2) {
+        if (
+          trimmedMessage.length >= 2 &&
+          !shouldSkipAiEntityExtraction({
+            message: trimmedMessage,
+            localPhone: localPhoneCorr,
+            localDate: localDateCorr,
+            localTime: localTimeCorr,
+            localAge: localAgeCorr,
+            localName: localNameCorr,
+          })
+        ) {
           aiExtracted = await this.extractAppointmentEntitiesWithAI({
             message: trimmedMessage,
             doctorName: docNameStr,
@@ -2720,15 +3491,15 @@ Reply strictly in JSON:
           });
         }
 
-        const newPhone = extractPhoneNumber(trimmedMessage) || aiExtracted.patientPhone;
+        const newPhone = localPhoneCorr || aiExtracted.patientPhone;
         const newDate =
           (aiExtracted.appointmentDateObj && aiExtracted.appointmentDate
             ? { dateObj: aiExtracted.appointmentDateObj, dateStr: aiExtracted.appointmentDate, displayDate: formatDisplayDate(aiExtracted.appointmentDate) }
-            : null) || parseNaturalDate(aiExtracted.preferredDate || trimmedMessage);
-        const newTime = aiExtracted.timeSlot || extractTimeSlot(trimmedMessage);
-        const newName = aiExtracted.patientName || extractPatientName(trimmedMessage, docNameStr, clinicNameStr);
-        const newAge = aiExtracted.patientAge || extractPatientAge(trimmedMessage);
-        const newNotes = aiExtracted.notes || extractNotesOrSymptom(trimmedMessage);
+            : null) || (aiExtracted.preferredDate ? parseNaturalDate(aiExtracted.preferredDate) : null) || localDateCorr;
+        const newTime = aiExtracted.timeSlot || localTimeCorr;
+        const newName = aiExtracted.patientName || localNameCorr;
+        const newAge = aiExtracted.patientAge || localAgeCorr;
+        const newNotes = aiExtracted.notes || localNotesCorr;
         if (newNotes) draft.notes = newNotes;
         if (newPhone || newDate || newTime || newName || newAge) {
           const currentDocSchedule = effectiveDoctor?.consultationHours || doctorDoc?.consultationHours || orgDoc?.workingHours;
@@ -2784,9 +3555,26 @@ Reply strictly in JSON:
         const docNameStr = draft.doctorName || effectiveDoctor?.doctorName || doctorDoc?.doctorName || entityName;
         const clinicNameStr = doctorDoc?.clinicName || orgDoc?.name;
 
-        // Run AI-assisted entity extraction for conversational inputs
+        const localPhoneCol = extractPhoneNumber(trimmedMessage);
+        const localDateCol = parseNaturalDate(trimmedMessage);
+        const localTimeCol = extractTimeSlot(trimmedMessage);
+        const localNameCol = extractPatientName(trimmedMessage, docNameStr, clinicNameStr);
+        const localAgeCol = extractPatientAge(trimmedMessage);
+        const localNotesCol = extractNotesOrSymptom(trimmedMessage);
+
+        // Run AI-assisted entity extraction only when deterministic extractors don't capture short inputs
         let aiExtracted: any = {};
-        if (trimmedMessage.length >= 2) {
+        if (
+          trimmedMessage.length >= 2 &&
+          !shouldSkipAiEntityExtraction({
+            message: trimmedMessage,
+            localPhone: localPhoneCol,
+            localDate: localDateCol,
+            localTime: localTimeCol,
+            localAge: localAgeCol,
+            localName: localNameCol,
+          })
+        ) {
           aiExtracted = await this.extractAppointmentEntitiesWithAI({
             message: trimmedMessage,
             doctorName: docNameStr,
@@ -2795,15 +3583,15 @@ Reply strictly in JSON:
           });
         }
 
-        const extractedPhone = extractPhoneNumber(trimmedMessage) || aiExtracted.patientPhone;
+        const extractedPhone = localPhoneCol || aiExtracted.patientPhone;
         const extractedDate =
           (aiExtracted.appointmentDateObj && aiExtracted.appointmentDate
             ? { dateObj: aiExtracted.appointmentDateObj, dateStr: aiExtracted.appointmentDate, displayDate: formatDisplayDate(aiExtracted.appointmentDate) }
-            : null) || parseNaturalDate(aiExtracted.preferredDate || trimmedMessage);
-        const extractedTime = aiExtracted.timeSlot || extractTimeSlot(trimmedMessage);
-        const extractedName = aiExtracted.patientName || extractPatientName(trimmedMessage, docNameStr, clinicNameStr);
-        const extractedAge = aiExtracted.patientAge || extractPatientAge(trimmedMessage);
-        const extractedNotes = aiExtracted.notes || extractNotesOrSymptom(trimmedMessage);
+            : null) || (aiExtracted.preferredDate ? parseNaturalDate(aiExtracted.preferredDate) : null) || localDateCol;
+        const extractedTime = aiExtracted.timeSlot || localTimeCol;
+        const extractedName = aiExtracted.patientName || localNameCol;
+        const extractedAge = aiExtracted.patientAge || localAgeCol;
+        const extractedNotes = aiExtracted.notes || localNotesCol;
 
         const currentDocSchedule = effectiveDoctor?.consultationHours || doctorDoc?.consultationHours || orgDoc?.workingHours;
         const currentDocWeeklyOff = effectiveDoctor?.weeklyOff || doctorDoc?.weeklyOff || orgDoc?.weeklyOff;
@@ -2828,6 +3616,17 @@ Reply strictly in JSON:
         if (extractedAge && !draft.patientAge) draft.patientAge = extractedAge;
         if (extractedNotes && !draft.notes) draft.notes = extractedNotes;
 
+        // Auto-assign matching hospital doctor by patient's symptom / takleef
+        if (scope.organizationId && !scope.doctorId) {
+          const symptomText = [draft.notes, trimmedMessage].filter(Boolean).join(" ");
+          const matchedDoc = await this.matchHospitalDoctorBySymptom(scope.organizationId, symptomText);
+          if (matchedDoc) {
+            draft.doctorId = String(matchedDoc._id);
+            draft.doctorName = matchedDoc.doctorName;
+            draft.specialization = matchedDoc.specialization;
+          }
+        }
+
         // If user just typed a plain 10-digit number
         if (!draft.patientPhone && /^\d{10}$/.test(trimmedMessage.replace(/\s+/g, ""))) {
           draft.patientPhone = trimmedMessage.replace(/\s+/g, "");
@@ -2844,11 +3643,15 @@ Reply strictly in JSON:
           draft.step = "AWAITING_CONFIRMATION";
           conversation.appointmentDraft = draft;
 
-          const doctorNameStr = draft.doctorName || doctorDoc?.doctorName || "Doctor";
+          const doctorNameStr = draft.doctorName
+            ? `Dr. ${draft.doctorName}${draft.specialization ? ` (${draft.specialization})` : ""}`
+            : doctorDoc?.doctorName
+            ? `Dr. ${doctorDoc.doctorName}`
+            : "Doctor";
           const displayDateStr = formatDisplayDate(draft.appointmentDate);
 
           const summaryReply = sanitizeToPlainText(
-            `Aapki appointment ki jankari:\nDoctor: Dr. ${doctorNameStr}\nPatient: ${draft.patientName}\nAge: ${draft.patientAge} years\nPhone: ${draft.patientPhone}\nTakleef / Problem: ${draft.notes}\nDate: ${displayDateStr}\nTime: ${draft.timeSlot}\n\nKya main aapki yeh appointment confirm book kar doon? Kripya 'Haa' ya 'Confirm' likh kar batayein.`
+            `Aapki appointment ki jankari:\nDoctor: ${doctorNameStr}\nPatient: ${draft.patientName}\nAge: ${draft.patientAge} years\nPhone: ${draft.patientPhone}\nTakleef / Problem: ${draft.notes}\nDate: ${displayDateStr}\nTime: ${draft.timeSlot}\n\nKya main aapki yeh appointment confirm book kar doon? Kripya 'Haa' ya 'Confirm' likh kar batayein.`
           );
 
           conversation.messages.push({ role: "user", content: trimmedMessage, timestamp: new Date() });
@@ -2878,12 +3681,29 @@ Reply strictly in JSON:
     }
 
     // 4b. Explicit Booking Intent (no draft yet, e.g. "appointment book karni hai")
-    if (!clinicalEval.hasMedicalConcern && isBookingIntent(trimmedMessage)) {
+    if (!isChatbotBookingDisabled && !clinicalEval.hasMedicalConcern && isBookingIntent(trimmedMessage)) {
       const docNameStr = doctorDoc?.doctorName || effectiveDoctor?.doctorName || entityName;
       const clinicNameStr = doctorDoc?.clinicName || orgDoc?.name;
 
+      const localPhoneExp = extractPhoneNumber(trimmedMessage);
+      const localDateExp = parseNaturalDate(trimmedMessage);
+      const localTimeExp = extractTimeSlot(trimmedMessage);
+      const localNameExp = extractPatientName(trimmedMessage, docNameStr, clinicNameStr);
+      const localAgeExp = extractPatientAge(trimmedMessage);
+      const localNotesExp = extractNotesOrSymptom(trimmedMessage);
+
       let aiExtracted: any = {};
-      if (trimmedMessage.length >= 2) {
+      if (
+        trimmedMessage.length >= 2 &&
+        !shouldSkipAiEntityExtraction({
+          message: trimmedMessage,
+          localPhone: localPhoneExp,
+          localDate: localDateExp,
+          localTime: localTimeExp,
+          localAge: localAgeExp,
+          localName: localNameExp,
+        })
+      ) {
         aiExtracted = await this.extractAppointmentEntitiesWithAI({
           message: trimmedMessage,
           doctorName: docNameStr,
@@ -2891,15 +3711,15 @@ Reply strictly in JSON:
         });
       }
 
-      const extractedPhone = extractPhoneNumber(trimmedMessage) || aiExtracted.patientPhone;
+      const extractedPhone = localPhoneExp || aiExtracted.patientPhone;
       const extractedDate =
         (aiExtracted.appointmentDateObj && aiExtracted.appointmentDate
           ? { dateObj: aiExtracted.appointmentDateObj, dateStr: aiExtracted.appointmentDate, displayDate: formatDisplayDate(aiExtracted.appointmentDate) }
-          : null) || parseNaturalDate(aiExtracted.preferredDate || trimmedMessage);
-      const extractedTime = aiExtracted.timeSlot || extractTimeSlot(trimmedMessage);
-      const extractedName = aiExtracted.patientName || extractPatientName(trimmedMessage, docNameStr, clinicNameStr);
-      const extractedAge = aiExtracted.patientAge || extractPatientAge(trimmedMessage);
-      const extractedNotes = aiExtracted.notes || extractNotesOrSymptom(trimmedMessage);
+          : null) || (aiExtracted.preferredDate ? parseNaturalDate(aiExtracted.preferredDate) : null) || localDateExp;
+      const extractedTime = aiExtracted.timeSlot || localTimeExp;
+      const extractedName = aiExtracted.patientName || localNameExp;
+      const extractedAge = aiExtracted.patientAge || localAgeExp;
+      const extractedNotes = aiExtracted.notes || localNotesExp;
 
       const draft: IAppointmentDraft = conversation.appointmentDraft || {
         step: "COLLECTING",
@@ -3001,28 +3821,36 @@ Reply strictly in JSON:
       };
     }
 
-    // 6. Tenant-Scoped Pre-Filtered Knowledge Retrieval & Auto-Sync
-    let chunks = await ragKnowledgeService.retrieveAuthorizedKnowledge(
-      scope,
-      trimmedMessage,
-      6
-    );
+    // 6. Tenant-Scoped Pre-Filtered Knowledge Retrieval & Auto-Sync (with 60s in-memory cache)
+    const ragKey = buildRagCacheKey(scope, trimmedMessage);
+    let chunks = getCachedRagChunks(ragKey) || [];
+    if (chunks.length === 0) {
+      chunks = await ragKnowledgeService.retrieveAuthorizedKnowledge(
+        scope,
+        trimmedMessage,
+        6
+      );
 
-    // Auto-sync knowledge chunks if empty in database for this practice
-    if (chunks.length === 0 && (doctorDoc?._id || orgDoc?._id)) {
-      try {
-        if (doctorDoc?._id) {
-          await ragKnowledgeService.syncOnlyDoctorKnowledge(doctorDoc._id, websiteDoc?._id);
-        } else if (orgDoc?._id) {
-          await ragKnowledgeService.syncHospitalKnowledge(orgDoc._id, websiteDoc?._id);
+      // Auto-sync knowledge chunks if empty in database for this practice
+      if (chunks.length === 0 && (doctorDoc?._id || orgDoc?._id)) {
+        try {
+          if (doctorDoc?._id) {
+            await ragKnowledgeService.syncOnlyDoctorKnowledge(doctorDoc._id, websiteDoc?._id);
+          } else if (orgDoc?._id) {
+            await ragKnowledgeService.syncHospitalKnowledge(orgDoc._id, websiteDoc?._id);
+          }
+          chunks = await ragKnowledgeService.retrieveAuthorizedKnowledge(
+            scope,
+            trimmedMessage,
+            6
+          );
+        } catch {
+          // Fallback to baseline profile
         }
-        chunks = await ragKnowledgeService.retrieveAuthorizedKnowledge(
-          scope,
-          trimmedMessage,
-          6
-        );
-      } catch {
-        // Fallback to baseline profile
+      }
+
+      if (chunks.length > 0) {
+        setCachedRagChunks(ragKey, chunks);
       }
     }
 
@@ -3125,7 +3953,11 @@ Guidance:
 - Reassure the visitor briefly in ONE sentence that Dr. ${effectiveDoctor?.doctorName || entityName} treats this condition in-clinic.
 - STRICTLY DO NOT EXPLAIN OR DEFINE THE DISEASE (NO medical knowledge, NO descriptions of what blood pressure/heart disease is, NO biology, anatomy or pathology lectures).
 - STRICTLY DO NOT PRESCRIBE MEDICINES OR MEDICAL TREATMENTS.
-- Directly guide the visitor in booking an in-person consultation appointment by asking for any missing details (name, age, phone, date, time).
+${
+  isChatbotBookingDisabled
+    ? "- IMPORTANT: Chatbot appointment booking is DISABLED by admin. Do NOT ask for name, age, phone, date, or time. Politely ask the visitor to fill out the appointment booking form on this website."
+    : "- Directly guide the visitor in booking an in-person consultation appointment by asking for any missing details (name, age, phone, date, time)."
+}
 </CLINICAL_SPECIALTY_EVALUATION>
 `.trim();
     }
@@ -3166,7 +3998,14 @@ CONVERSATIONAL & LANGUAGE PRINCIPLES:
    - Doctor's consultation fees for New Case (new patient) and Old Case (follow-up / returning patient) are defined in <AUTHORIZED_KNOWLEDGE>.
    - If a visitor asks about fees, charges, kitna kharcha aayega, or follow-up fees, answer accurately based strictly on <AUTHORIZED_KNOWLEDGE>.
 
-4. IN-CHAT APPOINTMENT BOOKING CONVERSATION:
+${
+  isChatbotBookingDisabled
+    ? `4. CHATBOT APPOINTMENT BOOKING DISABLED BY ADMIN (CRITICAL):
+   - Online appointment booking via chatbot is currently turned OFF by admin.
+   - NEVER try to book an appointment in chat and NEVER ask the visitor for patient name, age, phone number, preferred date, or time slot.
+   - If the visitor asks to book or schedule an appointment, politely tell them in ${userLang} that this service is off by admin and ask them to fill the appointment booking form on this website.
+   - Visitors CAN still ask clinic questions (timings, fees, doctor profile, services) or share their Appointment ID to check existing appointment status.`
+    : `4. IN-CHAT APPOINTMENT BOOKING CONVERSATION:
    - When an appointment booking is in progress (see <ACTIVE_APPOINTMENT_BOOKING_STATUS>):
      * Reassure the visitor warmly.
      * Acknowledge any details they just provided.
@@ -3176,7 +4015,8 @@ CONVERSATIONAL & LANGUAGE PRINCIPLES:
      * STRICT DATE RULES: Appointments can ONLY be booked for TODAY or within the NEXT 3 DAYS from today (${currentDateStr}). Never accept dates further in the future or in the past.
      * STRICT CLINIC SCHEDULE RULES: Appointments can ONLY be booked on days when the clinic is open. If a patient asks for an appointment on a day the clinic is closed or weekly off, politely explain that the clinic is closed on that day and suggest the available open days from the next 3 days.
      * NEVER ask for details that are already known!
-     * When all 6 details are provided, the system will deterministically show the verification summary.
+     * When all 6 details are provided, the system will deterministically show the verification summary.`
+}
 
 5. ABSOLUTE PROHIBITION ON MEDICAL KNOWLEDGE, DISEASE LECTURES & TREATMENTS (CRITICAL):
    - You must NEVER provide medical knowledge, disease definitions, or explanations of how illnesses, organs, or blood vessels work ("AI bimari ka ilaj ya medical knowledge bilkul nahi dega").
@@ -3188,7 +4028,11 @@ CONVERSATIONAL & LANGUAGE PRINCIPLES:
    - If a patient mentions a disease, symptom, or checkup (e.g. blood pressure, chest pain, palpitations):
      * State in ONE short, simple sentence that Dr. ${doctorDoc?.doctorName || entityName} specializes in this field and treats this condition in-clinic (e.g. "Ji haan, Dr. ${doctorDoc?.doctorName || entityName} blood pressure aur dil se judi samasyaon ke specialist hain aur inka checkup va ilaj karte hain.").
      * DO NOT explain the disease! DO NOT explain body organs, pumping, arteries, or health risks!
-     * Directly guide them to book an appointment by asking for the missing details (name, age, phone, date, time).
+${
+  isChatbotBookingDisabled
+    ? `     * Tell them chatbot booking is turned off by admin and ask them to fill the appointment booking form on this website.`
+    : `     * Directly guide them to book an appointment by asking for the missing details (name, age, phone, date, time).`
+}
    - If visitor asks about an ailment outside the doctor's specialty:
      * Politely explain in ONE sentence that the doctor does not treat this and advise consulting the appropriate specialist.
      * DO NOT lecture on the disease.
@@ -3239,14 +4083,7 @@ STRICT PLAIN TEXT OUTPUT RULES (MANDATORY):
     const client = this.getClient();
     let assistantReply = "";
 
-    const candidateModels = Array.from(
-      new Set([
-        this.model,
-        "gemini-3.5-flash-lite",
-        "gemini-3.1-flash-lite",
-        "gemini-3.5-flash",
-      ])
-    );
+    const candidateModels = getOrderedCandidateModels(this.model);
     for (const modelName of candidateModels) {
       const startTime = Date.now();
       try {
@@ -3263,12 +4100,15 @@ STRICT PLAIN TEXT OUTPUT RULES (MANDATORY):
           };
         }
 
-        const result = await client.models.generateContent({
+        const result = await generateContentBounded({
+          client,
           model: modelName,
           contents,
           config,
+          timeoutMs: 10000,
         });
 
+        markModelHealthy(modelName);
         const latencyMs = Date.now() - startTime;
         const usage = (result as any)?.usageMetadata;
         GeminiLoggerService.logCall({
@@ -3289,6 +4129,7 @@ STRICT PLAIN TEXT OUTPUT RULES (MANDATORY):
       } catch (err: any) {
         const latencyMs = Date.now() - startTime;
         const parsed = GeminiLoggerService.parseError(err);
+        markModelUnhealthy(modelName, parsed.statusCode);
         GeminiLoggerService.logCall({
           feature: "PUBLIC_CHATBOT",
           model: modelName,

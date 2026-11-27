@@ -1,14 +1,25 @@
 import { Metadata } from "next";
 import { OnlyDoctorWizard } from "@/components/forms/only-doctor-wizard";
+import { OnboardingDisabledNotice } from "@/components/forms/onboarding-disabled-notice";
+import { ServiceOffByAdmin } from "@/components/forms/service-off-by-admin";
+import { getOnboardingCategories } from "@/lib/onboarding-config";
 import Link from "next/link";
 import { ArrowLeft, Stethoscope } from "lucide-react";
+
+export const dynamic = "force-dynamic";
 
 export const metadata: Metadata = {
   title: "Only Doctor Onboarding | Doczeno",
   description: "Create and launch your verified clinical website with custom scheduling and professional medical branding.",
 };
 
-export default function DoctorOnboardingPage() {
+export default async function DoctorOnboardingPage() {
+  const categories = await getOnboardingCategories();
+
+  if (!categories.portalEnabled) {
+    return <ServiceOffByAdmin />;
+  }
+
   return (
     <div className="min-h-screen bg-[#eaf4fd] bg-[url('/images/mobile.png')] md:bg-[url('/images/bg.png')] bg-cover bg-top md:bg-center bg-no-repeat bg-fixed py-6 sm:py-10 px-3 sm:px-6 lg:px-8 font-sans text-slate-900">
       <div className="max-w-4xl mx-auto space-y-4 sm:space-y-6">
@@ -27,7 +38,11 @@ export default function DoctorOnboardingPage() {
           </div>
         </div>
 
-        <OnlyDoctorWizard />
+        {categories.onlyDoctor ? (
+          <OnlyDoctorWizard />
+        ) : (
+          <OnboardingDisabledNotice categoryLabel="Only Doctor Setup" />
+        )}
       </div>
     </div>
   );

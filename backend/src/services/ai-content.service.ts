@@ -12,12 +12,93 @@ import {
   AiTargetType,
   AiContentStatus,
   validateFullContent,
+  sanitizeAndValidateWebsiteLayoutConfig,
 } from "@/validations/ai";
 import { AuthUserPayload } from "@/types";
 
 function toSafeObjectId(id?: string | null): mongoose.Types.ObjectId | null {
   if (!id || !mongoose.Types.ObjectId.isValid(id)) return null;
   return new mongoose.Types.ObjectId(id);
+}
+
+/**
+ * Resolves a hospital's canonical selected specialty list (specialties prioritized, falling back to departments).
+ */
+export function resolveOrganizationSpecialties(org: {
+  specialties?: string[];
+  departments?: string[];
+} | null | undefined): string[] {
+  if (!org) return [];
+  const specs = Array.isArray(org.specialties) ? org.specialties : [];
+  const depts = Array.isArray((org as any).departments) ? (org as any).departments : [];
+  const merged = specs.length > 0 ? specs : depts;
+  const seen = new Set<string>();
+  const result: string[] = [];
+  for (const item of merged) {
+    const clean = String(item || "").trim();
+    if (!clean) continue;
+    const key = clean.toLowerCase();
+    if (!seen.has(key)) {
+      seen.add(key);
+      result.push(clean);
+    }
+  }
+  return result;
+}
+
+/**
+ * Reconciles AI service cards to match a hospital's exact selected specialties 1-to-1,
+ * preserving existing custom descriptions where specialty names match.
+ */
+export function reconcileHospitalServicesWithSpecialties(
+  specialties: string[],
+  existingServices: any[] = [],
+  city?: string
+): Array<{ title: string; description: string }> {
+  const existingMap = new Map<string, string>();
+  if (Array.isArray(existingServices)) {
+    for (const item of existingServices) {
+      const titleKey = String(item?.title || item?.name || "").trim().toLowerCase();
+      const desc = String(item?.description || "").trim();
+      if (titleKey && desc) {
+        existingMap.set(titleKey, desc);
+      }
+    }
+  }
+
+  return specialties.map((spec) => ({
+    title: spec,
+    description:
+      existingMap.get(spec.toLowerCase()) ||
+      `Specialized clinical diagnosis, outpatient consultations, and medical care in ${spec}${city ? ` at our ${city} center` : ""}.`.slice(0, 120),
+  }));
+}
+
+/**
+ * Reconciles AI department cards to match a hospital's exact selected specialties 1-to-1.
+ */
+export function reconcileHospitalDepartmentsWithSpecialties(
+  specialties: string[],
+  existingDepartments: any[] = [],
+  city?: string
+): Array<{ name: string; description: string }> {
+  const existingMap = new Map<string, string>();
+  if (Array.isArray(existingDepartments)) {
+    for (const item of existingDepartments) {
+      const nameKey = String(item?.name || item?.title || "").trim().toLowerCase();
+      const desc = String(item?.description || "").trim();
+      if (nameKey && desc) {
+        existingMap.set(nameKey, desc);
+      }
+    }
+  }
+
+  return specialties.map((spec) => ({
+    name: spec,
+    description:
+      existingMap.get(spec.toLowerCase()) ||
+      `Dedicated ${spec} department offering specialist consultations and comprehensive patient care${city ? ` in ${city}` : ""}.`,
+  }));
 }
 
 export class AIContentService {
@@ -99,9 +180,83 @@ export class AIContentService {
       record.approvedContent = defaultContent;
       record.status = AiContentStatus.PUBLISHED;
       await record.save();
+    } else if (targetType === AiTargetType.HOSPITAL) {
+      // Ensure hospital AI content services/departments always stay synced with selected specialties
+      const org = await Organization.findById(objectId).select("specialties departments address").lean();
+      const orgSpecs = resolveOrganizationSpecialties(org);
+      if (orgSpecs.length > 0) {
+        const city = org?.address?.city;
+        let changed = false;
+        const syncContentBlock = (block: any) => {
+          if (!block || typeof block !== "object") return block;
+          const curSvcs = Array.isArray(block.services) ? block.services : [];
+          const sameServices =
+            curSvcs.length === orgSpecs.length &&
+            orgSpecs.every((s, idx) => String(curSvcs[idx]?.title || "").trim().toLowerCase() === s.toLowerCase());
+          const curDepts = Array.isArray(block.departments) ? block.departments : [];
+          const sameDepts =
+            curDepts.length === orgSpecs.length &&
+            orgSpecs.every((s, idx) => String(curDepts[idx]?.name || "").trim().toLowerCase() === s.toLowerCase());
+          if (sameServices && sameDepts) return block;
+          changed = true;
+          return {
+            ...block,
+            services: reconcileHospitalServicesWithSpecialties(orgSpecs, curSvcs, city),
+            departments: reconcileHospitalDepartmentsWithSpecialties(orgSpecs, curDepts, city),
+          };
+        };
+        record.draftContent = syncContentBlock(record.draftContent);
+        record.approvedContent = syncContentBlock(record.approvedContent);
+        record.publishedContent = syncContentBlock(record.publishedContent);
+        if (changed) {
+          record.markModified("draftContent");
+          record.markModified("approvedContent");
+          record.markModified("publishedContent");
+          await record.save();
+        }
+      }
     }
 
     return record;
+  }
+
+  public async getHospitalSpecialties(targetId: string | mongoose.Types.ObjectId): Promise<string[]> {
+    const objectId = await this.resolveObjectId(AiTargetType.HOSPITAL, targetId);
+    const org = await Organization.findById(objectId).select("specialties departments").lean();
+    return resolveOrganizationSpecialties(org);
+  }
+
+  /**
+   * Synchronizes Hospital AIContent services & departments when Specialties/Departments change in Hospital Admin.
+   */
+  public async syncHospitalSpecialtiesToContent(
+    organizationId: string | mongoose.Types.ObjectId,
+    specialties: string[],
+    city?: string
+  ): Promise<void> {
+    const objectId = await this.resolveObjectId(AiTargetType.HOSPITAL, organizationId);
+    const orgSpecs = resolveOrganizationSpecialties({ specialties });
+    if (orgSpecs.length === 0) return;
+
+    const record = await AIContent.findOne({ targetType: AiTargetType.HOSPITAL, targetId: objectId });
+    if (!record) return;
+
+    const updateBlock = (block: any) => {
+      if (!block || typeof block !== "object") return block;
+      return {
+        ...block,
+        services: reconcileHospitalServicesWithSpecialties(orgSpecs, block.services, city),
+        departments: reconcileHospitalDepartmentsWithSpecialties(orgSpecs, block.departments, city),
+      };
+    };
+
+    record.draftContent = updateBlock(record.draftContent);
+    record.approvedContent = updateBlock(record.approvedContent);
+    record.publishedContent = updateBlock(record.publishedContent);
+    record.markModified("draftContent");
+    record.markModified("approvedContent");
+    record.markModified("publishedContent");
+    await record.save();
   }
 
   /**
@@ -142,6 +297,7 @@ export class AIContentService {
         throw new Error(`Organization not found with id: ${targetId}`);
       }
 
+      const specs = resolveOrganizationSpecialties(org);
       const sourceData = {
         hospitalName: org.name,
         type: org.type,
@@ -149,6 +305,7 @@ export class AIContentService {
         state: org.address?.state || "",
         workingHours: org.workingHours || "24/7 Emergency & Outpatient",
         weeklyOff: org.weeklyOff || "None",
+        specialties: specs,
       };
 
       return { sourceData, orgDoc: org };
@@ -208,6 +365,14 @@ export class AIContentService {
         generated = await geminiService.generateOnlyDoctor(sourceData);
       } else if (targetType === AiTargetType.HOSPITAL) {
         generated = await geminiService.generateHospital(sourceData);
+        const orgSpecs = resolveOrganizationSpecialties(orgDoc);
+        if (orgSpecs.length > 0) {
+          generated = {
+            ...generated,
+            services: reconcileHospitalServicesWithSpecialties(orgSpecs, generated.services, orgDoc?.address?.city),
+            departments: reconcileHospitalDepartmentsWithSpecialties(orgSpecs, generated.departments, orgDoc?.address?.city),
+          };
+        }
       } else if (targetType === AiTargetType.HOSPITAL_DOCTOR) {
         generated = await geminiService.generateHospitalDoctor(sourceData, {
           name: orgDoc?.name || "Hospital",
@@ -241,53 +406,198 @@ export class AIContentService {
     }
   }
 
+  public async checkAiRegenerateEnabled(
+    targetType: string,
+    targetId: string | mongoose.Types.ObjectId
+  ): Promise<boolean> {
+    const objectId = await this.resolveObjectId(targetType, targetId);
+    if (targetType === AiTargetType.HOSPITAL) {
+      const org = await Organization.findById(objectId).select("isAiRegenerateEnabled").lean();
+      return org?.isAiRegenerateEnabled === true;
+    }
+
+    const doc = await Doctor.findById(objectId)
+      .select("isAiRegenerateEnabled organizationId")
+      .lean();
+    if (!doc || doc.isAiRegenerateEnabled !== true) {
+      return false;
+    }
+    if (doc.organizationId) {
+      const parentOrg = await Organization.findById(doc.organizationId)
+        .select("isAiRegenerateEnabled")
+        .lean();
+      if (!parentOrg || parentOrg.isAiRegenerateEnabled !== true) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  public getRegenerationQuota(record: IAIContent): {
+    dailyLimit: number;
+    usedToday: number;
+    remainingToday: number;
+  } {
+    const dailyLimit = 5;
+    const cutoff = Date.now() - 24 * 60 * 60 * 1000;
+    const recent = (record.regenerationTimestamps || []).filter(
+      (d) => new Date(d).getTime() > cutoff
+    );
+    return {
+      dailyLimit,
+      usedToday: recent.length,
+      remainingToday: Math.max(0, dailyLimit - recent.length),
+    };
+  }
+
+  private clampRegeneratedSection(
+    targetType: string,
+    section: string,
+    value: any,
+    hospitalSpecialties?: string[],
+    city?: string
+  ): any {
+    const clampStr = (s: unknown, max: number) =>
+      typeof s === "string" ? s.trim().slice(0, max) : "";
+
+    if (section === "tagline") return clampStr(value, 150);
+    if (section === "shortIntro") return clampStr(value, 350);
+    if (section === "hospitalIntro" || section === "professionalIntro") return clampStr(value, 500);
+    if (section === "about") return clampStr(value, 1500);
+    if (section === "clinicDescription" || section === "expertiseSummary") return clampStr(value, 600);
+    if (section === "seoTitle") return clampStr(value, 70);
+    if (section === "seoDescription") return clampStr(value, 160);
+    if (section === "services" && Array.isArray(value)) {
+      if (targetType === AiTargetType.HOSPITAL && Array.isArray(hospitalSpecialties) && hospitalSpecialties.length > 0) {
+        return reconcileHospitalServicesWithSpecialties(
+          hospitalSpecialties,
+          value.map((item: any) => ({
+            title: clampStr(item?.title, 100),
+            description: clampStr(item?.description, 120),
+          })),
+          city
+        );
+      }
+      const maxItems = targetType === AiTargetType.HOSPITAL ? 60 : 12;
+      return value.slice(0, maxItems).map((item: any) => ({
+        title: clampStr(item?.title, 45),
+        description: clampStr(item?.description, 120),
+      }));
+    }
+    if (section === "departments" && Array.isArray(value) && targetType === AiTargetType.HOSPITAL && Array.isArray(hospitalSpecialties) && hospitalSpecialties.length > 0) {
+      return reconcileHospitalDepartmentsWithSpecialties(hospitalSpecialties, value, city);
+    }
+    if (section === "faqs" && Array.isArray(value)) {
+      return value.slice(0, 10).map((item: any) => ({
+        question: clampStr(item?.question, 200),
+        answer: clampStr(item?.answer, 600),
+      }));
+    }
+    return value;
+  }
+
   /**
-   * Regenerates a single section without altering approved/published parts
+   * Regenerates a single section using entity registration data, enforcing Superadmin permission,
+   * daily quota (5/day), 10s cooldown, and strict character/item limits.
    */
   public async regenerateSection(
     targetType: string,
     targetId: string | mongoose.Types.ObjectId,
     section: string,
     user?: AuthUserPayload
-  ): Promise<IAIContent> {
+  ): Promise<{
+    record: IAIContent;
+    regeneratedValue: any;
+    section: string;
+    remainingToday: number;
+    dailyLimit: number;
+  }> {
+    const isEnabled = await this.checkAiRegenerateEnabled(targetType, targetId);
+    if (!isEnabled) {
+      const err: any = new Error(
+        "AI Content Regeneration is currently disabled by Superadmin for this website."
+      );
+      err.status = 403;
+      throw err;
+    }
+
     const record = await this.getOrCreateRecord(targetType, targetId);
 
-    if (!record.draftContent) {
-      throw new Error("Cannot regenerate section: No active draft exists. Please generate a full draft first.");
+    const nowMs = Date.now();
+    const cutoff = nowMs - 24 * 60 * 60 * 1000;
+    const recentTimestamps = (record.regenerationTimestamps || []).filter(
+      (d) => new Date(d).getTime() > cutoff
+    );
+
+    const DAILY_LIMIT = 5;
+    if (recentTimestamps.length >= DAILY_LIMIT) {
+      const err: any = new Error(
+        `Daily AI regeneration limit (${DAILY_LIMIT}/day) reached for this website. Please try again after 24 hours.`
+      );
+      err.status = 429;
+      throw err;
+    }
+
+    const latestTs =
+      recentTimestamps.length > 0
+        ? Math.max(...recentTimestamps.map((d) => new Date(d).getTime()))
+        : 0;
+    if (latestTs && nowMs - latestTs < 10000) {
+      const err: any = new Error(
+        "Please wait a few seconds before regenerating another section."
+      );
+      err.status = 429;
+      throw err;
     }
 
     if (record.status === AiContentStatus.GENERATING) {
-      throw new Error("Generation is currently in progress for this entity");
+      const err: any = new Error("Generation is currently in progress for this entity");
+      err.status = 409;
+      throw err;
     }
+
+    const baseContent =
+      record.publishedContent ||
+      record.approvedContent ||
+      record.draftContent ||
+      (await this.buildDefaultContent(targetType, record.targetId));
 
     const previousStatus = record.status;
     record.status = AiContentStatus.GENERATING;
     await record.save();
 
     try {
-      const { sourceData } = await this.gatherSourceData(targetType, targetId);
-      const regeneratedValue = await geminiService.regenerateSection(
+      const { sourceData, orgDoc } = await this.gatherSourceData(targetType, targetId);
+      const rawRegenerated = await geminiService.regenerateSection(
         targetType,
         section,
         sourceData,
-        record.draftContent
+        baseContent
+      );
+      const hospitalSpecialties =
+        targetType === AiTargetType.HOSPITAL ? resolveOrganizationSpecialties(orgDoc) : undefined;
+      const regeneratedValue = this.clampRegeneratedSection(
+        targetType,
+        section,
+        rawRegenerated,
+        hospitalSpecialties,
+        orgDoc?.address?.city
       );
 
-      // Mutate draftContent
       const updatedDraft = {
-        ...record.draftContent,
+        ...baseContent,
         [section]: regeneratedValue,
       };
 
       record.draftContent = updatedDraft;
       record.version += 1;
-      // Revert status to DRAFT so doctor/admin must review new section
-      record.status = AiContentStatus.DRAFT;
+      record.status = previousStatus === AiContentStatus.PUBLISHED ? AiContentStatus.PUBLISHED : AiContentStatus.DRAFT;
       record.lastError = null;
+      record.regenerationTimestamps = [...recentTimestamps, new Date(nowMs)];
 
       record.history.push({
         version: record.version,
-        status: AiContentStatus.DRAFT,
+        status: record.status,
         content: updatedDraft,
         sectionRegenerated: section,
         actorId: toSafeObjectId(user?.userId),
@@ -297,7 +607,13 @@ export class AIContentService {
       });
 
       await record.save();
-      return record;
+      return {
+        record,
+        regeneratedValue,
+        section,
+        remainingToday: Math.max(0, DAILY_LIMIT - record.regenerationTimestamps.length),
+        dailyLimit: DAILY_LIMIT,
+      };
     } catch (err: any) {
       record.status = previousStatus;
       record.lastError = err?.message || `Failed to regenerate section "${section}"`;
@@ -321,7 +637,29 @@ export class AIContentService {
       throw new Error("No draft content exists to approve");
     }
 
-    const contentToApprove = editedContent || record.draftContent;
+    const contentToApprove: Record<string, any> = {
+      ...(editedContent || record.draftContent || {}),
+    };
+
+    if (targetType === AiTargetType.HOSPITAL) {
+      const objectId = await this.resolveObjectId(targetType, targetId);
+      const org = await Organization.findById(objectId).select("specialties departments address").lean();
+      const orgSpecs = resolveOrganizationSpecialties(org);
+      if (orgSpecs.length > 0) {
+        const svcs = Array.isArray(contentToApprove.services) ? contentToApprove.services : [];
+        if (svcs.length !== orgSpecs.length) {
+          throw new Error(
+            `Hospital services count (${svcs.length}) must match selected Specialties (${orgSpecs.length}). Add or remove items only in the Specialties section.`
+          );
+        }
+        contentToApprove.services = reconcileHospitalServicesWithSpecialties(orgSpecs, svcs, org?.address?.city);
+        contentToApprove.departments = reconcileHospitalDepartmentsWithSpecialties(
+          orgSpecs,
+          Array.isArray(contentToApprove.departments) ? contentToApprove.departments : [],
+          org?.address?.city
+        );
+      }
+    }
 
     // Validate full structure
     const validation = validateFullContent(targetType, contentToApprove);
@@ -533,22 +871,15 @@ export class AIContentService {
 
       if (targetType === AiTargetType.HOSPITAL) {
         const hospitalName = orgDoc?.name || "Hospital & Healthcare Center";
+        const orgSpecs = resolveOrganizationSpecialties(orgDoc);
+        const effectiveSpecs = orgSpecs.length > 0 ? orgSpecs : ["General Medicine"];
         return {
           heroBadge: "Multi-Specialty Healthcare",
           tagline: `Advanced Medical Care & Compassionate Healing at ${hospitalName}`,
           about: orgDoc?.about || `${hospitalName} is a premier healthcare institution in ${city}, providing comprehensive clinical services with modern medical infrastructure and experienced specialists.`,
           hospitalIntro: `${hospitalName} delivers round-the-clock emergency care, advanced diagnostics, and multi-specialty clinical excellence.`,
-          departments: [
-            { name: "Outpatient Department (OPD)", description: "Daily consultations with senior medical specialists across multiple disciplines." },
-            { name: "Emergency & Critical Care", description: "24/7 dedicated emergency unit equipped with life support and trauma stabilization facilities." },
-            { name: "Diagnostic & Imaging", description: "Modern clinical laboratories, digital radiology, ultrasound, and pathology testing." },
-          ],
-          services: [
-            { title: "In-Patient & Surgical Care", description: "State-of-the-art operative rooms, intensive care units, and comfortable post-operative patient wards." },
-            { title: "Outpatient Specialist Consultations", description: "Consultations across cardiology, orthopedics, general surgery, pediatrics, and more." },
-            { title: "24/7 Pharmacy & Emergency Response", description: "Round-the-clock emergency medical response and in-house pharmacy service." },
-            { title: "Diagnostic & Laboratory Testing", description: "Fast, accurate diagnostic pathology, imaging, and routine health checkups." },
-          ],
+          departments: reconcileHospitalDepartmentsWithSpecialties(effectiveSpecs, [], city),
+          services: reconcileHospitalServicesWithSpecialties(effectiveSpecs, [], city),
           faqs: [
             { question: "Is the emergency department open 24 hours?", answer: "Yes, our emergency and critical care departments operate 24 hours a day, 7 days a week." },
             { question: "How do I schedule an outpatient consultation?", answer: "You can book appointments through our website directory or by calling our hospital helpline." },
@@ -605,9 +936,31 @@ export class AIContentService {
     const objectId = await this.resolveObjectId(targetType, targetId);
     let record = await this.getOrCreateRecord(targetType, targetId);
 
-    record.draftContent = content;
-    record.approvedContent = content;
-    record.publishedContent = content;
+    const nextContent = { ...content };
+    sanitizeAndValidateWebsiteLayoutConfig(targetType, nextContent);
+
+    if (targetType === AiTargetType.HOSPITAL) {
+      const org = await Organization.findById(objectId).select("specialties departments address").lean();
+      const orgSpecs = resolveOrganizationSpecialties(org);
+      if (orgSpecs.length > 0) {
+        const incomingSvcs = Array.isArray(nextContent.services) ? nextContent.services : [];
+        if (incomingSvcs.length !== orgSpecs.length) {
+          throw new Error(
+            `Hospital services count (${incomingSvcs.length}) cannot differ from selected Specialties (${orgSpecs.length}). Add or remove specialties only in the Specialties section.`
+          );
+        }
+        nextContent.services = reconcileHospitalServicesWithSpecialties(orgSpecs, incomingSvcs, org?.address?.city);
+        nextContent.departments = reconcileHospitalDepartmentsWithSpecialties(
+          orgSpecs,
+          Array.isArray(nextContent.departments) ? nextContent.departments : [],
+          org?.address?.city
+        );
+      }
+    }
+
+    record.draftContent = nextContent;
+    record.approvedContent = nextContent;
+    record.publishedContent = nextContent;
     record.status = AiContentStatus.PUBLISHED;
     record.version += 1;
     record.reviewedBy = toSafeObjectId(user?.userId);
@@ -616,7 +969,7 @@ export class AIContentService {
     record.history.push({
       version: record.version,
       status: AiContentStatus.PUBLISHED,
-      content,
+      content: nextContent,
       actorId: toSafeObjectId(user?.userId),
       actorRole: user?.role,
       action: "MANUAL_EDIT",
@@ -629,7 +982,7 @@ export class AIContentService {
     if (targetType === AiTargetType.ONLY_DOCTOR || targetType === "INDEPENDENT_DOCTOR") {
       const doctor = await Doctor.findById(objectId);
       if (doctor) {
-        if (content.about) doctor.bio = content.about;
+        if (nextContent.about) doctor.bio = nextContent.about;
         await doctor.save();
       }
 
@@ -639,8 +992,8 @@ export class AIContentService {
       if (website) {
         website.seoMetadata = {
           ...website.seoMetadata,
-          title: content.seoTitle || website.seoMetadata?.title,
-          description: content.seoDescription || website.seoMetadata?.description,
+          title: nextContent.seoTitle || website.seoMetadata?.title,
+          description: nextContent.seoDescription || website.seoMetadata?.description,
         };
         website.aiContentStatus = "APPROVED";
         await website.save();
@@ -648,7 +1001,7 @@ export class AIContentService {
     } else if (targetType === AiTargetType.HOSPITAL) {
       const org = await Organization.findById(objectId);
       if (org) {
-        if (content.about) org.about = content.about;
+        if (nextContent.about) org.about = nextContent.about;
         await org.save();
       }
 
@@ -658,8 +1011,8 @@ export class AIContentService {
       if (website) {
         website.seoMetadata = {
           ...website.seoMetadata,
-          title: content.seoTitle || website.seoMetadata?.title,
-          description: content.seoDescription || website.seoMetadata?.description,
+          title: nextContent.seoTitle || website.seoMetadata?.title,
+          description: nextContent.seoDescription || website.seoMetadata?.description,
         };
         website.aiContentStatus = "APPROVED";
         await website.save();
@@ -667,7 +1020,7 @@ export class AIContentService {
     } else if (targetType === AiTargetType.HOSPITAL_DOCTOR) {
       const doctor = await Doctor.findById(objectId);
       if (doctor) {
-        if (content.about) doctor.bio = content.about;
+        if (nextContent.about) doctor.bio = nextContent.about;
         await doctor.save();
       }
     }

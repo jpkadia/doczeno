@@ -66,3 +66,137 @@ export const SECTION_META = {
     contactTitle: "Contact Reception",
   },
 };
+
+export type ReorderableSectionId =
+  | "services"
+  | "doctors"
+  | "facility"
+  | "reviews"
+  | "timings"
+  | "faqs"
+  | "custom";
+
+export type CustomSectionLayout = "cards" | "narrative" | "highlights";
+
+export interface CustomSectionCard {
+  title: string;
+  description: string;
+}
+
+export interface CustomSectionPoint {
+  heading: string;
+  detail: string;
+}
+
+export interface CustomSectionConfig {
+  enabled: boolean;
+  navLabel?: string;
+  badge?: string;
+  title: string;
+  subtitle?: string;
+  layout: CustomSectionLayout;
+  cards: CustomSectionCard[];
+  paragraph: string;
+  points: CustomSectionPoint[];
+}
+
+export const LOCKED_SECTION_IDS = ["home", "about", "footer"] as const;
+
+export const DOCTOR_DEFAULT_SECTION_ORDER: readonly ReorderableSectionId[] = [
+  "services",
+  "facility",
+  "reviews",
+  "timings",
+  "faqs",
+  "custom",
+];
+
+export const HOSPITAL_DEFAULT_SECTION_ORDER: readonly ReorderableSectionId[] = [
+  "services",
+  "doctors",
+  "facility",
+  "reviews",
+  "timings",
+  "faqs",
+];
+
+export function resolveNormalizedSectionOrder(
+  isHospital: boolean,
+  rawOrder?: unknown
+): ReorderableSectionId[] {
+  const defaults = isHospital ? HOSPITAL_DEFAULT_SECTION_ORDER : DOCTOR_DEFAULT_SECTION_ORDER;
+  const allowed = new Set<string>(defaults);
+  const result: ReorderableSectionId[] = [];
+  const seen = new Set<string>();
+
+  if (Array.isArray(rawOrder)) {
+    for (const entry of rawOrder) {
+      const id = String(entry || "").trim();
+      if (allowed.has(id) && !seen.has(id)) {
+        seen.add(id);
+        result.push(id as ReorderableSectionId);
+      }
+    }
+  }
+
+  for (const id of defaults) {
+    if (!seen.has(id)) {
+      result.push(id);
+    }
+  }
+  return result;
+}
+
+export function resolveNormalizedHiddenSections(
+  isHospital: boolean,
+  rawHidden?: unknown
+): ReorderableSectionId[] {
+  const defaults = isHospital ? HOSPITAL_DEFAULT_SECTION_ORDER : DOCTOR_DEFAULT_SECTION_ORDER;
+  const allowed = new Set<string>(defaults);
+  const result: ReorderableSectionId[] = [];
+  const seen = new Set<string>();
+
+  if (Array.isArray(rawHidden)) {
+    for (const entry of rawHidden) {
+      const id = String(entry || "").trim();
+      if (allowed.has(id) && !seen.has(id)) {
+        seen.add(id);
+        result.push(id as ReorderableSectionId);
+      }
+    }
+  }
+  return result;
+}
+
+export function createDefaultCustomSection(): CustomSectionConfig {
+  return {
+    enabled: true,
+    navLabel: "Highlights",
+    badge: "Patient Focus",
+    title: "Why Patients Trust Our Care",
+    subtitle: "Transparent treatment guidance, individualized attention, and dedicated follow-up care.",
+    layout: "cards",
+    cards: [
+      {
+        title: "Evidence-Based Treatment",
+        description: "Accurate clinical evaluation paired with clear, modern medical protocols.",
+      },
+      {
+        title: "Personalized Care Plans",
+        description: "Every patient receives clear explanations and tailored recovery steps.",
+      },
+    ],
+    paragraph:
+      "Our clinical practice is built around listening carefully, explaining every step of diagnosis in plain language, and guiding patients toward safe, lasting recovery.",
+    points: [
+      {
+        heading: "Thorough Clinical Evaluation",
+        detail: "Dedicated consultation time to review symptoms, reports, and medical history.",
+      },
+      {
+        heading: "Structured Follow-Up Guidance",
+        detail: "Clear recovery milestones so you always know what to expect next.",
+      },
+    ],
+  };
+}

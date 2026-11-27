@@ -67,11 +67,16 @@ export function SuperadminClient({
             router.replace("/superadmin/login");
           }
         }
-      } catch {
+      } catch (err: unknown) {
+        const code = (err as { data?: { code?: string } })?.data?.code;
+        const redirectDest =
+          code === "SESSION_INACTIVITY_EXPIRED"
+            ? "/superadmin/login?reason=inactivity"
+            : "/superadmin/login";
         if (typeof window !== "undefined") {
-          window.location.replace("/superadmin/login");
+          window.location.replace(redirectDest);
         } else {
-          router.replace("/superadmin/login");
+          router.replace(redirectDest);
         }
       } finally {
         setIsCheckingAuth(false);
@@ -141,6 +146,11 @@ export function SuperadminClient({
               type: o.type,
               status: o.status,
               address: { city: o.address?.city || "", state: o.address?.state || "" },
+              isWebsiteChatbotEnabled: o.isWebsiteChatbotEnabled !== false,
+              isAdminChatbotEnabled: o.isAdminChatbotEnabled !== false,
+              isChatbotBookingEnabled: o.isChatbotBookingEnabled !== false,
+              isAiRegenerateEnabled: Boolean(o.isAiRegenerateEnabled),
+              isVisibleInDoctorOnboarding: o.isVisibleInDoctorOnboarding !== false,
               createdAt: o.createdAt || new Date().toISOString(),
             }))
           );
@@ -154,7 +164,12 @@ export function SuperadminClient({
               specialization: d.specialization,
               yearsOfExperience: d.yearsOfExperience || 0,
               status: d.status,
+              deactivatedByRole: d.deactivatedByRole || null,
               organizationId: d.organizationId ? { id: d.organizationId._id || d.organizationId.id, name: d.organizationId.name, slug: d.organizationId.slug } : null,
+              isWebsiteChatbotEnabled: d.isWebsiteChatbotEnabled !== false,
+              isAdminChatbotEnabled: d.isAdminChatbotEnabled !== false,
+              isChatbotBookingEnabled: d.isChatbotBookingEnabled !== false,
+              isAiRegenerateEnabled: Boolean(d.isAiRegenerateEnabled),
               createdAt: d.createdAt || new Date().toISOString(),
             }))
           );

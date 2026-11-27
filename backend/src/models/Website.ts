@@ -10,6 +10,7 @@ export interface IWebsite extends Document {
   slug: string;
   templateId: string;
   publishStatus: "DRAFT" | "GENERATING" | "REVIEW" | "PUBLISHED" | "SUSPENDED";
+  deactivatedByRole?: "SUPERADMIN" | "HOSPITAL_ADMIN" | null;
   seoMetadata: {
     title?: string;
     description?: string;
@@ -18,6 +19,17 @@ export interface IWebsite extends Document {
   };
   aiContentStatus: "NONE" | "PENDING" | "APPROVED";
   customDomain?: string;
+  customDomainStatus?: "NONE" | "PENDING" | "VERIFIED" | "FAILED";
+  customDomainRedirect?: boolean;
+  customDomainVerification?: Array<{
+    type: string;
+    domain: string;
+    value: string;
+    reason?: string;
+  }>;
+  customDomainVerifiedAt?: Date | null;
+  customDomainLastCheckedAt?: Date | null;
+  customDomainLastError?: string | null;
   faviconUrl?: string;
   browserTabTitle?: string;
   createdAt: Date;
@@ -73,6 +85,11 @@ const WebsiteSchema = new Schema<IWebsite>(
       default: "DRAFT",
       index: true,
     },
+    deactivatedByRole: {
+      type: String,
+      enum: ["SUPERADMIN", "HOSPITAL_ADMIN"],
+      default: null,
+    },
     seoMetadata: {
       title: { type: String, trim: true },
       description: { type: String, trim: true },
@@ -88,7 +105,38 @@ const WebsiteSchema = new Schema<IWebsite>(
       type: String,
       sparse: true,
       unique: true,
+      lowercase: true,
       trim: true,
+    },
+    customDomainStatus: {
+      type: String,
+      enum: ["NONE", "PENDING", "VERIFIED", "FAILED"],
+      default: "NONE",
+      index: true,
+    },
+    customDomainRedirect: {
+      type: Boolean,
+      default: true,
+    },
+    customDomainVerification: [
+      {
+        type: { type: String },
+        domain: { type: String },
+        value: { type: String },
+        reason: { type: String },
+      },
+    ],
+    customDomainVerifiedAt: {
+      type: Date,
+      default: null,
+    },
+    customDomainLastCheckedAt: {
+      type: Date,
+      default: null,
+    },
+    customDomainLastError: {
+      type: String,
+      default: null,
     },
     faviconUrl: {
       type: String,

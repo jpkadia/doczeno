@@ -108,7 +108,7 @@ export const doctorUpdateSchema = doctorCreateSchema.partial();
 
 export const appointmentCreateSchema = z.object({
   organizationId: z.string().nullable().optional(),
-  doctorId: z.string().min(1, "Doctor ID is required"),
+  doctorId: z.string().optional(),
   patientName: z.string().min(2, "Patient name is required"),
   patientAge: z.coerce.number().min(1, "Patient age is required").max(120, "Please enter a valid age"),
   patientPhone: z.string().min(5, "Patient phone is required"),
@@ -116,4 +116,5 @@ export const appointmentCreateSchema = z.object({
   appointmentDate: z.coerce.date(),
   timeSlot: z.string().min(1, "Time slot is required"),
   notes: z.string().min(2, "Patient medical concern / reason for visit is required"),
+  source: z.string().optional(),
 });

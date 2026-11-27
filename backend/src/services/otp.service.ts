@@ -9,7 +9,7 @@ export class OtpService {
   static async generateAndSendOtp(params: {
     email: string;
     name?: string;
-    purpose?: "ONBOARDING" | "PASSWORD_RESET";
+    purpose?: "ONBOARDING" | "PASSWORD_RESET" | "EMAIL_CHANGE";
   }): Promise<{ success: boolean; message: string }> {
     const email = params.email.trim().toLowerCase();
     const purpose = params.purpose || "ONBOARDING";
@@ -36,7 +36,12 @@ export class OtpService {
       toEmail: email,
       toName: params.name,
       otp,
-      purpose: purpose === "ONBOARDING" ? "website creation" : "password reset",
+      purpose:
+        purpose === "ONBOARDING"
+          ? "website creation"
+          : purpose === "PASSWORD_RESET"
+          ? "password reset"
+          : "admin email change",
     });
 
     return {
@@ -51,7 +56,7 @@ export class OtpService {
   static async verifyOtp(params: {
     email: string;
     otp: string;
-    purpose?: "ONBOARDING" | "PASSWORD_RESET";
+    purpose?: "ONBOARDING" | "PASSWORD_RESET" | "EMAIL_CHANGE";
   }): Promise<{ valid: boolean }> {
     const email = params.email.trim().toLowerCase();
     const purpose = params.purpose || "ONBOARDING";

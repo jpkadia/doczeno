@@ -13,6 +13,8 @@ export default async function SuperadminPage() {
     totalOrganizations: 0,
     totalDoctors: 0,
     totalWebsites: 0,
+    activeWebsitesCount: 0,
+    deactiveWebsitesCount: 0,
     totalUsers: 0,
     totalAppointments: 0,
     pendingAppointments: 0,

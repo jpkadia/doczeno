@@ -18,12 +18,77 @@ export class ApiError extends Error {
 export interface RequestOptions extends Omit<RequestInit, "body"> {
   body?: unknown;
   params?: Record<string, string | number | boolean | undefined>;
+  responseType?: "json" | "blob" | "text";
 }
 
 const API_BASE_URL =
   process.env.NEXT_PUBLIC_API_URL || "http://localhost:5000/api/v1";
 
+const BACKEND_ROOT_URL = API_BASE_URL.replace(/\/api\/v1\/?$/, "");
+let lastWarmUpAt = 0;
+
+/**
+ * Silently pings /api/health when chat panels open so cold Render instances wake up
+ * before the user finishes typing their first message.
+ */
+export function warmUpBackend(): void {
+  if (typeof window === "undefined") return;
+  const now = Date.now();
+  if (now - lastWarmUpAt < 60_000) return;
+  lastWarmUpAt = now;
+  try {
+    void fetch(`${BACKEND_ROOT_URL}/api/health`, {
+      method: "GET",
+      mode: "cors",
+      keepalive: true,
+    }).catch(() => {
+      // Silent best-effort warm-up
+    });
+  } catch {
+    // Ignore synchronous fetch issues
+  }
+}
+
 const AUTH_TOKEN_KEY = "doczeno_auth_token";
+const LAST_ACTIVITY_KEY = "doczeno_last_activity_at";
+
+export function clearClientAuthState(): void {
+  if (typeof window === "undefined") return;
+  try {
+    localStorage.removeItem(AUTH_TOKEN_KEY);
+    localStorage.removeItem(LAST_ACTIVITY_KEY);
+    document.cookie = "doczeno_session=; path=/; max-age=0; SameSite=Lax";
+    document.cookie = "doczeno_session=; path=/; max-age=0; SameSite=Lax; Secure";
+  } catch {}
+}
+
+function resolveAdminLoginRedirect(pathname: string, isInactivity: boolean): string | null {
+  if (!pathname || pathname.endsWith("/login")) return null;
+  const suffix = isInactivity ? "?reason=inactivity" : "";
+
+  if (pathname.startsWith("/superadmin")) {
+    return `/superadmin/login${suffix}`;
+  }
+
+  // Dual-slug hospital doctor admin: /<orgSlug>/<doctorSlug>/admin
+  const dualAdminMatch = pathname.match(/^\/([^/]+)\/([^/]+)\/admin(?:\/.*)?$/);
+  if (dualAdminMatch) {
+    return `/${dualAdminMatch[1]}/${dualAdminMatch[2]}/admin/login${suffix}`;
+  }
+
+  // Single-slug doctor or hospital admin: /<slug>/admin
+  const singleAdminMatch = pathname.match(/^\/([^/]+)\/admin(?:\/.*)?$/);
+  if (singleAdminMatch) {
+    return `/${singleAdminMatch[1]}/admin/login${suffix}`;
+  }
+
+  // Custom domain admin: /admin
+  if (pathname === "/admin" || pathname.startsWith("/admin/")) {
+    return `/admin/login${suffix}`;
+  }
+
+  return null;
+}
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -124,22 +189,30 @@ async function request<T>(
       }
 
       if (
-        (response.status === 401 || response.status === 403) &&
-        typeof window !== "undefined"
+        response.status === 401 &&
+        typeof window !== "undefined" &&
+        !endpoint.includes("/auth/login") &&
+        !endpoint.includes("/auth/logout")
       ) {
-        // Clear saved token and session cookie on 401
-        try {
-          localStorage.removeItem(AUTH_TOKEN_KEY);
-          document.cookie = "doczeno_session=; path=/; max-age=0; SameSite=Lax; Secure";
-        } catch {}
+        clearClientAuthState();
 
-        if (
-          window.location.pathname.startsWith("/superadmin") &&
-          !window.location.pathname.startsWith("/superadmin/login")
-        ) {
-          window.location.replace("/superadmin/login");
-          // Return pending promise during navigation to prevent Next.js dev overlay from throwing
-          return new Promise(() => {}) as unknown as T;
+        const errorCode =
+          errorData && typeof errorData === "object"
+            ? (errorData as Record<string, unknown>).code
+            : undefined;
+        const isInactivity = errorCode === "SESSION_INACTIVITY_EXPIRED";
+
+        // Let /auth/me callers on login/guard handle their own redirect flags cleanly;
+        // redirect immediately for any authenticated admin API call that gets 401.
+        if (!endpoint.includes("/auth/me")) {
+          const redirectUrl = resolveAdminLoginRedirect(
+            window.location.pathname,
+            isInactivity
+          );
+          if (redirectUrl) {
+            window.location.replace(redirectUrl);
+            return new Promise(() => {}) as unknown as T;
+          }
         }
       }
 
@@ -148,6 +221,16 @@ async function request<T>(
 
     if (response.status === 204) {
       return {} as T;
+    }
+
+    if (options.responseType === "blob") {
+      const blob = await response.blob();
+      return blob as unknown as T;
+    }
+
+    if (options.responseType === "text") {
+      const text = await response.text();
+      return text as unknown as T;
     }
 
     const data = (await response.json()) as T;
@@ -162,16 +245,14 @@ async function request<T>(
       if (token) {
         try {
           localStorage.setItem(AUTH_TOKEN_KEY, token);
+          localStorage.setItem(LAST_ACTIVITY_KEY, String(Date.now()));
           document.cookie = `doczeno_session=${token}; path=/; max-age=${7 * 24 * 60 * 60}; SameSite=Lax; Secure`;
         } catch {}
       }
 
       // If logging out, remove token and clear session cookie
       if (endpoint.includes("/auth/logout")) {
-        try {
-          localStorage.removeItem(AUTH_TOKEN_KEY);
-          document.cookie = "doczeno_session=; path=/; max-age=0; SameSite=Lax; Secure";
-        } catch {}
+        clearClientAuthState();
       }
     }
 
@@ -183,7 +264,7 @@ async function request<T>(
 
     // Auto-retry network failures caused by Render cold start wake-up
     if (retryCount < 2) {
-      await sleep(2500);
+      await sleep(1200);
       return request<T>(endpoint, options, retryCount + 1);
     }
 
@@ -208,6 +289,10 @@ async function request<T>(
 export const apiClient = {
   get<T>(endpoint: string, options?: RequestOptions): Promise<T> {
     return request<T>(endpoint, { ...options, method: "GET" });
+  },
+
+  getBlob(endpoint: string, options?: RequestOptions): Promise<Blob> {
+    return request<Blob>(endpoint, { ...options, method: "GET", responseType: "blob" });
   },
 
   post<T>(endpoint: string, body?: unknown, options?: RequestOptions): Promise<T> {

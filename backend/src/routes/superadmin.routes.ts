@@ -8,6 +8,8 @@ import { logAuditEvent } from "@/services/audit.service";
 import { PlatformConfigService } from "@/services/platform-config.service";
 import { GeminiLoggerService } from "@/services/gemini-logger.service";
 import { MediaService } from "@/services/media.service";
+import { StaticExportService } from "@/services/static-export.service";
+import { CustomDomainService, MAX_CUSTOM_DOMAINS, buildDnsInstructions } from "@/services/custom-domain.service";
 
 export const superadminRouter = Router();
 
@@ -25,6 +27,8 @@ superadminRouter.get("/stats", async (_req: Request, res: Response, next: NextFu
       totalOrganizations,
       totalDoctors,
       totalWebsites,
+      activeWebsitesCount,
+      deactiveWebsitesCount,
       totalUsers,
       totalAppointments,
       pendingAppointments,
@@ -33,6 +37,8 @@ superadminRouter.get("/stats", async (_req: Request, res: Response, next: NextFu
       Organization.countDocuments(),
       Doctor.countDocuments(),
       Website.countDocuments(),
+      Website.countDocuments({ publishStatus: "PUBLISHED" }),
+      Website.countDocuments({ publishStatus: { $ne: "PUBLISHED" } }),
       User.countDocuments({ role: { $ne: UserRole.SUPERADMIN } }),
       Appointment.countDocuments(),
       Appointment.countDocuments({ status: "PENDING" }),
@@ -45,6 +51,8 @@ superadminRouter.get("/stats", async (_req: Request, res: Response, next: NextFu
         totalOrganizations,
         totalDoctors,
         totalWebsites,
+        activeWebsitesCount,
+        deactiveWebsitesCount,
         totalUsers,
         totalAppointments,
         pendingAppointments,
@@ -127,15 +135,47 @@ superadminRouter.patch("/organizations/:id/status", async (req: Request, res: Re
       return;
     }
 
+    const isActivating = status === "ACTIVE";
     org.status = status;
     await org.save();
 
-    // Cascading effect: when deactivating or suspending hospital, cascade update affiliated doctors
-    if (status !== "ACTIVE") {
-      await Doctor.updateMany({ organizationId: org._id }, { $set: { status: "INACTIVE" } });
+    // Cascading effect: sync Hospital website, all connected approved Doctors, and their Websites
+    if (!isActivating) {
+      await Promise.all([
+        Doctor.updateMany(
+          { organizationId: org._id },
+          { $set: { status: "INACTIVE", deactivatedByRole: "SUPERADMIN" } }
+        ),
+        Website.updateMany(
+          { $or: [{ organizationId: org._id }, { ownerId: org._id }] },
+          { $set: { publishStatus: "SUSPENDED", deactivatedByRole: "SUPERADMIN" } }
+        ),
+      ]);
     } else {
-      // Re-activating hospital: allow affiliated records to be active
-      await Doctor.updateMany({ organizationId: org._id }, { $set: { status: "ACTIVE" } });
+      const approvedDocs = await Doctor.find({
+        organizationId: org._id,
+        approvalStatus: { $nin: ["PENDING", "REJECTED"] },
+      })
+        .select("_id")
+        .lean();
+      const approvedDocIds = approvedDocs.map((d) => d._id);
+
+      await Promise.all([
+        Doctor.updateMany(
+          { _id: { $in: approvedDocIds } },
+          { $set: { status: "ACTIVE", deactivatedByRole: null } }
+        ),
+        Website.updateMany(
+          {
+            $or: [
+              { organizationId: org._id, websiteType: "HOSPITAL_CLINIC" },
+              { ownerId: org._id, websiteType: "HOSPITAL_CLINIC" },
+              ...(approvedDocIds.length > 0 ? [{ doctorId: { $in: approvedDocIds } }] : []),
+            ],
+          },
+          { $set: { publishStatus: "PUBLISHED", deactivatedByRole: null } }
+        ),
+      ]);
     }
 
     await logAuditEvent({
@@ -153,6 +193,193 @@ superadminRouter.patch("/organizations/:id/status", async (req: Request, res: Re
       success: true,
       message: `Organization status updated to ${status}`,
       data: { organization: org },
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * PATCH /api/v1/superadmin/organizations/:id/chatbot-settings
+ * Update website and admin chatbot enable/disable toggles
+ */
+superadminRouter.patch("/organizations/:id/chatbot-settings", async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { isWebsiteChatbotEnabled, isAdminChatbotEnabled, isChatbotBookingEnabled } = req.body;
+    let org: any = null;
+    const paramId = String(req.params.id || "");
+    if (mongoose.Types.ObjectId.isValid(paramId)) {
+      org = await Organization.findById(paramId);
+    }
+    if (!org) {
+      org = await Organization.findOne({ slug: paramId.toLowerCase() });
+    }
+    if (!org) {
+      res.status(404).json({ success: false, error: "Organization not found", code: "NOT_FOUND" });
+      return;
+    }
+
+    if (typeof isWebsiteChatbotEnabled === "boolean") {
+      org.isWebsiteChatbotEnabled = isWebsiteChatbotEnabled;
+    }
+    if (typeof isAdminChatbotEnabled === "boolean") {
+      org.isAdminChatbotEnabled = isAdminChatbotEnabled;
+    }
+    if (typeof isChatbotBookingEnabled === "boolean") {
+      org.isChatbotBookingEnabled = isChatbotBookingEnabled;
+    }
+    await org.save();
+
+    await logAuditEvent({
+      userId: req.user!.userId,
+      userEmail: req.user!.email,
+      userRole: req.user!.role,
+      action: "ORGANIZATION_CHATBOT_SETTINGS_CHANGED",
+      entityType: "Organization",
+      entityId: org._id.toString(),
+      organizationId: org._id.toString(),
+      details: {
+        isWebsiteChatbotEnabled: org.isWebsiteChatbotEnabled,
+        isAdminChatbotEnabled: org.isAdminChatbotEnabled,
+        isChatbotBookingEnabled: org.isChatbotBookingEnabled,
+        organizationName: org.name,
+      },
+    });
+
+    res.status(200).json({
+      success: true,
+      message: "Organization chatbot settings updated successfully",
+      data: {
+        id: org._id,
+        isWebsiteChatbotEnabled: org.isWebsiteChatbotEnabled,
+        isAdminChatbotEnabled: org.isAdminChatbotEnabled,
+        isChatbotBookingEnabled: org.isChatbotBookingEnabled,
+      },
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * PATCH /api/v1/superadmin/organizations/:id/ai-regenerate-settings
+ * Enable or disable AI Content Regeneration for a hospital AND cascade to its affiliated doctors.
+ */
+superadminRouter.patch("/organizations/:id/ai-regenerate-settings", async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { isAiRegenerateEnabled } = req.body;
+    if (typeof isAiRegenerateEnabled !== "boolean") {
+      res.status(400).json({
+        success: false,
+        error: "isAiRegenerateEnabled must be a boolean",
+        code: "INVALID_INPUT",
+      });
+      return;
+    }
+
+    let org: any = null;
+    const paramId = String(req.params.id || "");
+    if (mongoose.Types.ObjectId.isValid(paramId)) {
+      org = await Organization.findById(paramId);
+    }
+    if (!org) {
+      org = await Organization.findOne({ slug: paramId.toLowerCase() });
+    }
+    if (!org) {
+      res.status(404).json({ success: false, error: "Organization not found", code: "NOT_FOUND" });
+      return;
+    }
+
+    org.isAiRegenerateEnabled = isAiRegenerateEnabled;
+    await org.save();
+
+    // Cascade to all affiliated doctors in this hospital so hospital + all doctors toggle together
+    await Doctor.updateMany(
+      { organizationId: org._id },
+      { $set: { isAiRegenerateEnabled } }
+    );
+
+    await logAuditEvent({
+      userId: req.user!.userId,
+      userEmail: req.user!.email,
+      userRole: req.user!.role,
+      action: "ORGANIZATION_AI_REGENERATE_CHANGED",
+      entityType: "Organization",
+      entityId: org._id.toString(),
+      organizationId: org._id.toString(),
+      details: {
+        isAiRegenerateEnabled,
+        organizationName: org.name,
+        cascadedToDoctors: true,
+      },
+    });
+
+    res.status(200).json({
+      success: true,
+      message: `AI Content Regeneration ${isAiRegenerateEnabled ? "enabled" : "disabled"} for ${org.name} and its affiliated doctors.`,
+      data: {
+        id: org._id,
+        isAiRegenerateEnabled: org.isAiRegenerateEnabled,
+      },
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * PATCH /api/v1/superadmin/organizations/:id/doctor-onboarding-visibility
+ * Hide or unhide a hospital/clinic from the Hospital-Affiliated Doctor onboarding form
+ */
+superadminRouter.patch("/organizations/:id/doctor-onboarding-visibility", async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { isVisibleInDoctorOnboarding } = req.body;
+    if (typeof isVisibleInDoctorOnboarding !== "boolean") {
+      res.status(400).json({
+        success: false,
+        error: "isVisibleInDoctorOnboarding must be a boolean",
+        code: "INVALID_INPUT",
+      });
+      return;
+    }
+
+    let org: any = null;
+    const paramId = String(req.params.id || "");
+    if (mongoose.Types.ObjectId.isValid(paramId)) {
+      org = await Organization.findById(paramId);
+    }
+    if (!org) {
+      org = await Organization.findOne({ slug: paramId.toLowerCase() });
+    }
+    if (!org) {
+      res.status(404).json({ success: false, error: "Organization not found", code: "NOT_FOUND" });
+      return;
+    }
+
+    org.isVisibleInDoctorOnboarding = isVisibleInDoctorOnboarding;
+    await org.save();
+
+    await logAuditEvent({
+      userId: req.user!.userId,
+      userEmail: req.user!.email,
+      userRole: req.user!.role,
+      action: "ORGANIZATION_DOCTOR_ONBOARDING_VISIBILITY_CHANGED",
+      entityType: "Organization",
+      entityId: org._id.toString(),
+      organizationId: org._id.toString(),
+      details: {
+        isVisibleInDoctorOnboarding: org.isVisibleInDoctorOnboarding,
+        organizationName: org.name,
+      },
+    });
+
+    res.status(200).json({
+      success: true,
+      message: `Organization ${isVisibleInDoctorOnboarding ? "shown in" : "hidden from"} Hospital Doctor onboarding form.`,
+      data: {
+        id: org._id,
+        isVisibleInDoctorOnboarding: org.isVisibleInDoctorOnboarding,
+      },
     });
   } catch (error) {
     next(error);
@@ -216,6 +443,15 @@ superadminRouter.delete("/organizations/:id", async (req: Request, res: Response
 
     // Permanently clean up all affiliated assets
     await Doctor.deleteMany({ organizationId: orgId });
+    // Release any custom domains from Vercel Project before deleting DB records
+    const orgWebsites = await Website.find({
+      $or: [{ organizationId: orgId }, { ownerId: orgId }],
+      customDomain: { $exists: true, $nin: [null, ""] },
+    });
+    for (const w of orgWebsites) {
+      await CustomDomainService.removeCustomDomain(w).catch(() => {});
+    }
+
     await User.deleteMany({ organizationId: orgId });
     await Website.deleteMany({ $or: [{ organizationId: orgId }, { ownerId: orgId }] });
     await AIContent.deleteMany({ $or: [{ organizationId: orgId }, { targetId: orgId }] });
@@ -334,8 +570,22 @@ superadminRouter.patch("/doctors/:id/status", async (req: Request, res: Response
       return;
     }
 
-    doctor.status = status;
+    const normalizedDoctorStatus = status === "ACTIVE" ? "ACTIVE" : "INACTIVE";
+    const deactivatedByRole = normalizedDoctorStatus === "ACTIVE" ? null : "SUPERADMIN";
+
+    doctor.status = normalizedDoctorStatus;
+    doctor.deactivatedByRole = deactivatedByRole;
     await doctor.save();
+
+    await Website.updateMany(
+      { doctorId: doctor._id },
+      {
+        $set: {
+          publishStatus: normalizedDoctorStatus === "ACTIVE" ? "PUBLISHED" : "SUSPENDED",
+          deactivatedByRole,
+        },
+      }
+    );
 
     await logAuditEvent({
       userId: req.user!.userId,
@@ -353,6 +603,182 @@ superadminRouter.patch("/doctors/:id/status", async (req: Request, res: Response
       success: true,
       message: `Doctor status updated to ${status}`,
       data: { doctor },
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * PATCH /api/v1/superadmin/doctors/:id/chatbot-settings
+ * Update website and admin chatbot enable/disable toggles
+ */
+superadminRouter.patch("/doctors/:id/chatbot-settings", async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { isWebsiteChatbotEnabled, isAdminChatbotEnabled, isChatbotBookingEnabled } = req.body;
+    let doctor: any = null;
+    const paramId = String(req.params.id || "");
+    if (mongoose.Types.ObjectId.isValid(paramId)) {
+      doctor = await Doctor.findById(paramId);
+    }
+    if (!doctor) {
+      doctor = await Doctor.findOne({ slug: paramId.toLowerCase() });
+    }
+    if (!doctor) {
+      res.status(404).json({ success: false, error: "Doctor not found", code: "NOT_FOUND" });
+      return;
+    }
+
+    // If affiliated with a hospital, enforce parent hospital OFF inheritance
+    if (
+      doctor.organizationId &&
+      (isWebsiteChatbotEnabled === true ||
+        isAdminChatbotEnabled === true ||
+        isChatbotBookingEnabled === true)
+    ) {
+      const parentOrg = await Organization.findById(doctor.organizationId)
+        .select("name isWebsiteChatbotEnabled isAdminChatbotEnabled isChatbotBookingEnabled")
+        .lean();
+      if (parentOrg) {
+        if (isWebsiteChatbotEnabled === true && parentOrg.isWebsiteChatbotEnabled === false) {
+          res.status(400).json({
+            success: false,
+            error: `Website AI Chatbot is currently turned OFF for parent hospital (${parentOrg.name}). Enable it on the hospital first.`,
+            code: "PARENT_HOSPITAL_CHATBOT_DISABLED",
+          });
+          return;
+        }
+        if (isAdminChatbotEnabled === true && parentOrg.isAdminChatbotEnabled === false) {
+          res.status(400).json({
+            success: false,
+            error: `Admin AI Copilot is currently turned OFF for parent hospital (${parentOrg.name}). Enable it on the hospital first.`,
+            code: "PARENT_HOSPITAL_CHATBOT_DISABLED",
+          });
+          return;
+        }
+        if (isChatbotBookingEnabled === true && parentOrg.isChatbotBookingEnabled === false) {
+          res.status(400).json({
+            success: false,
+            error: `Book Appointment on Chatbot is currently turned OFF for parent hospital (${parentOrg.name}). Enable it on the hospital first.`,
+            code: "PARENT_HOSPITAL_CHATBOT_DISABLED",
+          });
+          return;
+        }
+      }
+    }
+
+    if (typeof isWebsiteChatbotEnabled === "boolean") {
+      doctor.isWebsiteChatbotEnabled = isWebsiteChatbotEnabled;
+    }
+    if (typeof isAdminChatbotEnabled === "boolean") {
+      doctor.isAdminChatbotEnabled = isAdminChatbotEnabled;
+    }
+    if (typeof isChatbotBookingEnabled === "boolean") {
+      doctor.isChatbotBookingEnabled = isChatbotBookingEnabled;
+    }
+    await doctor.save();
+
+    await logAuditEvent({
+      userId: req.user!.userId,
+      userEmail: req.user!.email,
+      userRole: req.user!.role,
+      action: "DOCTOR_CHATBOT_SETTINGS_CHANGED",
+      entityType: "Doctor",
+      entityId: doctor._id.toString(),
+      organizationId: doctor.organizationId ? doctor.organizationId.toString() : null,
+      doctorId: doctor._id.toString(),
+      details: {
+        isWebsiteChatbotEnabled: doctor.isWebsiteChatbotEnabled,
+        isAdminChatbotEnabled: doctor.isAdminChatbotEnabled,
+        isChatbotBookingEnabled: doctor.isChatbotBookingEnabled,
+        doctorName: doctor.doctorName,
+      },
+    });
+
+    res.status(200).json({
+      success: true,
+      message: "Doctor chatbot settings updated successfully",
+      data: {
+        id: doctor._id,
+        isWebsiteChatbotEnabled: doctor.isWebsiteChatbotEnabled,
+        isAdminChatbotEnabled: doctor.isAdminChatbotEnabled,
+        isChatbotBookingEnabled: doctor.isChatbotBookingEnabled,
+      },
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * PATCH /api/v1/superadmin/doctors/:id/ai-regenerate-settings
+ * Enable or disable AI Content Regeneration for an individual doctor.
+ * Enforces parent hospital rule: cannot enable if parent hospital has AI Regeneration OFF.
+ */
+superadminRouter.patch("/doctors/:id/ai-regenerate-settings", async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { isAiRegenerateEnabled } = req.body;
+    if (typeof isAiRegenerateEnabled !== "boolean") {
+      res.status(400).json({
+        success: false,
+        error: "isAiRegenerateEnabled must be a boolean",
+        code: "INVALID_INPUT",
+      });
+      return;
+    }
+
+    let doctor: any = null;
+    const paramId = String(req.params.id || "");
+    if (mongoose.Types.ObjectId.isValid(paramId)) {
+      doctor = await Doctor.findById(paramId);
+    }
+    if (!doctor) {
+      doctor = await Doctor.findOne({ slug: paramId.toLowerCase() });
+    }
+    if (!doctor) {
+      res.status(404).json({ success: false, error: "Doctor not found", code: "NOT_FOUND" });
+      return;
+    }
+
+    if (doctor.organizationId && isAiRegenerateEnabled === true) {
+      const parentOrg = await Organization.findById(doctor.organizationId)
+        .select("name isAiRegenerateEnabled")
+        .lean();
+      if (parentOrg && parentOrg.isAiRegenerateEnabled !== true) {
+        res.status(400).json({
+          success: false,
+          error: `AI Content Regeneration is currently turned OFF for parent hospital (${parentOrg.name}). Enable it on the hospital first.`,
+          code: "PARENT_HOSPITAL_AI_REGENERATE_DISABLED",
+        });
+        return;
+      }
+    }
+
+    doctor.isAiRegenerateEnabled = isAiRegenerateEnabled;
+    await doctor.save();
+
+    await logAuditEvent({
+      userId: req.user!.userId,
+      userEmail: req.user!.email,
+      userRole: req.user!.role,
+      action: "DOCTOR_AI_REGENERATE_CHANGED",
+      entityType: "Doctor",
+      entityId: doctor._id.toString(),
+      organizationId: doctor.organizationId ? doctor.organizationId.toString() : null,
+      doctorId: doctor._id.toString(),
+      details: {
+        isAiRegenerateEnabled,
+        doctorName: doctor.doctorName,
+      },
+    });
+
+    res.status(200).json({
+      success: true,
+      message: `AI Content Regeneration ${isAiRegenerateEnabled ? "enabled" : "disabled"} for Dr. ${doctor.doctorName}.`,
+      data: {
+        id: doctor._id,
+        isAiRegenerateEnabled: doctor.isAiRegenerateEnabled,
+      },
     });
   } catch (error) {
     next(error);
@@ -417,6 +843,15 @@ superadminRouter.delete("/doctors/:id", async (req: Request, res: Response, next
 
     // Permanently purge all tenant media from Cloudinary, local storage, and DB
     await MediaService.purgeAllTenantMedia(ownerIds, additionalPublicIds);
+
+    // Release any custom domain from Vercel Project before deleting DB record
+    const docWebsites = await Website.find({
+      $or: [{ doctorId: docId }, { ownerId: docId }],
+      customDomain: { $exists: true, $nin: [null, ""] },
+    });
+    for (const w of docWebsites) {
+      await CustomDomainService.removeCustomDomain(w).catch(() => {});
+    }
 
     await Website.deleteMany({ $or: [{ doctorId: docId }, { ownerId: docId }] });
     await AIContent.deleteMany({ $or: [{ doctorId: docId }, { targetId: docId }, { targetType, targetId: docId }] });
@@ -525,8 +960,64 @@ superadminRouter.patch("/websites/:id/publish-status", async (req: Request, res:
       return;
     }
 
+    const isPublished = publishStatus === "PUBLISHED";
+    const deactivatedByRole = isPublished ? null : "SUPERADMIN";
+
     website.publishStatus = publishStatus;
+    website.deactivatedByRole = deactivatedByRole;
     await website.save();
+
+    if (website.doctorId) {
+      await Doctor.updateOne(
+        { _id: website.doctorId },
+        {
+          $set: {
+            status: isPublished ? "ACTIVE" : "INACTIVE",
+            deactivatedByRole,
+          },
+        }
+      ).catch(() => {});
+    } else if (website.websiteType === "HOSPITAL_CLINIC" && website.organizationId) {
+      await Organization.updateOne(
+        { _id: website.organizationId },
+        { $set: { status: isPublished ? "ACTIVE" : "INACTIVE" } }
+      ).catch(() => {});
+
+      if (!isPublished) {
+        await Promise.all([
+          Doctor.updateMany(
+            { organizationId: website.organizationId },
+            { $set: { status: "INACTIVE", deactivatedByRole: "SUPERADMIN" } }
+          ),
+          Website.updateMany(
+            { organizationId: website.organizationId, websiteType: "HOSPITAL_DOCTOR" },
+            { $set: { publishStatus: "SUSPENDED", deactivatedByRole: "SUPERADMIN" } }
+          ),
+        ]).catch(() => {});
+      } else {
+        const approvedDocs = await Doctor.find({
+          organizationId: website.organizationId,
+          approvalStatus: { $nin: ["PENDING", "REJECTED"] },
+        })
+          .select("_id")
+          .lean();
+        const approvedDocIds = approvedDocs.map((d) => d._id);
+        await Promise.all([
+          Doctor.updateMany(
+            { _id: { $in: approvedDocIds } },
+            { $set: { status: "ACTIVE", deactivatedByRole: null } }
+          ),
+          ...(approvedDocIds.length > 0
+            ? [
+                Website.updateMany(
+                  { doctorId: { $in: approvedDocIds } },
+                  { $set: { publishStatus: "PUBLISHED", deactivatedByRole: null } }
+                ),
+              ]
+            : []),
+        ]).catch(() => {});
+      }
+    }
 
     await logAuditEvent({
       userId: req.user!.userId,
@@ -691,6 +1182,348 @@ superadminRouter.put(
 );
 
 /**
+ * GET /api/v1/superadmin/settings/onboarding-categories
+ * Fetch current starting page onboarding category toggles
+ */
+superadminRouter.get(
+  "/settings/onboarding-categories",
+  async (_req: Request, res: Response, next: NextFunction) => {
+    try {
+      const config = await PlatformConfigService.getConfig();
+      res.status(200).json({
+        success: true,
+        data: {
+          onboardingCategories: config.onboardingCategories,
+        },
+      });
+    } catch (error) {
+      next(error);
+    }
+  }
+);
+
+/**
+ * PATCH /api/v1/superadmin/settings/onboarding-categories
+ * Enable or disable starting page onboarding categories (Only Doctor, Hospital, Hospital-Affiliated Doctor)
+ */
+superadminRouter.patch(
+  "/settings/onboarding-categories",
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const { portalEnabled, onlyDoctor, hospital, hospitalDoctor } = req.body || {};
+      const updated = await PlatformConfigService.updateOnboardingCategories(
+        { portalEnabled, onlyDoctor, hospital, hospitalDoctor },
+        { userId: req.user?.userId }
+      );
+
+      await logAuditEvent({
+        userId: req.user!.userId,
+        userEmail: req.user!.email,
+        userRole: req.user!.role,
+        action: "ONBOARDING_CATEGORIES_UPDATED",
+        entityType: "PlatformConfig",
+        entityId: "platform_config",
+        details: updated as unknown as Record<string, unknown>,
+      });
+
+      res.status(200).json({
+        success: true,
+        message: "Onboarding category availability updated successfully",
+        data: {
+          onboardingCategories: updated,
+        },
+      });
+    } catch (error) {
+      next(error);
+    }
+  }
+);
+
+/**
+ * GET /api/v1/superadmin/custom-domains
+ * Lists all websites with custom domains + usage against strict 50-domain ceiling.
+ */
+superadminRouter.get("/custom-domains", async (_req: Request, res: Response, next: NextFunction) => {
+  try {
+    const [websites, usedCount] = await Promise.all([
+      Website.find({
+        customDomain: { $exists: true, $nin: [null, ""] },
+      })
+        .populate("organizationId", "name slug type")
+        .populate("doctorId", "doctorName slug specialization")
+        .sort({ updatedAt: -1 })
+        .lean(),
+      CustomDomainService.getCustomDomainUsageCount(),
+    ]);
+
+    const domains = websites.map((w: any) => {
+      const org = w.organizationId;
+      const doc = w.doctorId;
+      let path = `/${w.slug}`;
+      let entityName = w.slug;
+      if (w.websiteType === "HOSPITAL_DOCTOR" && org && doc) {
+        path = `/${org.slug}/${doc.slug}`;
+        entityName = `Dr. ${doc.doctorName} (${org.name})`;
+      } else if (w.websiteType === "ONLY_DOCTOR" && doc) {
+        path = `/${doc.slug || w.slug}`;
+        entityName = `Dr. ${doc.doctorName}`;
+      } else if (w.websiteType === "HOSPITAL_CLINIC" && org) {
+        path = `/${org.slug || w.slug}`;
+        entityName = org.name;
+      }
+
+      return {
+        websiteId: w._id.toString(),
+        websiteType: w.websiteType,
+        entityName,
+        doczenoPath: path,
+        customDomain: w.customDomain,
+        customDomainStatus: w.customDomainStatus || "PENDING",
+        customDomainRedirect: w.customDomainRedirect !== false,
+        customDomainVerifiedAt: w.customDomainVerifiedAt || null,
+        customDomainLastCheckedAt: w.customDomainLastCheckedAt || null,
+        customDomainLastError: w.customDomainLastError || null,
+        dnsInstructions: buildDnsInstructions(w.customDomain, w.customDomainVerification || []),
+      };
+    });
+
+    res.status(200).json({
+      success: true,
+      data: {
+        usedCount,
+        maxLimit: MAX_CUSTOM_DOMAINS,
+        vercelConfigured: CustomDomainService.isVercelApiConfigured(),
+        domains,
+      },
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * POST /api/v1/superadmin/custom-domains
+ * Assigns a custom domain to an Organization or Doctor website (strictly capped at 50 total).
+ */
+superadminRouter.post("/custom-domains", async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { targetType, targetId, customDomain, redirectEnabled } = req.body || {};
+    if (!targetType || !targetId || !customDomain) {
+      res.status(400).json({
+        success: false,
+        error: "targetType, targetId, and customDomain are required.",
+        code: "BAD_REQUEST",
+      });
+      return;
+    }
+
+    let website: any = null;
+    if (targetType === "ORGANIZATION") {
+      website = await Website.findOne({ organizationId: targetId, websiteType: "HOSPITAL_CLINIC" });
+    } else if (targetType === "DOCTOR") {
+      website = await Website.findOne({ doctorId: targetId });
+    } else {
+      res.status(400).json({ success: false, error: "Invalid targetType", code: "BAD_REQUEST" });
+      return;
+    }
+
+    if (!website) {
+      res.status(404).json({
+        success: false,
+        error: "Website record not found for the selected entity.",
+        code: "WEBSITE_NOT_FOUND",
+      });
+      return;
+    }
+
+    const result = await CustomDomainService.assignCustomDomain({
+      website,
+      rawDomain: String(customDomain),
+      redirectEnabled: typeof redirectEnabled === "boolean" ? redirectEnabled : true,
+    });
+
+    await logAuditEvent({
+      userId: req.user!.userId,
+      userEmail: req.user!.email,
+      userRole: req.user!.role,
+      action: "CUSTOM_DOMAIN_ASSIGNED",
+      entityType: "Website",
+      entityId: website._id.toString(),
+      organizationId: website.organizationId ? website.organizationId.toString() : null,
+      doctorId: website.doctorId ? website.doctorId.toString() : null,
+      details: {
+        customDomain: result.website.customDomain,
+        status: result.website.customDomainStatus,
+        vercelAttached: result.vercelAttached,
+      },
+    });
+
+    const usedCount = await CustomDomainService.getCustomDomainUsageCount();
+
+    res.status(200).json({
+      success: true,
+      message: result.vercelMessage || "Custom domain configured successfully!",
+      data: {
+        websiteId: result.website._id.toString(),
+        customDomain: result.website.customDomain,
+        customDomainStatus: result.website.customDomainStatus,
+        customDomainRedirect: result.website.customDomainRedirect !== false,
+        dnsInstructions: result.dnsInstructions,
+        vercelAttached: result.vercelAttached,
+        usedCount,
+        maxLimit: MAX_CUSTOM_DOMAINS,
+      },
+    });
+  } catch (error: any) {
+    if (error?.status === 400 || error?.message) {
+      res.status(error?.status || 400).json({
+        success: false,
+        error: error.message,
+        code: error.code || "CUSTOM_DOMAIN_ERROR",
+      });
+      return;
+    }
+    next(error);
+  }
+});
+
+/**
+ * POST /api/v1/superadmin/custom-domains/:websiteId/verify
+ * Triggers live DNS & Vercel SSL verification for a configured custom domain.
+ */
+superadminRouter.post("/custom-domains/:websiteId/verify", async (req: Request, res: Response) => {
+  try {
+    const website = await Website.findById(req.params.websiteId);
+    if (!website || !website.customDomain) {
+      res.status(404).json({ success: false, error: "Custom domain configuration not found", code: "NOT_FOUND" });
+      return;
+    }
+
+    const result = await CustomDomainService.verifyCustomDomain(website);
+
+    await logAuditEvent({
+      userId: req.user!.userId,
+      userEmail: req.user!.email,
+      userRole: req.user!.role,
+      action: "CUSTOM_DOMAIN_VERIFIED",
+      entityType: "Website",
+      entityId: website._id.toString(),
+      details: { customDomain: website.customDomain, verified: result.verified },
+    });
+
+    res.status(200).json({
+      success: true,
+      message: result.message,
+      data: result,
+    });
+  } catch (error: any) {
+    res.status(400).json({
+      success: false,
+      error: error?.message || "Failed to verify custom domain",
+      code: "VERIFICATION_FAILED",
+    });
+  }
+});
+
+/**
+ * PATCH /api/v1/superadmin/custom-domains/:websiteId
+ * Updates redirect toggle for an existing custom domain.
+ */
+superadminRouter.patch("/custom-domains/:websiteId", async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { customDomainRedirect } = req.body || {};
+    const website = await Website.findById(req.params.websiteId);
+    if (!website || !website.customDomain) {
+      res.status(404).json({ success: false, error: "Custom domain configuration not found", code: "NOT_FOUND" });
+      return;
+    }
+
+    if (typeof customDomainRedirect === "boolean") {
+      website.customDomainRedirect = customDomainRedirect;
+      await website.save();
+    }
+
+    res.status(200).json({
+      success: true,
+      message: `Redirect from doczeno slug ${website.customDomainRedirect ? "enabled" : "disabled"}.`,
+      data: {
+        websiteId: website._id.toString(),
+        customDomainRedirect: website.customDomainRedirect !== false,
+      },
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * DELETE /api/v1/superadmin/custom-domains/:websiteId
+ * Removes a custom domain from Vercel Project & MongoDB, freeing 1 of 50 slots.
+ */
+superadminRouter.delete("/custom-domains/:websiteId", async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const website = await Website.findById(req.params.websiteId);
+    if (!website) {
+      res.status(404).json({ success: false, error: "Website not found", code: "NOT_FOUND" });
+      return;
+    }
+
+    const removedDomain = website.customDomain;
+    await CustomDomainService.removeCustomDomain(website);
+
+    await logAuditEvent({
+      userId: req.user!.userId,
+      userEmail: req.user!.email,
+      userRole: req.user!.role,
+      action: "CUSTOM_DOMAIN_REMOVED",
+      entityType: "Website",
+      entityId: website._id.toString(),
+      details: { removedDomain },
+    });
+
+    const usedCount = await CustomDomainService.getCustomDomainUsageCount();
+
+    res.status(200).json({
+      success: true,
+      message: `Custom domain ${removedDomain || ""} disconnected and removed.`,
+      data: { usedCount, maxLimit: MAX_CUSTOM_DOMAINS },
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * POST /api/v1/superadmin/custom-domains/health-check
+ * Manually triggers the lightweight sequential DNS health check across all VERIFIED custom domains.
+ */
+superadminRouter.post("/custom-domains/health-check", async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const summary = await CustomDomainService.runDailyHealthCheck({ forceAll: true });
+
+    await logAuditEvent({
+      userId: req.user!.userId,
+      userEmail: req.user!.email,
+      userRole: req.user!.role,
+      action: "CUSTOM_DOMAIN_HEALTH_CHECK",
+      entityType: "Website",
+      entityId: "bulk_custom_domains",
+      details: summary as unknown as Record<string, unknown>,
+    });
+
+    res.status(200).json({
+      success: true,
+      message:
+        summary.skippedReason ||
+        `Checked ${summary.checked} verified domain(s): ${summary.healthy} healthy, ${summary.disabled} auto-disabled.`,
+      data: summary,
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
  * GET /api/v1/superadmin/gemini-analytics
  * Aggregated analytics and observability for Gemini API
  */
@@ -752,6 +1585,39 @@ superadminRouter.get(
         success: true,
         data: result,
       });
+    } catch (error) {
+      next(error);
+    }
+  }
+);
+
+/**
+ * GET /api/v1/superadmin/export-website/:slug
+ * Streams a complete standalone static website package (.zip) for any doctor or hospital practice
+ */
+superadminRouter.get(
+  "/export-website/:slug",
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const slug = String(req.params.slug || "");
+      const doctorSlug = req.query.doctorSlug as string | undefined;
+
+      const { archive, fileName } = await StaticExportService.generateStaticSiteZip({
+        slug,
+        doctorSlug,
+      });
+
+      res.setHeader("Content-Type", "application/zip");
+      res.setHeader("Content-Disposition", `attachment; filename="${fileName}"`);
+
+      archive.on("error", () => {
+        if (!res.headersSent) {
+          res.status(500).json({ success: false, error: "Failed to generate static archive" });
+        }
+      });
+
+      archive.pipe(res);
+      await archive.finalize();
     } catch (error) {
       next(error);
     }

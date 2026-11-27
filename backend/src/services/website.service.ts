@@ -101,6 +101,7 @@ export class WebsiteService {
         query.doctorId = params.doctorId;
       } else if (params.organizationId) {
         query.organizationId = params.organizationId;
+        query.$or = [{ doctorId: null }, { doctorId: { $exists: false } }];
       }
 
       let docs = await Review.find(query).sort({ createdAt: -1 });
@@ -265,6 +266,11 @@ export class WebsiteService {
           ogImage: org.buildingPhoto?.url || org.logo?.url,
         },
         websiteContent: aiContent,
+        isWebsiteChatbotEnabled: org.isWebsiteChatbotEnabled !== false,
+        isAdminChatbotEnabled: org.isAdminChatbotEnabled !== false,
+        customDomain: website.customDomain || undefined,
+        customDomainStatus: website.customDomainStatus || "NONE",
+        customDomainRedirect: website.customDomainRedirect !== false,
       };
     }
 
@@ -346,6 +352,8 @@ export class WebsiteService {
           ogImage: doctor.doctorPhoto?.url || parentOrg.logo?.url,
         },
         websiteContent: aiContent,
+        isWebsiteChatbotEnabled: doctor.isWebsiteChatbotEnabled !== false && parentOrg.isWebsiteChatbotEnabled !== false,
+        isAdminChatbotEnabled: doctor.isAdminChatbotEnabled !== false && parentOrg.isAdminChatbotEnabled !== false,
       };
     }
 
@@ -446,6 +454,11 @@ export class WebsiteService {
           ogImage: doctor.doctorPhoto?.url,
         },
         websiteContent: aiContent,
+        isWebsiteChatbotEnabled: doctor.isWebsiteChatbotEnabled !== false,
+        isAdminChatbotEnabled: doctor.isAdminChatbotEnabled !== false,
+        customDomain: website.customDomain || undefined,
+        customDomainStatus: website.customDomainStatus || "NONE",
+        customDomainRedirect: website.customDomainRedirect !== false,
       };
     }
 
@@ -485,34 +498,72 @@ export class WebsiteService {
       } as any;
     }
 
-    // 2. Resolve Doctor by slug AND enforce internal parent organization ID match
-    const doctor = await Doctor.findOne({
-      slug: doctorSlug.toLowerCase(),
+    // 2. Resolve Doctor by slug OR active temporary preview slug (tempSlug)
+    const normalizedDocSlug = doctorSlug.toLowerCase();
+    let isTempPreview = false;
+
+    let doctor = await Doctor.findOne({
+      slug: normalizedDocSlug,
       organizationId: parentOrg._id,
     });
-    if (!doctor) return null;
 
-    if (doctor.status !== "ACTIVE") {
-      return {
-        isDeactivated: true,
-        deactivationMessage: "Your website is temporarily deactivated. Please contact admin.",
-        slug: doctorSlug,
-        doctorName: doctor.doctorName,
-        organizationName: parentOrg.name,
-        websiteType: WebsiteType.HOSPITAL_DOCTOR,
-        selectedTheme: "hospital-classic",
-        browserTabTitle: `Dr. ${doctor.doctorName} — Deactivated`,
-        address: parentOrg.address || { city: "", state: "", pincode: "", country: "India" },
-        galleryPhotos: [],
-        isHospitalChild: true,
-      } as any;
+    if (doctor) {
+      if (doctor.approvalStatus === "PENDING") {
+        return {
+          isPendingApproval: true,
+          approvalMessage: "Under Approval, please contact your hospital admin.",
+          slug: `${parentOrg.slug}/${doctor.slug}`,
+          doctorName: doctor.doctorName,
+          organizationName: parentOrg.name,
+          websiteType: WebsiteType.HOSPITAL_DOCTOR,
+          selectedTheme: parentOrg.selectedTheme || "hospital-classic",
+          browserTabTitle: `Dr. ${doctor.doctorName} — Under Approval | ${parentOrg.name}`,
+          address: parentOrg.address || { city: "", state: "", pincode: "", country: "India" },
+          galleryPhotos: [],
+          isHospitalChild: true,
+          hospitalSlug: parentOrg.slug,
+        } as any;
+      }
+
+      if (doctor.approvalStatus === "REJECTED") {
+        return null;
+      }
+
+      if (doctor.status !== "ACTIVE") {
+        return {
+          isDeactivated: true,
+          deactivationMessage: "Your website is temporarily deactivated. Please contact admin.",
+          slug: doctorSlug,
+          doctorName: doctor.doctorName,
+          organizationName: parentOrg.name,
+          websiteType: WebsiteType.HOSPITAL_DOCTOR,
+          selectedTheme: "hospital-classic",
+          browserTabTitle: `Dr. ${doctor.doctorName} — Deactivated`,
+          address: parentOrg.address || { city: "", state: "", pincode: "", country: "India" },
+          galleryPhotos: [],
+          isHospitalChild: true,
+        } as any;
+      }
+    } else {
+      // Check if accessed via temporary 10-char preview slug
+      doctor = await Doctor.findOne({
+        tempSlug: normalizedDocSlug,
+        organizationId: parentOrg._id,
+      });
+
+      // If not found OR already approved/rejected (link expired), return null -> 404
+      if (!doctor || doctor.approvalStatus !== "PENDING") {
+        return null;
+      }
+
+      isTempPreview = true;
     }
 
-    // 3. Resolve Website record and enforce PUBLISHED status
+    // 3. Resolve Website record
     const website = await Website.findOne({
       doctorId: doctor._id,
       organizationId: parentOrg._id,
-      publishStatus: "PUBLISHED",
+      publishStatus: isTempPreview ? { $in: ["PUBLISHED", "REVIEW", "DRAFT"] } : "PUBLISHED",
     });
     if (!website) return null;
 
@@ -579,6 +630,7 @@ export class WebsiteService {
       doctorPhoto: doctor.doctorPhoto,
       isHospitalChild: true,
       hospitalSlug: parentOrg.slug,
+      isTempPreview,
       faqs: Array.isArray(aiContent.faqs) && aiContent.faqs.length > 0 ? aiContent.faqs : getDefaultDoctorFaqs(doctor.doctorName, doctor.specialization),
       testimonials,
       seoMetadata: {
@@ -587,6 +639,11 @@ export class WebsiteService {
         ogImage: doctor.doctorPhoto?.url || parentOrg.logo?.url,
       },
       websiteContent: aiContent,
+      isWebsiteChatbotEnabled: !isTempPreview && doctor.isWebsiteChatbotEnabled !== false && parentOrg.isWebsiteChatbotEnabled !== false,
+      isAdminChatbotEnabled: !isTempPreview && doctor.isAdminChatbotEnabled !== false && parentOrg.isAdminChatbotEnabled !== false,
+      customDomain: website.customDomain || undefined,
+      customDomainStatus: website.customDomainStatus || "NONE",
+      customDomainRedirect: website.customDomainRedirect !== false,
     };
   }
 }

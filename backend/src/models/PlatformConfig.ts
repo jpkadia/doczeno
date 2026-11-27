@@ -1,10 +1,18 @@
 import mongoose, { Document, Schema, Model } from "mongoose";
 
+export interface IOnboardingCategoriesConfig {
+  portalEnabled: boolean;
+  onlyDoctor: boolean;
+  hospital: boolean;
+  hospitalDoctor: boolean;
+}
+
 export interface IPlatformConfig extends Document {
   platformDomain: string;
   platformName: string;
   supportEmail?: string;
   deletedDoctorsCount: number;
+  onboardingCategories: IOnboardingCategoriesConfig;
   updatedBy?: mongoose.Types.ObjectId;
   createdAt: Date;
   updatedAt: Date;
@@ -35,6 +43,12 @@ const PlatformConfigSchema = new Schema<IPlatformConfig>(
       type: Number,
       default: 0,
       min: 0,
+    },
+    onboardingCategories: {
+      portalEnabled: { type: Boolean, default: true },
+      onlyDoctor: { type: Boolean, default: true },
+      hospital: { type: Boolean, default: true },
+      hospitalDoctor: { type: Boolean, default: true },
     },
     updatedBy: {
       type: Schema.Types.ObjectId,

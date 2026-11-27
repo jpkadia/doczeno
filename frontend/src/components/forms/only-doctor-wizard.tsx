@@ -42,6 +42,8 @@ const WIZARD_STEPS: StepItem[] = [
 
 const DEFAULT_FORM_VALUES: Partial<OnlyDoctorFormValues> = {
   customSlug: "",
+  email: "",
+  adminEmail: "",
   gender: "MALE",
   newCaseFee: undefined,
   oldCaseFee: undefined,
@@ -69,6 +71,16 @@ export function OnlyDoctorWizard() {
   const [createdSlug, setCreatedSlug] = React.useState<string | null>(null);
   const [showPassword, setShowPassword] = React.useState(false);
   const [showConfirmPassword, setShowConfirmPassword] = React.useState(false);
+
+  // Security: Clean any session token so first-time admin access requires email & password login
+  React.useEffect(() => {
+    if (currentStep === 7 && typeof window !== "undefined") {
+      try {
+        localStorage.removeItem("doczeno_auth_token");
+        document.cookie = "doczeno_session=; path=/; max-age=0; SameSite=Lax; Secure";
+      } catch {}
+    }
+  }, [currentStep]);
 
   const {
     register,
@@ -592,15 +604,26 @@ export function OnlyDoctorWizard() {
             {/* STEP 2: Contact */}
             {currentStep === 2 && (
               <div className="space-y-5">
-                <FormField
-                  id="email"
-                  label="Official Email Address"
-                  required
-                  hint="Used for appointment confirmations and clinician administrative notices"
-                  error={errors.email?.message}
-                >
-                  <Input id="email" type="email" {...register("email")} placeholder="doctor@clinic.com" />
-                </FormField>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                  <FormField
+                    id="email"
+                    label="Public Inquiries & Contact Email"
+                    required
+                    hint="Displayed publicly on your website for patient inquiries and contact"
+                    error={errors.email?.message}
+                  >
+                    <Input id="email" type="email" {...register("email")} placeholder="contact@doctorclinic.com" />
+                  </FormField>
+
+                  <FormField
+                    id="adminEmail"
+                    label="Administrator Login Email (Optional)"
+                    hint="Used to sign in to your admin console. Leave blank to use inquiry email."
+                    error={errors.adminEmail?.message}
+                  >
+                    <Input id="adminEmail" type="email" {...register("adminEmail")} placeholder="Leave blank to use inquiry email" />
+                  </FormField>
+                </div>
 
                 <FormField
                   id="whatsApp"
@@ -844,7 +867,7 @@ export function OnlyDoctorWizard() {
                     <ImageUploader
                       label="Doctor Profile Photo"
                       category="DOCTOR_PHOTO"
-                      maxSizeBytes={3 * 1024 * 1024}
+                      maxSizeBytes={10 * 1024 * 1024}
                       required
                       value={field.value}
                       onChange={field.onChange}
@@ -860,7 +883,7 @@ export function OnlyDoctorWizard() {
                     <ImageUploader
                       label="Clinic Logo (Optional)"
                       category="CLINIC_LOGO"
-                      maxSizeBytes={2 * 1024 * 1024}
+                      maxSizeBytes={10 * 1024 * 1024}
                       value={field.value}
                       onChange={field.onChange}
                       error={errors.clinicLogo?.message}
@@ -877,7 +900,7 @@ export function OnlyDoctorWizard() {
                       value={field.value || []}
                       onChange={field.onChange}
                       maxFiles={6}
-                      maxSizeBytes={3 * 1024 * 1024}
+                      maxSizeBytes={10 * 1024 * 1024}
                       error={errors.clinicPhotos?.message}
                     />
                   )}

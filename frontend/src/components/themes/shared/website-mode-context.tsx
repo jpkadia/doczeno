@@ -34,7 +34,7 @@ interface WebsiteThemeModeProviderProps {
 
 export function WebsiteThemeModeProvider({
   children,
-  defaultMode = "light",
+  defaultMode = "dark",
 }: WebsiteThemeModeProviderProps) {
   // Always initialize with defaultMode so SSR HTML matches initial client hydration
   const [mode, setModeState] = React.useState<WebsiteThemeMode>(defaultMode);

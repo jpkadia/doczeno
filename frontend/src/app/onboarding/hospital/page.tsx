@@ -1,14 +1,25 @@
 import { Metadata } from "next";
 import { HospitalCreationForm } from "@/components/forms/hospital-creation-form";
+import { OnboardingDisabledNotice } from "@/components/forms/onboarding-disabled-notice";
+import { ServiceOffByAdmin } from "@/components/forms/service-off-by-admin";
+import { getOnboardingCategories } from "@/lib/onboarding-config";
 import Link from "next/link";
 import { ArrowLeft, Building2 } from "lucide-react";
+
+export const dynamic = "force-dynamic";
 
 export const metadata: Metadata = {
   title: "Hospital & Clinic Onboarding | Doczeno",
   description: "Register your healthcare facility, configure departments, and establish a modern verified online presence.",
 };
 
-export default function HospitalOnboardingPage() {
+export default async function HospitalOnboardingPage() {
+  const categories = await getOnboardingCategories();
+
+  if (!categories.portalEnabled) {
+    return <ServiceOffByAdmin />;
+  }
+
   return (
     <div className="min-h-screen bg-[#eaf4fd] bg-[url('/images/mobile.png')] md:bg-[url('/images/bg.png')] bg-cover bg-top md:bg-center bg-no-repeat bg-fixed py-6 sm:py-10 px-3 sm:px-6 lg:px-8 font-sans text-slate-900">
       <div className="max-w-4xl mx-auto space-y-4 sm:space-y-6">
@@ -27,7 +38,11 @@ export default function HospitalOnboardingPage() {
           </div>
         </div>
 
-        <HospitalCreationForm />
+        {categories.hospital ? (
+          <HospitalCreationForm />
+        ) : (
+          <OnboardingDisabledNotice categoryLabel="Hospital & Clinic Setup" />
+        )}
       </div>
     </div>
   );

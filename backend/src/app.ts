@@ -7,6 +7,7 @@ import { getEnv } from "@/config/env";
 import { authenticate } from "@/middleware/auth";
 import { errorHandler } from "@/middleware/error";
 import { apiV1Router } from "@/routes";
+import { CustomDomainService } from "@/services/custom-domain.service";
 
 export function createApp(): Application {
   const app = express();
@@ -32,10 +33,10 @@ export function createApp(): Application {
     new Set([...configuredOrigins, "http://localhost:3000", "http://localhost:3001"])
   );
 
-  // CORS Configuration supporting production cross-domain credentials
+  // CORS Configuration supporting production cross-domain credentials & dynamic verified custom domains
   app.use(
     cors({
-      origin: (
+      origin: async (
         origin: string | undefined,
         callback: (err: Error | null, allow?: boolean) => void
       ) => {
@@ -61,11 +62,27 @@ export function createApp(): Application {
           return callback(null, true);
         }
 
+        // Dynamically allow registered custom domains (e.g. https://parthkadiya.com)
+        try {
+          const isCustomDomainAllowed = await CustomDomainService.isAllowedCustomOrigin(normalizedOrigin);
+          if (isCustomDomainAllowed) {
+            return callback(null, true);
+          }
+        } catch {
+          // Fall through to deny
+        }
+
         return callback(null, false);
       },
       credentials: true,
       methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-      allowedHeaders: ["Content-Type", "Authorization", "X-Requested-With", "Accept"],
+      allowedHeaders: [
+        "Content-Type",
+        "Authorization",
+        "X-Requested-With",
+        "Accept",
+        "X-Custom-Domain-Host",
+      ],
       maxAge: 86400, // 24 hours
     })
   );

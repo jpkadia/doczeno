@@ -2,7 +2,7 @@
 
 import * as React from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { apiClient } from "@/lib/api-client";
+import { apiClient, clearClientAuthState } from "@/lib/api-client";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -35,7 +35,24 @@ export function SlugAdminLoginClient({
   const isInactiveReason = searchParams.get("reason") === "inactivity";
   const isUnauthorized = searchParams.get("unauthorized") === "true";
 
-  const targetRedirect = redirectPath || (doctorSlug ? `/${slug}/${doctorSlug}/admin` : `/${slug}/admin`);
+  const defaultRedirect = redirectPath || (doctorSlug ? `/${slug}/${doctorSlug}/admin` : `/${slug}/admin`);
+  const [isCustomDomainContext, setIsCustomDomainContext] = React.useState(false);
+
+  React.useEffect(() => {
+    if (typeof window !== "undefined") {
+      const path = window.location.pathname;
+      if (path === "/admin/login" || path.startsWith("/admin/login")) {
+        setIsCustomDomainContext(true);
+      }
+    }
+  }, []);
+
+  const targetRedirect = isCustomDomainContext ? "/admin" : defaultRedirect;
+  const publicWebsiteHref = isCustomDomainContext
+    ? "/"
+    : doctorSlug
+    ? `/${slug}/${doctorSlug}`
+    : `/${slug}`;
 
   const [email, setEmail] = React.useState("");
   const [password, setPassword] = React.useState("");
@@ -50,9 +67,20 @@ export function SlugAdminLoginClient({
 
     async function checkExistingAuth() {
       if (isInactiveReason || isUnauthorized) {
+        clearClientAuthState();
         setIsCheckingAuth(false);
         return;
       }
+
+      try {
+        const storedLast = Number(localStorage.getItem("doczeno_last_activity_at") || "0");
+        if (storedLast > 0 && Date.now() - storedLast >= 15 * 60 * 1000) {
+          await apiClient.post("/auth/logout", { reason: "INACTIVITY" }).catch(() => {});
+          clearClientAuthState();
+          if (isMounted) setIsCheckingAuth(false);
+          return;
+        }
+      } catch {}
 
       try {
         const queryParams = new URLSearchParams({ targetSlug: slug });
@@ -103,12 +131,22 @@ export function SlugAdminLoginClient({
 
     try {
       setIsLoading(true);
-      await apiClient.post("/auth/login", {
+      const res = await apiClient.post<{
+        success?: boolean;
+        data?: { token?: string };
+      }>("/auth/login", {
         email: trimmedEmail,
         password,
         targetSlug: slug,
         doctorSlug,
       });
+
+      // Persist Bearer token for cross-origin / custom-domain Safari & iOS ITP compatibility
+      if (res?.data?.token && typeof window !== "undefined") {
+        try {
+          localStorage.setItem("doczeno_auth_token", res.data.token);
+        } catch {}
+      }
 
       toast.success("Welcome back! Loading administration console...");
       if (typeof window !== "undefined") {
@@ -136,7 +174,7 @@ export function SlugAdminLoginClient({
     <div className="min-h-screen bg-gradient-to-b from-background via-secondary/15 to-secondary/35 flex flex-col items-center justify-center p-4">
       <div className="w-full max-w-md space-y-4">
         <Link
-          href={`/${slug}`}
+          href={publicWebsiteHref}
           className="inline-flex items-center text-sm font-medium text-muted-foreground hover:text-foreground transition-colors"
         >
           <ArrowLeft className="h-4 w-4 mr-1.5" />

@@ -194,24 +194,24 @@ const HOSPITAL_JSON_SCHEMA = {
       items: {
         type: "object",
         properties: {
-          title: { type: "string" },
-          description: { type: "string" },
+          title: { type: "string", description: "Exact selected hospital specialty name" },
+          description: { type: "string", description: "Concise 8-14 word patient-friendly description (under 120 chars)" },
         },
         required: ["title", "description"],
       },
-      description: "1 to 15 core hospital clinical services",
+      description: "Clinical service cards matching EACH selected hospital specialty (exact same count and specialty titles)",
     },
     departments: {
       type: "array",
       items: {
         type: "object",
         properties: {
-          name: { type: "string" },
-          description: { type: "string" },
+          name: { type: "string", description: "Exact selected hospital specialty / department name" },
+          description: { type: "string", description: "Concise department overview description" },
         },
         required: ["name", "description"],
       },
-      description: "1 to 15 key medical departments",
+      description: "Hospital departments matching EACH selected hospital specialty (exact same count and names)",
     },
     faqs: {
       type: "array",
@@ -456,12 +456,21 @@ export class GeminiService {
     hospitalData: Record<string, any>,
     options?: GeminiCallOptions
   ): Promise<HospitalGeneratedContent> {
+    const selectedSpecialties: string[] = Array.isArray(hospitalData.specialties)
+      ? hospitalData.specialties.map((s: any) => String(s).trim()).filter(Boolean)
+      : [];
     const sourceBlock = formatSourceDataBlock(hospitalData);
+    const specialtyInstruction =
+      selectedSpecialties.length > 0
+        ? `CRITICAL: You MUST generate "services" and "departments" with EXACTLY ${selectedSpecialties.length} items — one for EACH of these registered specialties in the exact same order: ${selectedSpecialties.join(", ")}. Use the exact specialty name as the item title/name and write an informative 8-14 word description (under 120 chars) for each.`
+        : "Generate clinical services and departments reflecting the organization profile.";
+
     const userPrompt = [
       sourceBlock,
       "",
       "TASK: Generate professional, comprehensive website copy for this hospital / healthcare clinic.",
       "Include: tagline, about, hospitalIntro, services, departments, faqs, seoTitle, seoDescription.",
+      specialtyInstruction,
       "Ensure all output is truthful and directly reflects the provided organization details.",
     ].join("\n");
 
@@ -629,15 +638,26 @@ export class GeminiService {
     };
 
     const sourceBlock = formatSourceDataBlock(sourceData);
+    const hospitalSpecialties: string[] =
+      targetType === AiTargetType.HOSPITAL && Array.isArray(sourceData.specialties)
+        ? sourceData.specialties.map((s: any) => String(s).trim()).filter(Boolean)
+        : [];
+    const specialtyRegenConstraint =
+      hospitalSpecialties.length > 0 && (section === "services" || section === "departments")
+        ? `CRITICAL: Return EXACTLY ${hospitalSpecialties.length} items matching these registered hospital specialties in order: ${hospitalSpecialties.join(", ")}. Do not add extra items or remove any specialty.`
+        : "";
     const userPrompt = [
       sourceBlock,
       "",
       `TASK: Regenerate ONLY the "${section}" section for this healthcare website profile.`,
+      specialtyRegenConstraint,
       `Current draft context for reference (do not repeat old text blindly, produce a fresh, improved version):`,
       JSON.stringify(existingDraft[section] || ""),
       "",
       `Return JSON with key "${section}".`,
-    ].join("\n");
+    ]
+      .filter(Boolean)
+      .join("\n");
 
     const rawJson = await this.callModelWithRetry(userPrompt, wrapperJsonSchema, 2, {
       feature: "AI_CONTENT_GEN",
@@ -705,17 +725,71 @@ export class GeminiService {
             },
             required: ["patientName", "rating", "comment", "tag"],
           },
-          description: "List of 3 to 4 patient testimonials",
+          description: "List of exactly 4 patient testimonials",
         },
       },
       required: ["testimonials"],
     };
 
     const promptText = isDoctor
-      ? `Generate 3 to 4 realistic, heartfelt patient testimonials for Dr. ${docName} (${params.degree || "MD"}), specialized in ${spec} at ${params.clinicName || "Private Clinic"}, ${city}.
-Each review should highlight the doctor's clinical attentiveness, empathy, diagnostic clarity, and treatment recovery without making unrealistic miracle cure claims.`
-      : `Generate 3 to 4 realistic, authentic patient testimonials for ${hospName}, a multi-speciality hospital in ${city}.
-Each review should highlight the hospital's prompt emergency response, compassionate nursing staff, hygienic patient rooms, and advanced medical infrastructure.`;
+      ? `Generate exactly 4 realistic, heartfelt patient testimonials for Dr. ${docName} (${params.degree || "MD"}), specialized in ${spec} at ${params.clinicName || "Private Clinic"}, ${city}.
+Each review should highlight the doctor's clinical attentiveness, empathy, diagnostic clarity, and treatment recovery without making unrealistic miracle cure claims. You must return strictly 4 items.`
+      : `Generate exactly 4 realistic, authentic patient testimonials for ${hospName}, a multi-speciality hospital in ${city}.
+Each review should highlight the hospital's prompt emergency response, compassionate nursing staff, hygienic patient rooms, and advanced medical infrastructure. You must return strictly 4 items.`;
+
+    const fallbackList = isDoctor
+      ? [
+          {
+            patientName: "Rajesh Mehta",
+            rating: 5,
+            comment: `Dr. ${docName} listened patiently to all my symptoms and explained the diagnosis with great clarity. His guidance and treatment plan helped me recover smoothly.`,
+            tag: `${spec} Patient`,
+          },
+          {
+            patientName: "Priya Sharma",
+            rating: 5,
+            comment: `I was anxious before my consultation, but Dr. ${docName}'s reassuring bedside manner and thorough medical attention made all the difference. Highly recommended specialist.`,
+            tag: "Consultation & Care",
+          },
+          {
+            patientName: "Amit Patel",
+            rating: 5,
+            comment: `Prompt diagnosis and compassionate care throughout the visit. Dr. ${docName} is extremely knowledgeable and genuinely cares for patient well-being.`,
+            tag: "Patient Recovery",
+          },
+          {
+            patientName: "Sunita Verma",
+            rating: 5,
+            comment: `One of the finest doctors I have visited. The clinic staff was polite and Dr. ${docName} took ample time to address all my medical questions without rushing.`,
+            tag: "Follow-up Visit",
+          },
+        ]
+      : [
+          {
+            patientName: "Ramesh Joshi",
+            rating: 5,
+            comment: `Our experience at ${hospName} was outstanding. The nursing team was attentive, rooms were clean, and doctors were available 24/7 during our medical stay.`,
+            tag: "Inpatient Care",
+          },
+          {
+            patientName: "Ananya Deshmukh",
+            rating: 5,
+            comment: `Immediate attention and swift care by the emergency department when we needed it the most. The medical infrastructure and team coordination are truly commendable.`,
+            tag: "Emergency Department",
+          },
+          {
+            patientName: "Vikram Malhotra",
+            rating: 5,
+            comment: `Very well-maintained healthcare facility with helpful reception and minimal wait times. Diagnostic reports and consultations were handled with utmost professionalism.`,
+            tag: "Outpatient Care",
+          },
+          {
+            patientName: "Sneha Kulkarni",
+            rating: 5,
+            comment: `The staff and specialists at ${hospName} provided compassionate, top-quality treatment for my family member. Very grateful for their dedicated medical service.`,
+            tag: "Multispeciality Care",
+          },
+        ];
 
     try {
       const rawJson = await this.callModelWithRetry(promptText, TESTIMONIALS_SCHEMA, 2, {
@@ -724,73 +798,32 @@ Each review should highlight the hospital's prompt emergency response, compassio
       });
       const parsed = JSON.parse(rawJson);
       if (Array.isArray(parsed?.testimonials) && parsed.testimonials.length > 0) {
-        return parsed.testimonials.map((t: any) => ({
-          patientName: String(t.patientName || "Verified Patient").trim(),
-          rating: Math.min(5, Math.max(4, Number(t.rating) || 5)),
-          comment: String(t.comment || "").trim(),
-          tag: String(t.tag || (isDoctor ? `${spec} Care` : "Hospital Care")).trim(),
-        }));
+        const normalized = parsed.testimonials
+          .map((t: any) => ({
+            patientName: String(t.patientName || "Verified Patient").trim(),
+            rating: Math.min(5, Math.max(4, Number(t.rating) || 5)),
+            comment: String(t.comment || "").trim(),
+            tag: String(t.tag || (isDoctor ? `${spec} Care` : "Hospital Care")).trim(),
+          }))
+          .filter((t: any) => t.comment.length > 0)
+          .slice(0, 4);
+
+        // Always guarantee exact 4 reviews
+        const seenNames = new Set(normalized.map((item: any) => item.patientName.toLowerCase()));
+        for (const fb of fallbackList) {
+          if (normalized.length >= 4) break;
+          if (!seenNames.has(fb.patientName.toLowerCase())) {
+            seenNames.add(fb.patientName.toLowerCase());
+            normalized.push(fb);
+          }
+        }
+        return normalized.slice(0, 4);
       }
     } catch {
       // Graceful fallback if Gemini quota is exceeded or offline
     }
 
-    // High quality contextual fallback
-    if (isDoctor) {
-      return [
-        {
-          patientName: "Rajesh Mehta",
-          rating: 5,
-          comment: `Dr. ${docName} listened patiently to all my symptoms and explained the diagnosis with great clarity. His guidance and treatment plan helped me recover smoothly.`,
-          tag: `${spec} Patient`,
-        },
-        {
-          patientName: "Priya Sharma",
-          rating: 5,
-          comment: `I was anxious before my consultation, but Dr. ${docName}'s reassuring bedside manner and thorough medical attention made all the difference. Highly recommended specialist.`,
-          tag: "Consultation & Care",
-        },
-        {
-          patientName: "Amit Patel",
-          rating: 5,
-          comment: `Prompt diagnosis and compassionate care throughout the visit. Dr. ${docName} is extremely knowledgeable and genuinely cares for patient well-being.`,
-          tag: "Patient Recovery",
-        },
-        {
-          patientName: "Sunita Verma",
-          rating: 5,
-          comment: `One of the finest doctors I have visited. The clinic staff was polite and Dr. ${docName} took ample time to address all my medical questions without rushing.`,
-          tag: "Follow-up Visit",
-        },
-      ];
-    }
-
-    return [
-      {
-        patientName: "Ramesh Joshi",
-        rating: 5,
-        comment: `Our experience at ${hospName} was outstanding. The nursing team was attentive, rooms were clean, and doctors were available 24/7 during our medical stay.`,
-        tag: "Inpatient Care",
-      },
-      {
-        patientName: "Ananya Deshmukh",
-        rating: 5,
-        comment: `Immediate attention and swift care by the emergency department when we needed it the most. The medical infrastructure and team coordination are truly commendable.`,
-        tag: "Emergency Department",
-      },
-      {
-        patientName: "Vikram Malhotra",
-        rating: 5,
-        comment: `Very well-maintained healthcare facility with helpful reception and minimal wait times. Diagnostic reports and consultations were handled with utmost professionalism.`,
-        tag: "Outpatient Care",
-      },
-      {
-        patientName: "Sneha Kulkarni",
-        rating: 5,
-        comment: `The staff and specialists at ${hospName} provided compassionate, top-quality treatment for my family member. Very grateful for their dedicated medical service.`,
-        tag: "Multispeciality Care",
-      },
-    ];
+    return fallbackList;
   }
 }
 

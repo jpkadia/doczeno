@@ -155,10 +155,24 @@ aiRouter.get(
     try {
       const targetType = String(req.params.targetType);
       const targetId = String(req.params.targetId);
-      const record = await aiContentService.getOrCreateRecord(targetType, targetId);
+      const [record, isRegenEnabled] = await Promise.all([
+        aiContentService.getOrCreateRecord(targetType, targetId),
+        aiContentService.checkAiRegenerateEnabled(targetType, targetId),
+      ]);
+      const hospitalSpecialties =
+        targetType === AiTargetType.HOSPITAL
+          ? await aiContentService.getHospitalSpecialties(targetId)
+          : undefined;
+      const quota = aiContentService.getRegenerationQuota(record);
       res.status(200).json({
         success: true,
         data: record,
+        hospitalSpecialties,
+        aiRegenerateConfig: {
+          enabled: isRegenEnabled,
+          remainingToday: quota.remainingToday,
+          dailyLimit: quota.dailyLimit,
+        },
       });
     } catch (err) {
       next(err);
@@ -227,7 +241,7 @@ aiRouter.post(
       }
 
       const { targetType, targetId, section } = parsed.data;
-      const record = await aiContentService.regenerateSection(
+      const result = await aiContentService.regenerateSection(
         targetType,
         targetId,
         section,
@@ -237,7 +251,11 @@ aiRouter.post(
       res.status(200).json({
         success: true,
         message: `Section "${section}" regenerated successfully`,
-        data: record,
+        data: result.record,
+        regeneratedValue: result.regeneratedValue,
+        section: result.section,
+        remainingToday: result.remainingToday,
+        dailyLimit: result.dailyLimit,
       });
     } catch (err: any) {
       res.status(err?.status || 500).json({

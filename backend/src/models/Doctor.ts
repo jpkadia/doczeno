@@ -39,7 +39,15 @@ export interface IDoctor extends Document {
   }>;
   bio?: string;
   slug: string;
+  tempSlug?: string;
+  approvalStatus: "PENDING" | "APPROVED" | "REJECTED";
+  approvedAt?: Date;
+  isWebsiteChatbotEnabled?: boolean;
+  isAdminChatbotEnabled?: boolean;
+  isChatbotBookingEnabled?: boolean;
+  isAiRegenerateEnabled?: boolean;
   status: "ACTIVE" | "INACTIVE";
+  deactivatedByRole?: "SUPERADMIN" | "HOSPITAL_ADMIN" | null;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -157,11 +165,46 @@ const DoctorSchema = new Schema<IDoctor>(
       lowercase: true,
       trim: true,
     },
+    tempSlug: {
+      type: String,
+      lowercase: true,
+      trim: true,
+    },
+    approvalStatus: {
+      type: String,
+      enum: ["PENDING", "APPROVED", "REJECTED"],
+      default: "APPROVED",
+      index: true,
+    },
+    approvedAt: {
+      type: Date,
+    },
+    isWebsiteChatbotEnabled: {
+      type: Boolean,
+      default: true,
+    },
+    isAdminChatbotEnabled: {
+      type: Boolean,
+      default: true,
+    },
+    isChatbotBookingEnabled: {
+      type: Boolean,
+      default: true,
+    },
+    isAiRegenerateEnabled: {
+      type: Boolean,
+      default: false,
+    },
     status: {
       type: String,
       enum: ["ACTIVE", "INACTIVE"],
       default: "ACTIVE",
       index: true,
+    },
+    deactivatedByRole: {
+      type: String,
+      enum: ["SUPERADMIN", "HOSPITAL_ADMIN"],
+      default: null,
     },
   },
   {
@@ -170,7 +213,9 @@ const DoctorSchema = new Schema<IDoctor>(
 );
 
 DoctorSchema.index({ organizationId: 1, status: 1 });
+DoctorSchema.index({ organizationId: 1, approvalStatus: 1 });
 DoctorSchema.index({ organizationId: 1, slug: 1 }, { unique: true });
+DoctorSchema.index({ tempSlug: 1 }, { unique: true, sparse: true });
 DoctorSchema.index({ doctorName: "text", specialization: "text" });
 
 export const Doctor: Model<IDoctor> =

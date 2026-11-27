@@ -6,63 +6,39 @@ import {
   Organization,
   Website,
   Appointment,
-  AuditLog,
+  User,
+  PlatformConfig,
 } from "@/models";
 import { GoogleGenAI } from "@google/genai";
 import { getEnv } from "@/config/env";
 import { AuthUserPayload, UserRole } from "@/types";
 import { GeminiLoggerService } from "./gemini-logger.service";
+import { FIXED_PLATFORM_DOMAIN } from "./platform-config.service";
+import { MAX_CUSTOM_DOMAINS } from "./custom-domain.service";
+import {
+  getOrderedCandidateModels,
+  markModelUnhealthy,
+  markModelHealthy,
+  generateContentBounded,
+} from "./gemini-fast-caller";
 import { z } from "zod";
 
-// Zod schemas for tool arguments validation
-const getHospitalDoctorsArgsSchema = z.object({
+const searchAppointmentsArgsSchema = z.object({
+  search: z.string().max(100).optional(),
+  status: z.enum(["PENDING", "CONFIRMED", "COMPLETED", "CANCELLED", "PATIENT_NOT_COME"]).optional(),
+  doctorName: z.string().max(100).optional(),
+  limit: z.number().min(1).max(50).optional(),
+});
+
+const listDoctorsArgsSchema = z.object({
   status: z.enum(["ACTIVE", "INACTIVE"]).optional(),
+  specialization: z.string().max(100).optional(),
+  limit: z.number().min(1).max(100).optional(),
 });
 
-const getDoctorProfileArgsSchema = z.object({
-  doctorId: z.string().min(1, "Doctor ID is required"),
-});
-
-const getUpcomingAppointmentsArgsSchema = z.object({
-  doctorId: z.string().optional(),
-  limit: z.number().max(50).optional(),
-});
-
-const getHospitalOverviewArgsSchema = z.object({
-  organizationId: z.string().optional(),
-});
-
-const updateDoctorProfileArgsSchema = z.object({
-  doctorId: z.string().min(1, "Doctor ID is required"),
-  bio: z.string().max(2000).optional(),
-  yearsOfExperience: z.number().min(0).max(80).optional(),
-  degree: z.string().max(200).optional(),
-});
-
-const updateHospitalContentArgsSchema = z.object({
-  tagline: z.string().max(200).optional(),
-  about: z.string().max(2500).optional(),
-});
-
-const updateWebsiteTabTitleArgsSchema = z.object({
-  tabTitle: z.string().min(2).max(100),
-});
-
-const updateHospitalBrandingArgsSchema = z.object({
-  selectedTheme: z.string().optional(),
-  faviconUrl: z.string().url().optional(),
-});
-
-const createDoctorArgsSchema = z.object({
-  doctorName: z.string().min(2).max(100),
-  degree: z.string().min(2).max(100),
-  specialization: z.string().min(2).max(100),
-  yearsOfExperience: z.number().min(0).max(75),
-  email: z.string().email(),
-});
-
-const deactivateDoctorArgsSchema = z.object({
-  doctorId: z.string().min(1, "Doctor ID is required"),
+const getPlatformOrHospitalDetailsArgsSchema = z.object({
+  includeCustomDomains: z.boolean().optional(),
+  organizationStatus: z.enum(["ACTIVE", "INACTIVE", "SUSPENDED"]).optional(),
 });
 
 function toObjectIdSafe(val: any): mongoose.Types.ObjectId | null {
@@ -89,9 +65,11 @@ export function sanitizeToPlainText(text: string): string {
   clean = clean.replace(/\*\*(.*?)\*\*/g, "$1");
   clean = clean.replace(/__(.*?)__/g, "$1");
 
-  // 3. Strip italic markdown (*text* or _text_)
+  // 3. Strip italic markdown (*text* or _text_) while preserving URLs
   clean = clean.replace(/(^|[^\*])\*([^\*\n]+)\*([^\*]|$)/g, "$1$2$3");
+  clean = clean.replace(/\bhttps?:\/\/[^\s]+/gi, (url) => url.replace(/_/g, "__URL_UNDERSCORE__"));
   clean = clean.replace(/(^|[^_])_([^_\n]+)_([^_]|$)/g, "$1$2$3");
+  clean = clean.replace(/__URL_UNDERSCORE__/g, "_");
 
   // 4. Strip html tags like <u>, </b>, <i>, <strong>, etc.
   clean = clean.replace(/<\/?[a-zA-Z][^>]*>/g, "");
@@ -145,8 +123,8 @@ export function detectLanguage(text: string): SupportedLanguage {
     /\b(tamare|tamari|tamaru|tamaro|tame|tamne)\b/i,
     /\b(maru|mari|maro|mane|amaru|amari)\b/i,
     /\b(aaje|kaale|parme|kyare|aavshe|javshe|malse|joie|joiye)\b/i,
-    /\b(ketla|ketli|ketlu|kyan|koni|kayo|kai|kayu)\b/i,
-    /\b(saru|majama|aavjo|aabhar|khub|vaat|vato|kaho|thayu)\b/i,
+    /\b(ketla|ketli|ketlu|kyan|koni|kayo|kai|kayu|chij|kone|karelu)\b/i,
+    /\b(saru|majama|aavjo|aabhar|khub|vaat|vato|kaho|thayu|batavo|lakho)\b/i,
     /\b(taklif|rog|bimar|bimari)\s+ch+e\b/i,
   ];
   if (gujlishPatterns.some((pattern) => pattern.test(lower))) {
@@ -157,15 +135,16 @@ export function detectLanguage(text: string): SupportedLanguage {
   const hinglishPatterns = [
     /\b(namaste|namaskar|pranam|ram\s*ram|radhe\s*radhe)\b/i,
     /\b(kaise|kaisa|kaisi|kese|haal\s*chal)\b/i,
-    /\b(aap|aapka|aapki|aapke|aapko|tum|tumhara|mera|meri|mere|mujhe|mujhko|hum|hamara)\b/i,
-    /\b(hai|hain|ho|hu|tha|thi|the|hoga|hogi|hoge|raha|rahi|rahe|karo|karna|kariye)\b/i,
-    /\b(kya|kyu|kyun|kab|kahan|kaha|kidhar|kitna|kitne|kitni|kaun|kon)\b/i,
-    /\b(batao|bataiye|batayein|dekhna|dekh|sun|bolo|boliye)\b/i,
-    /\b(aaj|kal|parso|abhi|baad|pehle)\b/i,
+    /\b(aap|aapka|aapki|aapke|aapko|tum|tumhara|mera|meri|mere|mujhe|muje|mujhko|hum|hamara|hamari|hamare|iska|iski|iske|unka|unki|unke)\b/i,
+    /\b(hai|hain|ho|hu|tha|thi|hoga|hogi|hoge|hui|hua|hue|raha|rahi|rahe|karo|kardo|karna|karni|kariye|karne)\b/i,
+    /\b(woh|wo|hum|log|aaye|gaye|rehte|baat|din)\s+the\b/i,
+    /\b(kya|kyu|kyun|kab|kahan|kaha|kidhar|kitna|kitne|kitni|kaun|kon|kis|kisi|kisne|kisko|kaunsa|kaunsi|konsa|konsi)\b/i,
+    /\b(batao|bataiye|batayein|dikhao|dikhaiye|dekhna|dekh|sun|bolo|boliye|chahiye|chaiye)\b/i,
+    /\b(aaj|kal|parso|abhi|baad|pehle|sirf|sabhi|saare|sare|baki|koi)\b/i,
     /\b(nahi|nahin|mat)\b/i,
     /\b(theek|thik|accha|achha|sahi|galat)\b/i,
     /\b(shukriya|dhanyawad|dhanyavaad|bahut)\b/i,
-    /\b(kripya|madad|sahayata|chahiye)\b/i,
+    /\b(kripya|madad|sahayata)\b/i,
     /\b(alvida)\b/i,
   ];
   if (hinglishPatterns.some((pattern) => pattern.test(lower))) {
@@ -182,12 +161,10 @@ export function detectLanguage(text: string): SupportedLanguage {
 export function isConversationalGreeting(message: string): boolean {
   const norm = message.trim().toLowerCase().replace(/[!?.,;:'"()]/g, "");
 
-  // Gujarati script greetings
   if (/^(નમસ્તે|નમસ્કાર|પ્રણામ|કેમ છો|કેમછો|સુપ્રભાત|આભાર|ધન્યવાદ|સારું|આવજો)/i.test(norm)) {
     return true;
   }
 
-  // Hindi script greetings
   if (/^(नमस्ते|नमस्कार|प्रणाम|सुप्रभात|धन्यवाद|शुक्रिया|ठीक है|अलविदा|राम राम|राधे राधे)/i.test(norm)) {
     return true;
   }
@@ -222,18 +199,18 @@ export function getConversationalReply(message: string): string {
     /^(धन्यवाद|शुक्रिया)/i.test(norm)
   ) {
     if (lang === "ENGLISH") {
-      return "You are welcome! Please let me know if you need any assistance with hospital management, doctor schedules, or patient appointments.";
+      return "You are welcome! Let me know anytime if you need details on doctors, timings, fees, active status, or appointments.";
     }
     if (lang === "GUJARATI_SCRIPT") {
-      return "તમારું સ્વાગત છે! જો હોસ્પિટલ મેનેજમેન્ટ, ડોક્ટર્સ રોસ્ટર અથવા પેશન્ટ એપોઇન્ટમેન્ટ્સ શેડ્યૂલ સંબંધિત કોઈ કામ હોય, તો જરૂર જણાવશો.";
+      return "તમારું સ્વાગત છે! ડોક્ટર્સ, સમય, ફી, એક્ટિવ/ડિએક્ટિવ સ્ટેટસ કે એપોઇન્ટમેન્ટ્સની કોઈ પણ માહિતી જોઈએ તો જરૂર જણાવશો.";
     }
     if (lang === "HINDI_SCRIPT") {
-      return "आपका स्वागत है! यदि अस्पताल प्रबंधन, डॉक्टरों की सूची या अपॉइंटमेंट्स शेड्यूल से जुड़ा कोई कार्य हो, तो अवश्य बताएं।";
+      return "आपका स्वागत है! डॉक्टरों, समय, फीस, सक्रिय/निष्क्रिय स्थिति या अपॉइंटमेंट्स की कोई भी जानकारी चाहिए तो अवश्य पूछें।";
     }
     if (lang === "GUJLISH") {
-      return "Tamaru swagat chhe! Jo hospital management, doctors ni vigat ke upcoming appointments babate koi kaam hoy, to zaroor janavjo.";
+      return "Tamaru swagat chhe! Doctors, timing, fees, active/deactive status ke appointments ni koi pan vigat joiye to zaroor puchhjo.";
     }
-    return "Aapka swagat hai! Agar hospital management, doctors ki roster ya patient appointments schedule se juda koi aur kaam ho, toh zaroor batayein.";
+    return "Aapka swagat hai! Doctors, timings, fees, active/deactive status ya appointments ki koi bhi jankari chahiye toh zaroor batayein.";
   }
 
   // 2. Acknowledgement / OK
@@ -243,18 +220,18 @@ export function getConversationalReply(message: string): string {
     /^(ठीक है|बिल्कुल)/i.test(norm)
   ) {
     if (lang === "ENGLISH") {
-      return "Understood! Please let me know if you would like to check the doctor roster, review upcoming appointments, or update clinic settings.";
+      return "Understood! Ask me anytime if you want to check doctors, timings, fees, active websites, or booked appointments.";
     }
     if (lang === "GUJARATI_SCRIPT") {
-      return "બરાબર! જો તમારે ક્લિનિક રોસ્ટર, આગામી એપોઇન્ટમેન્ટ્સ શેડ્યૂલ અથવા કોઈ ડોક્ટરની પ્રોફાઇલ તપાસવી હોય, તો જણાવશો.";
+      return "બરાબર! તમારે ડોક્ટર્સ, સમય, ફી, એક્ટિવ/ડિએક્ટિવ સ્ટેટસ અથવા બુક થયેલી એપોઇન્ટમેન્ટ્સની માહિતી જોવી હોય તો પૂછી શકો છો.";
     }
     if (lang === "HINDI_SCRIPT") {
-      return "ठीक है! यदि आपको क्लिनिक रोस्टर, आगामी अपॉइंटमेंट्स शेड्यूल या किसी डॉक्टर की प्रोफाइल चेक करनी हो, तो बताएं।";
+      return "ठीक है! यदि आपको डॉक्टरों, समय, फीस, सक्रिय स्थिति या बुक की गई अपॉइंटमेंट्स की जानकारी देखनी हो, तो बताएं।";
     }
     if (lang === "GUJLISH") {
-      return "Saru! Jo tamare clinic roster, upcoming appointments schedule ke doctor ni profile check karvi hoy, to janavjo.";
+      return "Saru! Tamare doctors, timing, fees, active/deactive status ke book thayeli appointments ni vigat jovi hoy to puchhi shako chho.";
     }
-    return "Theek hai! Agar aapko clinic roster, upcoming appointments schedule ya kisi doctor ki profile check karni ho, toh batayein.";
+    return "Theek hai! Agar aapko doctors, timings, fees, active/deactive status ya booked appointments ki jankari dekhni ho, toh batayein.";
   }
 
   // 3. How are you
@@ -264,18 +241,18 @@ export function getConversationalReply(message: string): string {
     /^(आप कैसे हैं|कैसे हो|कैसे हैं आप)/i.test(norm)
   ) {
     if (lang === "ENGLISH") {
-      return "I am doing well, thank you! I am your healthcare portal administrative assistant. How can I assist you with clinic or hospital administration today?";
+      return "I am doing great, thank you! I am your read-only admin information assistant. How can I help you check doctors, timings, fees, or appointments today?";
     }
     if (lang === "GUJARATI_SCRIPT") {
-      return "હું એકદમ મજામાં છું, આભાર! હું તમારા હેલ્થકેર પોર્ટલનો એડમિનિસ્ટ્રેટિવ આસિસ્ટન્ટ છું. કહો, આજે હોસ્પિટલ કે ક્લિનિક મેનેજમેન્ટમાં હું તમારી શું સહાયતા કરું?";
+      return "હું એકદમ મજામાં છું, આભાર! હું તમારા એડમિન પેનલનો માહિતી આસિસ્ટન્ટ છું. કહો, આજે ડોક્ટર્સ, સમય, ફી અથવા એપોઇન્ટમેન્ટ્સ વિશે શું જાણવું છે?";
     }
     if (lang === "HINDI_SCRIPT") {
-      return "मैं बिल्कुल ठीक हूँ, धन्यवाद! मैं आपका हेल्थकेयर पोर्टल प्रशासनिक सहायक हूँ। कहिए, आज अस्पताल या क्लिनिक प्रबंधन में मैं आपकी क्या सहायता करूँ?";
+      return "मैं बिल्कुल ठीक हूँ, धन्यवाद! मैं आपके एडमिन पैनल का जानकारी सहायक हूँ। बताएं, आज डॉक्टरों, समय, फीस या अपॉइंटमेंट्स के बारे में क्या जानना है?";
     }
     if (lang === "GUJLISH") {
-      return "Hu bilkul majama chhu, aabhar! Hu tamara Doczeno portal no administrative assistant chhu. Kaho, aaje hospital ke clinic administration ma shu madad kari shaku?";
+      return "Hu bilkul majama chhu, aabhar! Hu tamara admin panel no information assistant chhu. Kaho, aaje doctors, time, fees ke appointments babate shu janvu chhe?";
     }
-    return "Main bilkul theek hoon, dhanyawad! Main aapka healthcare portal administrative assistant hoon. Kahiye, aaj hospital ya clinic management mein kya sahayata karoon?";
+    return "Main bilkul theek hoon, dhanyawad! Main aapke admin panel ka information assistant hoon. Kahiye, aaj doctors, timings, fees ya appointments ke baare mein kya jaankari chahiye?";
   }
 
   // 4. Apology
@@ -285,18 +262,18 @@ export function getConversationalReply(message: string): string {
     /^(माफ करना|माफी|क्षमा)/i.test(norm)
   ) {
     if (lang === "ENGLISH") {
-      return "No problem at all! How can I assist you with hospital or clinic administration today?";
+      return "No problem at all! Let me know what information you would like to check from your admin panel.";
     }
     if (lang === "GUJARATI_SCRIPT") {
-      return "કોઈ વાંધો નહીં! કહો, હોસ્પિટલ કે ક્લિનિક એડમિનિસ્ટ્રેશનમાં આજે હું તમારી શું મદદ કરી શકું?";
+      return "કોઈ વાંધો નહીં! તમારા એડમિન પેનલમાંથી કઈ માહિતી જોવી છે તે જણાવો.";
     }
     if (lang === "HINDI_SCRIPT") {
-      return "कोई बात नहीं! कहिए, अस्पताल या क्लिनिक प्रशासन में मैं आपकी क्या सहायता कर सकता हूँ?";
+      return "कोई बात नहीं! बताएं, अपने एडमिन पैनल से क्या जानकारी देखनी है?";
     }
     if (lang === "GUJLISH") {
-      return "Kain vandho nahi! Kaho, hospital ke clinic administration ma hu tamari shu madad kari shaku?";
+      return "Kain vandho nahi! Tamara admin panel mathi kai vigat jovi chhe te kaho.";
     }
-    return "Koi baat nahi! Kahiye, hospital ya clinic administration mein main aapki kya madad kar sakta hoon?";
+    return "Koi baat nahi! Batayein, aapke admin panel se kaunsi jaankari dekhni hai?";
   }
 
   // 5. Farewells
@@ -306,34 +283,34 @@ export function getConversationalReply(message: string): string {
     /^(अलविदा)/i.test(norm)
   ) {
     if (lang === "ENGLISH") {
-      return "Goodbye! Take care. Feel free to reach out whenever you need clinic administration support.";
+      return "Goodbye! Feel free to ask anytime you need information from your admin panel.";
     }
     if (lang === "GUJARATI_SCRIPT") {
-      return "આવજો! કાળજી રાખજો. ક્યારેય પણ ક્લિનિક એડમિનિસ્ટ્રેશનની જરૂર હોય ત્યારે જણાવશો.";
+      return "આવજો! એડમિન પેનલની કોઈ પણ માહિતી માટે ક્યારેય પણ પૂછી શકો છો.";
     }
     if (lang === "HINDI_SCRIPT") {
-      return "अलविदा! अपना ध्यान रखें। कभी भी क्लिनिक प्रशासन में सहायता की आवश्यकता हो तो अवश्य बताएं।";
+      return "अलविदा! एडमिन पैनल से किसी भी जानकारी के लिए कभी भी पूछ सकते हैं।";
     }
     if (lang === "GUJLISH") {
-      return "Aavjo! Dhyan rakhjo. Tyare pan clinic administration ni zaroorat hoy to janavjo.";
+      return "Aavjo! Admin panel ni koi pan vigat mate kyare pan puchhi shako chho.";
     }
-    return "Alvida! Apna khayal rakhein. Kabhi bhi clinic administration ki zaroorat ho toh batayein.";
+    return "Alvida! Admin panel se kisi bhi jaankari ke liye kabhi bhi pooch sakte hain.";
   }
 
-  // 6. General greetings (hi, hello, namaste, kem cho, etc.)
+  // 6. General greetings
   if (lang === "ENGLISH") {
-    return "Hello! Welcome to the Doczeno healthcare management portal. How can I assist you with hospital administration, doctor rosters, appointments, or clinic settings today?";
+    return "Hello! I am your admin panel information assistant. Ask me about doctors, specialties, timings, fees, active/deactive status, or booked appointments.";
   }
   if (lang === "GUJARATI_SCRIPT") {
-    return "નમસ્તે! હું Doczeno હેલ્થકેર મેનેજમેન્ટ પોર્ટલનો ઓફિશિયલ એડમિનિસ્ટ્રેટિવ આસિસ્ટન્ટ છું. હોસ્પિટલ મેનેજમેન્ટ, ડોક્ટર્સની માહિતી, એપોઇન્ટમેન્ટ્સ શેડ્યૂલ અથવા ક્લિનિક સેટિંગ્સ માટે આજે હું તમારી શું મદદ કરી શકું?";
+    return "નમસ્તે! હું તમારા એડમિન પેનલનો માહિતી આસિસ્ટન્ટ છું. તમે મને ડોક્ટર્સ, સમય, ફી, એક્ટિવ/ડિએક્ટિવ સ્ટેટસ કે બુક થયેલી એપોઇન્ટમેન્ટ્સ વિશે પૂછી શકો છો.";
   }
   if (lang === "HINDI_SCRIPT") {
-    return "नमस्ते! मैं Doczeno हेल्थकेयर मैनेजमेंट पोर्टल का आधिकारिक प्रशासनिक सहायक हूँ। अस्पताल प्रबंधन, डॉक्टरों की सूची, अपॉइंटमेंट्स शेड्यूल या क्लिनिक सेटिंग्स से जुड़ी किसी भी जानकारी के लिए बताएं, आज मैं आपकी क्या सहायता कर सकता हूँ?";
+    return "नमस्ते! मैं आपके एडमिन पैनल का जानकारी सहायक हूँ। आप मुझसे डॉक्टरों, समय, फीस, सक्रिय/निष्क्रिय स्थिति या बुक की गई अपॉइंटमेंट्स के बारे में पूछ सकते हैं।";
   }
   if (lang === "GUJLISH") {
-    return "Namaste! Hu tamara Doczeno healthcare portal no official administrative assistant chhu. Hospital management, doctors ni vigat, upcoming patient appointments schedule ke clinic settings mate kaho, aaje hu tamari shu madad kari shaku?";
+    return "Namaste! Hu tamara admin panel no information assistant chhu. Tame mane doctors, time, fees, active/deactive status ke booked appointments babate puchhi shako chho.";
   }
-  return "Namaste! Main Doczeno healthcare management portal ka official administrative assistant hoon. Hospital management, doctors ki details, upcoming patient appointments schedule ya clinic settings se judi kisi bhi jaankari ke liye batayein, aaj main aapki kya madad kar sakta hoon?";
+  return "Namaste! Main aapke admin panel ka information assistant hoon. Aap mujhse doctors, timings, fees, active/deactive status ya booked appointments ke baare mein pooch sakte hain.";
 }
 
 /**
@@ -342,12 +319,10 @@ export function getConversationalReply(message: string): string {
 export function isDateOrDayQuery(message: string): boolean {
   const norm = message.trim().toLowerCase();
 
-  // Gujarati script date/day inquiries
   if (/[\u0A80-\u0AFF]/.test(message)) {
     return /(તારીખ|વાર|દિવસ|આજે|આવતીકાલે|આવતીકાલ|કાલે|પરમ\s*દિવસે)/i.test(message);
   }
 
-  // Hindi script date/day inquiries
   if (/[\u0900-\u097F]/.test(message)) {
     return /(तारीख|दिनांक|दिन|वार|आज|कल|परसों)/i.test(message);
   }
@@ -365,10 +340,10 @@ export function isDateOrDayQuery(message: string): boolean {
 }
 
 /**
- * Returns accurate real-world current date and day description in the user's exact language (Plain text only)
+ * Returns accurate real-world current date and day description in the user's exact language
  */
 export function getRealDateAndDayReply(message: string): string {
-  const norm = message.toLowerCase();
+  const norm = message.trim().toLowerCase();
   const lang = detectLanguage(message);
   const now = new Date();
 
@@ -394,11 +369,9 @@ export function getRealDateAndDayReply(message: string): string {
   };
 
   const todayInfo = formatInfo(now);
-
   const tomorrow = new Date(now);
   tomorrow.setDate(tomorrow.getDate() + 1);
   const tomorrowInfo = formatInfo(tomorrow);
-
   const parso = new Date(now);
   parso.setDate(parso.getDate() + 2);
   const parsoInfo = formatInfo(parso);
@@ -413,7 +386,7 @@ export function getRealDateAndDayReply(message: string): string {
     if (isParso) {
       return `The day after tomorrow's date is ${parsoInfo.dateNum} ${parsoInfo.monthName} ${parsoInfo.year} (${parsoInfo.dateFormatted}), and the day will be ${parsoInfo.dayNameEn}.`;
     }
-    return `Today's date is ${todayInfo.dateNum} ${todayInfo.monthName} ${todayInfo.year} (${todayInfo.dateFormatted}), and today is ${todayInfo.dayNameEn}. Tomorrow's date will be ${tomorrowInfo.dateNum} ${tomorrowInfo.monthName} ${tomorrowInfo.year} (${tomorrowInfo.dayNameEn}).`;
+    return `Today's date is ${todayInfo.dateNum} ${todayInfo.monthName} ${todayInfo.year} (${todayInfo.dateFormatted}), and today is ${todayInfo.dayNameEn}.`;
   }
 
   if (lang === "GUJARATI_SCRIPT") {
@@ -423,7 +396,7 @@ export function getRealDateAndDayReply(message: string): string {
     if (isParso) {
       return `પરમ દિવસની તારીખ ${parsoInfo.dateNum} ${parsoInfo.monthName} ${parsoInfo.year} (${parsoInfo.dateFormatted}) છે અને તે દિવસે ${parsoInfo.dayNameGu} (${parsoInfo.dayNameEn}) હશે.`;
     }
-    return `આજની તારીખ ${todayInfo.dateNum} ${todayInfo.monthName} ${todayInfo.year} (${todayInfo.dateFormatted}) છે અને આજનો વાર ${todayInfo.dayNameGu} (${todayInfo.dayNameEn}) છે. આવતીકાલે ${tomorrowInfo.dateNum} ${tomorrowInfo.monthName} ${tomorrowInfo.year} (${tomorrowInfo.dayNameGu}) રહેશે.`;
+    return `આજની તારીખ ${todayInfo.dateNum} ${todayInfo.monthName} ${todayInfo.year} (${todayInfo.dateFormatted}) છે અને આજનો વાર ${todayInfo.dayNameGu} (${todayInfo.dayNameEn}) છે.`;
   }
 
   if (lang === "HINDI_SCRIPT") {
@@ -433,7 +406,7 @@ export function getRealDateAndDayReply(message: string): string {
     if (isParso) {
       return `परसों की तारीख ${parsoInfo.dateNum} ${parsoInfo.monthName} ${parsoInfo.year} (${parsoInfo.dateFormatted}) है और दिन ${parsoInfo.dayNameHiScript} (${parsoInfo.dayNameEn}) होगा।`;
     }
-    return `आज की तारीख ${todayInfo.dateNum} ${todayInfo.monthName} ${todayInfo.year} (${todayInfo.dateFormatted}) है और आज का दिन ${todayInfo.dayNameHiScript} (${todayInfo.dayNameEn}) है। कल की तारीख ${tomorrowInfo.dateNum} ${tomorrowInfo.monthName} ${tomorrowInfo.year} (${tomorrowInfo.dayNameHiScript}) होगी।`;
+    return `आज की तारीख ${todayInfo.dateNum} ${todayInfo.monthName} ${todayInfo.year} (${todayInfo.dateFormatted}) है और आज का दिन ${todayInfo.dayNameHiScript} (${todayInfo.dayNameEn}) है।`;
   }
 
   if (lang === "GUJLISH") {
@@ -443,31 +416,28 @@ export function getRealDateAndDayReply(message: string): string {
     if (isParso) {
       return `Parme divas ni tarikh ${parsoInfo.dateNum} ${parsoInfo.monthName} ${parsoInfo.year} (${parsoInfo.dateFormatted}) chhe ane vaar ${parsoInfo.dayNameEn} hashe.`;
     }
-    return `Aaj ni tarikh ${todayInfo.dateNum} ${todayInfo.monthName} ${todayInfo.year} (${todayInfo.dateFormatted}) chhe ane aaje ${todayInfo.dayNameEn} (${todayInfo.dayNameHi}) chhe. Kaale ${tomorrowInfo.dateNum} ${tomorrowInfo.monthName} ${tomorrowInfo.year} (${tomorrowInfo.dayNameEn}) thashe.`;
+    return `Aaj ni tarikh ${todayInfo.dateNum} ${todayInfo.monthName} ${todayInfo.year} (${todayInfo.dateFormatted}) chhe ane aaje ${todayInfo.dayNameEn} (${todayInfo.dayNameHi}) chhe.`;
   }
 
-  // Hinglish
   if (isTomorrow) {
     return `Kal ki tareekh ${tomorrowInfo.dateNum} ${tomorrowInfo.monthName} ${tomorrowInfo.year} (${tomorrowInfo.dateFormatted}) hai aur din ${tomorrowInfo.dayNameEn} (${tomorrowInfo.dayNameHi}) hoga.`;
   }
   if (isParso) {
     return `Parso ki tareekh ${parsoInfo.dateNum} ${parsoInfo.monthName} ${parsoInfo.year} (${parsoInfo.dateFormatted}) hai aur din ${parsoInfo.dayNameEn} (${parsoInfo.dayNameHi}) hoga.`;
   }
-  return `Aaj ki tareekh ${todayInfo.dateNum} ${todayInfo.monthName} ${todayInfo.year} (${todayInfo.dateFormatted}) hai aur aaj ka din ${todayInfo.dayNameEn} (${todayInfo.dayNameHi}) hai. Kal ki tareekh ${tomorrowInfo.dateNum} ${tomorrowInfo.monthName} ${tomorrowInfo.year} (${tomorrowInfo.dayNameEn}) hogi.`;
+  return `Aaj ki tareekh ${todayInfo.dateNum} ${todayInfo.monthName} ${todayInfo.year} (${todayInfo.dateFormatted}) hai aur aaj ka din ${todayInfo.dayNameEn} (${todayInfo.dayNameHi}) hai.`;
 }
 
 /**
- * Checks if a message is an off-topic / outside question (e.g. Elon Musk, drinking water benefits, politics, recipes)
+ * Checks if a message is an off-topic / outside question (shared helper also imported by public-chatbot.service.ts)
  */
 export function isOutsideOrOffTopicQuery(message: string): boolean {
   const norm = message.trim().toLowerCase();
 
-  // Explicitly allow date, day, and calendar inquiries
   if (isDateOrDayQuery(message)) {
     return false;
   }
 
-  // 1. Celebrities, public figures, politicians, entrepreneurs, tech personalities
   const outsidePersonalities = [
     /\b(elon|alon)\s*musk\b/i,
     /\b(bill\s*gates|steve\s*jobs|mark\s*zuckerberg|jeff\s*bezos)\b/i,
@@ -477,21 +447,17 @@ export function isOutsideOrOffTopicQuery(message: string): boolean {
     /\b(shah\s*rukh|salman\s*khan|aamir\s*khan|deepika|actor|actress|hero)\b/i,
     /\b(spacex|tesla|twitter|x\.com)\b/i,
   ];
-
   if (outsidePersonalities.some((p) => p.test(norm))) {
     return true;
   }
 
-  // 2. Off-topic "kon hai" / "kaun hai" / "who is" queries (not asking about doctor/staff/admin)
   if (/(kon|kaun|who)\s+(hai|h|he|is|was|chhe)/i.test(norm)) {
-    const isClinicalQuery = /\b(doctor|dr|physician|surgeon|staff|admin|patient|roster|user|specialist)\b/i.test(norm);
+    const isClinicalQuery = /\b(doctor|dr|physician|surgeon|staff|admin|patient|roster|user|specialist|hospital|clinic|active|deactive)\b/i.test(norm);
     if (!isClinicalQuery) {
       return true;
     }
   }
 
-  // 3. General health/nutrition/diet advice or wellness queries (off-topic for portal admin)
-  // e.g. "jyada pani pine se kya fayda hota hai", "benefits of drinking water", "weight loss kaise kare"
   const generalHealthPatterns = [
     /\bpani\s+(pine|peene)\b/i,
     /\bdrinking\s+water\b/i,
@@ -499,15 +465,13 @@ export function isOutsideOrOffTopicQuery(message: string): boolean {
     /\b(pani|water|food|khana|diet|sleep|nind|fruit|seb|milk|doodh|juice)\b.*\b(fayda|fayde|benefits?|nuksan)\b/i,
     /\b(vajan|weight\s*loss|weight\s*gain|motapa|fat\s*loss)\b/i,
     /\b(diet\s*plan|diet\s*chart|subah\s*uthke|morning\s*walk|workout|yoga)\b/i,
-    /\b(gharelu\s*nuskhe|home\s*remed|totke)\b/i,
-    /\b(dawa|medicine|tablet|goli)\s+(batao|de|suggest|kya\s+hai)\b/i,
+    /\b(gharelu\s*nuskhe|gharelu\s*upay|home\s*remed|totke|ayurvedic\s*upay)\b/i,
+    /\b(dawa|dawai|medicine|tablet|goli|syrup)\s+(batao|de|suggest|kya\s+hai|kaunsi|konsi)\b/i,
   ];
-
   if (generalHealthPatterns.some((p) => p.test(norm))) {
     return true;
   }
 
-  // 4. Other external trivia / weather / entertainment / coding / recipes
   const generalTriviaPatterns = [
     /\b(mausam|weather|temperature|barish|forecast)\b/i,
     /\b(recipe|dish|kaise\s*banaye|banane\s*ki\s*vidhi)\b/i,
@@ -517,7 +481,6 @@ export function isOutsideOrOffTopicQuery(message: string): boolean {
     /\b(capital\s+of|prime\s+minister|president|rajdhani)\b/i,
     /\b(joke|chutkula|shayari|story|kahani)\b/i,
   ];
-
   if (generalTriviaPatterns.some((p) => p.test(norm))) {
     return true;
   }
@@ -526,142 +489,168 @@ export function isOutsideOrOffTopicQuery(message: string): boolean {
 }
 
 /**
- * Returns a polite plain-text refusal for outside questions in the exact language of the user
+ * Checks if an admin query is asking for disease cure, treatment protocols, medicines, or home remedies
+ * (strictly forbidden in Admin AI Copilot, while allowing queries about which doctor treats what specialty).
+ */
+export function isAdminMedicalTreatmentOrRemedyQuery(message: string): boolean {
+  const norm = message.trim().toLowerCase();
+
+  // Allow administrative questions about practice specialization / doctors
+  if (/\b(doctor|dr|hospital|clinic|specialist|kaun|kon|which|list)\b/i.test(norm) && !/\b(gharelu|remed|ilaj\s+kaise|kaise\s+thik|dawai|tablet|syrup|prescription)\b/i.test(norm)) {
+    return false;
+  }
+
+  const medicalAdvicePatterns = [
+    /\b(bimari|disease|bukhar|fever|sugar|diabetes|bp|cancer|infection|khansi|cough|cold|dard|pain|migraine|thyroid)\b.*\b(ilaj\s+kaise|kaise\s+thik|cure|remedy|treatment|dawa|dawai|medicine|kya\s+khaye|kya\s+piye)\b/i,
+    /\b(ilaj\s+kaise\s+hota|kaise\s+thik\s+hota|how\s+to\s+cure|how\s+to\s+treat|home\s+remed|gharelu\s+upay|gharelu\s+ilaj|gharelu\s+nuskhe|nuskha|upay)\b/i,
+    /\b(dosage|side\s*effects|antibiotic|paracetamol|crocin|insulin|syrup|capsule)\b/i,
+  ];
+
+  return medicalAdvicePatterns.some((p) => p.test(norm));
+}
+
+/**
+ * Checks if the message is asking the Admin AI Copilot to PERFORM a write/edit/delete/activate/deactivate/booking action
+ * (both direct & indirect phrasing), while carefully allowing read-only status/count inquiries.
+ */
+export function isMutationOrActionRequest(message: string): boolean {
+  const norm = message.trim().toLowerCase();
+  if (!norm) return false;
+
+  // Read-only informational questions that merely contain status words ("kon active hai", "kitne delete hue")
+  const isPureInfoQuestion =
+    /^(who|which|what|how many|show|list|get|find|tell|give|check|summarize|summary|count|kon|kaun|kis|kitne|kitni|kitna|kya|batao|dikhao|dekho)\b/i.test(norm) &&
+    !/\b(karo|kardo|kar do|kar de|kijiye|kariye|karna hai|karni hai|karwana hai|banado|bana do|hatado|hata do|mitao|badlo|badal do|delete|remove|edit|modify|update|deactivate|deactve|activate|disable|enable|create|add|approve|reject|cancel|book)\b/i.test(norm);
+
+  if (isPureInfoQuestion) {
+    return false;
+  }
+
+  // Imperative / indirect Hinglish, Gujlish, Hindi, Gujarati action verbs
+  const indicImperatives =
+    /\b(karo|kardo|kar\s+do|kar\s+de|kar\s+dena|kijiye|kariye|karna\s+hai|karni\s+hai|karwana\s+hai|karvu\s+chhe|karvi\s+chhe|karsho|kari\s+do|hatao|hatado|hata\s+do|hata\s+de|mitao|mita\s+do|badlo|badal\s+do|badal\s+de|sudharo|banado|bana\s+do|band\s+kar|chalu\s+kar|on\s+kar|off\s+kar|rakho|rakhna)\b/i;
+
+  const mutationTargets =
+    /\b(delete|remove|del|purge|erase|edit|modify|update|change|rename|reset|deactivate|deactve|deactive|activate|active|disable|enable|suspend|create|add|new\s+doctor|naya\s+doctor|approve|reject|cancel|reschedule|book|mark|completed|status|fee|fees|timing|time|hours|bio|title|theme|slug|domain|password|email|profile|doctor|dr|website|hospital|clinic|appointment)\b/i;
+
+  if (indicImperatives.test(norm) && mutationTargets.test(norm)) {
+    return true;
+  }
+
+  // Unicode Hindi / Gujarati imperative mutation patterns
+  if (/[\u0900-\u097F\u0A80-\u0AFF]/.test(message)) {
+    if (/(हटाओ|हटाएं|डिलीट|बदलो|बदलें|अपडेट|एडिट|बंद\s*कर|चालू\s*कर|सक्रिय\s*कर|निष्क्रिय\s*कर|રદ\s*કર|ડિલીટ|હટાવો|બદલો|અપડેટ|એડિટ|બંધ\s*કર|ચાલુ\s*કર)/i.test(message)) {
+      return true;
+    }
+  }
+
+  // English imperative/action requests ("delete doctor", "please deactivate dr x", "change fees to 500", "add a doctor")
+  const englishActionVerbs =
+    /\b(delete|remove|erase|purge|deactivate|deactve|disable|suspend|activate|reactivate|enable|edit|modify|update|change|alter|rename|reset|create|add|register|approve|reject|cancel|reschedule|book|mark|turn\s+off|turn\s+on|switch\s+off|switch\s+on|set\s+status)\b/i;
+
+  if (englishActionVerbs.test(norm)) {
+    // Allow purely informational questions like "how many appointments were cancelled?" or "which doctors are active/deactivated?"
+    const informationalExceptions =
+      /\b(how\s+many|who\s+(?:was|were|is|are)|which\s+.*(?:are|were)|list\s+.*(?:cancelled|deleted|active|deactive|deactivated)|count\s+of|total\s+(?:cancelled|deleted)|reason|details\s+of|summary\s+of|is\s+.*\s+(?:active|deactivated|cancelled|deleted)|are\s+.*\s+(?:active|deactivated|cancelled))\b/i;
+    if (!informationalExceptions.test(norm)) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+/**
+ * Returns a polite plain-text refusal for write/mutation requests in the user's exact language
+ */
+export function getMutationRefusalReply(message: string): string {
+  const lang = detectLanguage(message);
+
+  if (lang === "ENGLISH") {
+    return "Sorry, I am a read-only information assistant. I cannot delete, edit, modify, create, activate, or deactivate any records, or perform bookings/cancellations. Please perform those actions directly using the controls in your admin panel. Let me know if you want to check any details or reports!";
+  }
+
+  if (lang === "GUJARATI_SCRIPT") {
+    return "માફ કરશો, હું માત્ર માહિતી બતાવતો (Read-Only) આસિસ્ટન્ટ છું. હું કોઈપણ રેકોર્ડ ડિલીટ, એડિટ, અપડેટ, ક્રિએટ, એક્ટિવ કે ડિએક્ટિવ કરી શકતો નથી. કૃપા કરીને આ ફેરફાર તમારા એડમિન પેનલના બટન દ્વારા જાતે કરો. હા, જો કોઈ માહિતી કે રિપોર્ટ જોવા હોય તો પૂછી શકો છો!";
+  }
+
+  if (lang === "HINDI_SCRIPT") {
+    return "क्षमा करें, मैं केवल जानकारी प्रदान करने वाला (Read-Only) सहायक हूँ। मैं किसी भी रिकॉर्ड को डिलीट, एडिट, अपडेट, क्रिएट, एक्टिव या डिएक्टिव नहीं कर सकता। कृपया यह कार्य एडमिन पैनल के विकल्पों से स्वयं करें। यदि आपको कोई जानकारी या रिपोर्ट देखनी हो, तो अवश्य पूछें!";
+  }
+
+  if (lang === "GUJLISH") {
+    return "Maaf karjo, hu fakt mahiti aapto (read-only) assistant chhu. Hu koi pan record delete, edit, modify, create, active ke deactive kari shakto nathi. Kripa karine aa kaam admin panel na buttons thi jate karo. Ha, jo koi vigat ke report jovi hoy to puchhi shako chho!";
+  }
+
+  return "Maaf kijiye, main sirf information dikhane wala (read-only) assistant hoon. Main kisi bhi record ko delete, edit, modify, create, activate ya deactivate nahi kar sakta. Kripya ye kaam admin panel ke buttons se khud karein. Haan, agar aapko koi details ya summary dekhni ho toh zaroor poochein!";
+}
+
+/**
+ * Returns a polite plain-text refusal for outside or medical-treatment questions in the user's exact language
  */
 export function getOutsideTopicRefusal(message: string): string {
   const lang = detectLanguage(message);
 
   if (lang === "ENGLISH") {
-    return "I am the official administrative assistant for the Doczeno healthcare platform. I can only assist with hospital management, doctor details, appointments, timings, and clinic administration. I cannot answer external or general knowledge questions. Please let me know how I can assist with clinic administration.";
+    return "I can only share information and reports from your Doczeno admin panel (doctors, specialties, timings, fees, active/deactive status, and appointments). I cannot answer external general knowledge questions, medical treatments, or home remedies.";
   }
 
   if (lang === "GUJARATI_SCRIPT") {
-    return "હું Doczeno હેલ્થકેર પ્લેટફોર્મનો ઓફિશિયલ એડમિનિસ્ટ્રેટિવ આસિસ્ટન્ટ છું. હું માત્ર હોસ્પિટલ મેનેજમેન્ટ, ડોક્ટર્સની માહિતી, એપોઇન્ટમેન્ટ્સ, સમય અને ક્લિનિક એડમિનિસ્ટ્રેશનમાં જ મદદ કરી શકું છું. બહારના કે સામાન્ય જ્ઞાનના સવાલોના જવાબ આપવા મારા કાર્યક્ષેત્રમાં નથી. કહો, હોસ્પિટલ કે ક્લિનિક વહીવટમાં શું મદદ જોઈએ છે?";
+    return "હું માત્ર તમારા Doczeno એડમિન પેનલની માહિતી (ડોક્ટર્સ, સમય, ફી, એક્ટિવ/ડિએક્ટિવ સ્ટેટસ અને એપોઇન્ટમેન્ટ્સ) જ બતાવી શકું છું. બહારના સામાન્ય જ્ઞાનના સવાલો, બીમારીનો ઈલાજ કે ઘરેલુ ઉપાયો વિશે જવાબ આપી શકતો નથી.";
   }
 
   if (lang === "HINDI_SCRIPT") {
-    return "मैं Doczeno हेल्थकेयर प्लेटफॉर्म का आधिकारिक प्रशासनिक सहायक हूँ। मैं केवल अस्पताल प्रबंधन, डॉक्टरों के विवरण, अपॉइंटमेंट्स, समय और क्लिनिक प्रशासन से जुड़े कार्यों में ही सहायता कर सकता हूँ। बाहरी या सामान्य ज्ञान के प्रश्नों के उत्तर देना मेरे कार्यक्षेत्र में नहीं है। बताएं, अस्पताल या क्लिनिक प्रशासन से जुड़ा क्या कार्य करना है?";
+    return "मैं केवल आपके Doczeno एडमिन पैनल की जानकारी (डॉक्टरों, समय, फीस, सक्रिय/निष्क्रिय स्थिति और अपॉइंटमेंट्स) ही दे सकता हूँ। बाहरी सामान्य ज्ञान, बीमारी का इलाज या घरेलू उपाय बताना मेरे कार्यक्षेत्र में नहीं है।";
   }
 
   if (lang === "GUJLISH") {
-    return "Hu Doczeno healthcare platform no official administrative assistant chhu. Hu fakt hospital management, doctors ni vigat, appointments, timing ane clinic administration ma madad kari shaku chhu. Bahaar na ke general sawalo na jawab aapi shakto nathi. Kaho, clinic ke hospital mate shu madad joiye chhe?";
+    return "Hu fakt tamara Doczeno admin panel ni vigat (doctors, time, fees, active/deactive status ane appointments) j batavi shaku chhu. Bahaar na general sawalo, bimari no ilaj ke gharelu upay aapi shakto nathi.";
   }
 
-  return "Main Doczeno healthcare platform ka official administrative assistant hoon. Main sirf hospital management, doctors ki details, appointments, timings aur clinic administration se jude kaam mein hi madad kar sakta hoon. Bahar ke ya general sawalon ke jawab dena mere daayre mein nahi hai. Kahiye, clinic ya hospital administration se juda kya kaam karna hai?";
+  return "Main sirf aapke Doczeno admin panel ki information (doctors, timings, fees, active/deactive status aur appointments) hi bata sakta hoon. Bahar ki duniya ke general sawal, kisi bimari ka ilaj ya gharelu upay nahi bata sakta.";
 }
 
 export const ADMIN_ASSISTANT_TOOL_DECLARATIONS = [
   {
-    name: "getHospitalDoctors",
-    description: "List all doctors currently affiliated with the administrator's hospital organization.",
+    name: "searchAppointments",
+    description:
+      "Read-only: Search or filter patient appointments within the administrator's authorized scope by patient name, phone, appointment ID, status, or doctor name.",
     parameters: {
       type: "object",
       properties: {
-        status: { type: "string", description: "Filter by status: ACTIVE or INACTIVE" },
+        search: { type: "string", description: "Optional patient name, phone number, or appointment ID" },
+        status: {
+          type: "string",
+          description: "Optional status: PENDING, CONFIRMED, COMPLETED, CANCELLED, or PATIENT_NOT_COME",
+        },
+        doctorName: { type: "string", description: "Optional doctor name filter" },
+        limit: { type: "number", description: "Max records to return (default 20, max 50)" },
       },
     },
   },
   {
-    name: "getDoctorProfile",
-    description: "Get detailed profile information for a specific doctor.",
+    name: "listDoctors",
+    description:
+      "Read-only: List doctors within the administrator's authorized scope with optional status or specialization filter.",
     parameters: {
       type: "object",
       properties: {
-        doctorId: { type: "string", description: "Doctor ID to retrieve" },
-      },
-      required: ["doctorId"],
-    },
-  },
-  {
-    name: "getUpcomingAppointments",
-    description: "Retrieve upcoming scheduled patient appointments for the doctor or hospital.",
-    parameters: {
-      type: "object",
-      properties: {
-        doctorId: { type: "string", description: "Optional doctor ID to filter appointments" },
-        limit: { type: "number", description: "Maximum number of appointments to retrieve" },
+        status: { type: "string", description: "Filter by ACTIVE or INACTIVE" },
+        specialization: { type: "string", description: "Optional specialization keyword filter" },
+        limit: { type: "number", description: "Max records to return (default 50, max 100)" },
       },
     },
   },
   {
-    name: "getHospitalOverview",
-    description: "Retrieve hospital profile details, departments, working hours, and doctor counts.",
-    parameters: {
-      type: "object",
-      properties: {},
-    },
-  },
-  {
-    name: "updateDoctorProfile",
-    description: "Update clinical bio, years of experience, or degree qualifications for a doctor.",
+    name: "getPlatformOrHospitalDetails",
+    description:
+      "Read-only: Fetch detailed Superadmin platform metrics, custom domains, or Hospital overview.",
     parameters: {
       type: "object",
       properties: {
-        doctorId: { type: "string", description: "Doctor ID to update" },
-        bio: { type: "string", description: "Updated clinical biography" },
-        yearsOfExperience: { type: "number", description: "Updated years of experience" },
-        degree: { type: "string", description: "Updated qualifications" },
+        includeCustomDomains: { type: "boolean", description: "Include connected custom domains list" },
+        organizationStatus: { type: "string", description: "Optional org status filter: ACTIVE, INACTIVE, SUSPENDED" },
       },
-      required: ["doctorId"],
-    },
-  },
-  {
-    name: "updateHospitalContent",
-    description: "Update the hospital tagline or about narrative text.",
-    parameters: {
-      type: "object",
-      properties: {
-        tagline: { type: "string", description: "Updated hospital tagline" },
-        about: { type: "string", description: "Updated hospital about narrative" },
-      },
-    },
-  },
-  {
-    name: "updateWebsiteTabTitle",
-    description: "Update the public browser tab title for the website.",
-    parameters: {
-      type: "object",
-      properties: {
-        tabTitle: { type: "string", description: "New browser tab title" },
-      },
-      required: ["tabTitle"],
-    },
-  },
-  {
-    name: "updateHospitalBranding",
-    description: "Update hospital theme or favicon URL.",
-    parameters: {
-      type: "object",
-      properties: {
-        selectedTheme: { type: "string", description: "Theme identifier (theme-1, theme-2, theme-3)" },
-        faviconUrl: { type: "string", description: "New favicon URL" },
-      },
-    },
-  },
-  {
-    name: "createDoctor",
-    description: "Add a new affiliated doctor to the hospital roster.",
-    parameters: {
-      type: "object",
-      properties: {
-        doctorName: { type: "string", description: "Full name of the doctor" },
-        degree: { type: "string", description: "Medical degrees (e.g. MBBS, MS)" },
-        specialization: { type: "string", description: "Medical specialization" },
-        yearsOfExperience: { type: "number", description: "Years of clinical experience" },
-        email: { type: "string", description: "Doctor's professional email" },
-      },
-      required: ["doctorName", "degree", "specialization", "yearsOfExperience", "email"],
-    },
-  },
-  {
-    name: "deactivateDoctor",
-    description: "DESTRUCTIVE ACTION: Deactivates an affiliated doctor. Requires explicit confirmation from the user.",
-    parameters: {
-      type: "object",
-      properties: {
-        doctorId: { type: "string", description: "ID of the doctor to deactivate" },
-      },
-      required: ["doctorId"],
     },
   },
 ];
@@ -696,14 +685,7 @@ export class AdminAssistantService {
     userId?: any;
   }) {
     const client = this.getClient();
-    const candidateModels = Array.from(
-      new Set([
-        this.model,
-        "gemini-3.5-flash-lite",
-        "gemini-3.1-flash-lite",
-        "gemini-3.5-flash",
-      ])
-    );
+    const candidateModels = getOrderedCandidateModels(this.model);
 
     let lastError: any = null;
     for (const modelName of candidateModels) {
@@ -711,8 +693,8 @@ export class AdminAssistantService {
       try {
         const config: any = {
           systemInstruction: params.systemInstruction,
-          maxOutputTokens: 1000,
-          temperature: 0.3,
+          maxOutputTokens: 1200,
+          temperature: 0.2,
         };
         if (params.tools) {
           config.tools = params.tools;
@@ -721,12 +703,15 @@ export class AdminAssistantService {
           config.thinkingConfig = { thinkingBudget: 0 };
         }
 
-        const res = await client.models.generateContent({
+        const res = await generateContentBounded({
+          client,
           model: modelName,
           contents: params.contents,
           config,
+          timeoutMs: 10000,
         });
 
+        markModelHealthy(modelName);
         const latencyMs = Date.now() - startTime;
         const usage = (res as any)?.usageMetadata;
         GeminiLoggerService.logCall({
@@ -748,6 +733,7 @@ export class AdminAssistantService {
         lastError = err;
         const latencyMs = Date.now() - startTime;
         const parsed = GeminiLoggerService.parseError(err);
+        markModelUnhealthy(modelName, err?.status || parsed.statusCode);
         GeminiLoggerService.logCall({
           feature: "ADMIN_ASSISTANT",
           model: modelName,
@@ -767,362 +753,457 @@ export class AdminAssistantService {
   }
 
   /**
-   * Executes a backend tool with role checking, tenant isolation, argument validation, and audit logging
+   * Formats compact appointment status + source counts for any Mongo filter
+   */
+  private async getAppointmentBreakdown(filter: Record<string, any>) {
+    const [
+      total,
+      pending,
+      confirmed,
+      completed,
+      cancelled,
+      notCome,
+      viaWebsite,
+      viaChatbot,
+      viaAdmin,
+      recent,
+    ] = await Promise.all([
+      Appointment.countDocuments(filter),
+      Appointment.countDocuments({ ...filter, status: "PENDING" }),
+      Appointment.countDocuments({ ...filter, status: "CONFIRMED" }),
+      Appointment.countDocuments({ ...filter, status: "COMPLETED" }),
+      Appointment.countDocuments({ ...filter, status: "CANCELLED" }),
+      Appointment.countDocuments({ ...filter, status: "PATIENT_NOT_COME" }),
+      Appointment.countDocuments({ ...filter, source: "WEBSITE_FORM" }),
+      Appointment.countDocuments({ ...filter, source: "AI_CHATBOT" }),
+      Appointment.countDocuments({ ...filter, source: { $in: ["SLUG_ADMIN", "WALK_IN"] } }),
+      Appointment.find(filter)
+        .populate("doctorId", "doctorName specialization")
+        .populate("organizationId", "name slug")
+        .sort({ appointmentDate: -1, createdAt: -1 })
+        .limit(25)
+        .select("appointmentId tokenNumber patientName patientAge patientPhone appointmentDate timeSlot status source notes doctorId organizationId createdAt")
+        .lean(),
+    ]);
+
+    return {
+      counts: {
+        total,
+        pending,
+        confirmed,
+        completed,
+        cancelled,
+        patientNotCome: notCome,
+        bySource: { websiteForm: viaWebsite, aiChatbot: viaChatbot, adminWalkIn: viaAdmin },
+      },
+      recent: recent.map((a: any) => ({
+        appointmentId: a.appointmentId,
+        tokenNumber: a.tokenNumber ?? null,
+        patientName: a.patientName,
+        patientAge: a.patientAge,
+        patientPhone: a.patientPhone,
+        doctorName: a.doctorId?.doctorName ? `Dr. ${a.doctorId.doctorName}` : "N/A",
+        hospitalName: a.organizationId?.name || null,
+        date: a.appointmentDate ? new Date(a.appointmentDate).toISOString().split("T")[0] : "N/A",
+        timeSlot: a.timeSlot,
+        status: a.status,
+        source: a.source || "WEBSITE_FORM",
+        notes: a.notes,
+      })),
+    };
+  }
+
+  /**
+   * Builds a fast, real-time, strictly tenant-isolated administrative snapshot so 95%+ queries
+   * answer accurately in a single LLM pass (~1s) with zero hallucination.
+   */
+  private async buildLiveAdminSnapshot(user: AuthUserPayload): Promise<string> {
+    if (user.role === UserRole.SUPERADMIN) {
+      const [
+        totalOrgs,
+        activeOrgs,
+        totalDoctors,
+        activeDoctors,
+        pendingDoctors,
+        totalWebsites,
+        activeWebsites,
+        deactiveWebsites,
+        totalUsers,
+        platformConfig,
+        orgsList,
+        doctorsList,
+        customDomainSites,
+        appts,
+      ] = await Promise.all([
+        Organization.countDocuments(),
+        Organization.countDocuments({ status: "ACTIVE" }),
+        Doctor.countDocuments(),
+        Doctor.countDocuments({ status: "ACTIVE" }),
+        Doctor.countDocuments({ approvalStatus: "PENDING" }),
+        Website.countDocuments(),
+        Website.countDocuments({ publishStatus: "PUBLISHED" }),
+        Website.countDocuments({ publishStatus: { $ne: "PUBLISHED" } }),
+        User.countDocuments({ role: { $ne: UserRole.SUPERADMIN } }),
+        PlatformConfig.findOne().lean(),
+        Organization.find()
+          .select("name slug type status address.city isWebsiteChatbotEnabled isAdminChatbotEnabled isChatbotBookingEnabled isAiRegenerateEnabled")
+          .sort({ createdAt: -1 })
+          .limit(50)
+          .lean(),
+        Doctor.find()
+          .populate("organizationId", "name slug")
+          .select("doctorName slug specialization degree yearsOfExperience status approvalStatus deactivatedByRole consultationHours weeklyOff newCaseFee oldCaseFee isWebsiteChatbotEnabled isChatbotBookingEnabled")
+          .sort({ createdAt: -1 })
+          .limit(60)
+          .lean(),
+        Website.find({ customDomain: { $exists: true, $nin: [null, ""] } })
+          .select("slug customDomain customDomainStatus customDomainRedirect")
+          .lean(),
+        this.getAppointmentBreakdown({}),
+      ]);
+
+      const snapshot = {
+        role: "SUPERADMIN",
+        platformDomain: FIXED_PLATFORM_DOMAIN,
+        summaryCounts: {
+          organizations: { total: totalOrgs, active: activeOrgs, deactive: totalOrgs - activeOrgs },
+          doctors: {
+            total: totalDoctors,
+            active: activeDoctors,
+            deactive: totalDoctors - activeDoctors,
+            pendingApproval: pendingDoctors,
+            permanentlyDeletedHistory: platformConfig?.deletedDoctorsCount || 0,
+          },
+          websites: {
+            total: totalWebsites,
+            activeWebsitesCount: activeWebsites,
+            deactiveWebsitesCount: deactiveWebsites,
+          },
+          customDomains: {
+            usedCount: customDomainSites.length,
+            maxLimit: MAX_CUSTOM_DOMAINS,
+            domains: customDomainSites,
+          },
+          totalUsers,
+          appointments: appts.counts,
+        },
+        hospitalsAndClinics: orgsList.map((o: any) => ({
+          name: o.name,
+          slug: o.slug,
+          type: o.type,
+          status: o.status,
+          city: o.address?.city || "",
+          webChatbot: o.isWebsiteChatbotEnabled !== false,
+          adminChatbot: o.isAdminChatbotEnabled !== false,
+          chatbotBooking: o.isChatbotBookingEnabled !== false,
+          aiRegenerate: Boolean(o.isAiRegenerateEnabled),
+        })),
+        doctorsDirectory: doctorsList.map((d: any) => ({
+          name: `Dr. ${d.doctorName}`,
+          specialization: d.specialization,
+          degree: d.degree,
+          experienceYears: d.yearsOfExperience,
+          affiliation: d.organizationId?.name || "Only Doctor",
+          status: d.status,
+          approvalStatus: d.approvalStatus,
+          deactivatedBy: d.deactivatedByRole || null,
+          timings: d.consultationHours || "N/A",
+          weeklyOff: d.weeklyOff || "None",
+          newCaseFee: d.newCaseFee ?? "N/A",
+          oldCaseFee: d.oldCaseFee ?? "N/A",
+          chatbotBooking: d.isChatbotBookingEnabled !== false,
+        })),
+        recentAppointments: appts.recent,
+      };
+      return JSON.stringify(snapshot);
+    }
+
+    if (user.role === UserRole.HOSPITAL_ADMIN && user.organizationId) {
+      const orgId = new mongoose.Types.ObjectId(user.organizationId);
+      const [org, hospitalWebsite, hospitalDoctors, appts] = await Promise.all([
+        Organization.findById(orgId).lean(),
+        Website.findOne({ organizationId: orgId, websiteType: "HOSPITAL_CLINIC" })
+          .select("slug publishStatus deactivatedByRole customDomain customDomainStatus")
+          .lean(),
+        Doctor.find({ organizationId: orgId })
+          .select("doctorName slug degree specialization yearsOfExperience status approvalStatus deactivatedByRole consultationHours weeklyOff newCaseFee oldCaseFee whatsApp email appointmentRequired")
+          .sort({ createdAt: -1 })
+          .lean(),
+        this.getAppointmentBreakdown({ organizationId: orgId }),
+      ]);
+
+      const approvedDocs = hospitalDoctors.filter((d: any) => d.approvalStatus !== "PENDING" && d.approvalStatus !== "REJECTED");
+      const pendingDocs = hospitalDoctors.filter((d: any) => d.approvalStatus === "PENDING");
+      const activeDoctorSites = approvedDocs.filter((d: any) => d.status === "ACTIVE").length;
+      const deactiveDoctorSites = approvedDocs.filter((d: any) => d.status !== "ACTIVE").length;
+      const isHospitalSiteActive =
+        hospitalWebsite?.publishStatus !== "DRAFT" && hospitalWebsite?.publishStatus !== "SUSPENDED";
+
+      const snapshot = {
+        role: "HOSPITAL_ADMIN",
+        hospitalProfile: org
+          ? {
+              name: org.name,
+              type: org.type,
+              slug: org.slug,
+              status: org.status,
+              workingHours: org.workingHours || "N/A",
+              weeklyOff: org.weeklyOff || "None",
+              departments: org.departments || [],
+              phone: org.phone || "N/A",
+              whatsApp: org.whatsApp || "N/A",
+              email: org.email || "N/A",
+              address: org.address,
+              websiteStatus: hospitalWebsite?.publishStatus || "PUBLISHED",
+              customDomain: hospitalWebsite?.customDomain || null,
+            }
+          : null,
+        websiteAndDoctorCounts: {
+          activeWebsitesCount: activeDoctorSites + (isHospitalSiteActive ? 1 : 0),
+          deactiveWebsitesCount: deactiveDoctorSites + (isHospitalSiteActive ? 0 : 1),
+          totalDoctors: approvedDocs.length,
+          activeDoctors: activeDoctorSites,
+          deactiveDoctors: deactiveDoctorSites,
+          pendingApprovalRequests: pendingDocs.length,
+        },
+        doctors: hospitalDoctors.map((d: any) => ({
+          name: `Dr. ${d.doctorName}`,
+          degree: d.degree,
+          specialization: d.specialization,
+          experienceYears: d.yearsOfExperience,
+          status: d.status,
+          approvalStatus: d.approvalStatus,
+          deactivatedBy:
+            d.status !== "ACTIVE" && d.deactivatedByRole === "SUPERADMIN"
+              ? "Deactive by Superadmin"
+              : d.deactivatedByRole || null,
+          timings: d.consultationHours || org?.workingHours || "N/A",
+          weeklyOff: d.weeklyOff || org?.weeklyOff || "None",
+          newCaseFee: d.newCaseFee ?? "N/A",
+          oldCaseFee: d.oldCaseFee ?? "N/A",
+          email: d.email,
+          whatsApp: d.whatsApp || "N/A",
+          urlSlug: org?.slug && d.slug ? `/${org.slug}/${d.slug}` : d.slug,
+        })),
+        appointmentsSummary: appts.counts,
+        recentAppointments: appts.recent,
+      };
+      return JSON.stringify(snapshot);
+    }
+
+    // ONLY_DOCTOR or HOSPITAL_DOCTOR (strictly isolated to this doctor only)
+    if (user.doctorProfileId) {
+      const doctorId = new mongoose.Types.ObjectId(user.doctorProfileId);
+      const [doc, docWebsite, parentOrg, appts] = await Promise.all([
+        Doctor.findById(doctorId).lean(),
+        Website.findOne({ doctorId })
+          .select("slug publishStatus deactivatedByRole customDomain customDomainStatus browserTabTitle")
+          .lean(),
+        user.organizationId ? Organization.findById(user.organizationId).select("name slug workingHours weeklyOff phone address").lean() : Promise.resolve(null),
+        this.getAppointmentBreakdown({ doctorId }),
+      ]);
+
+      const snapshot = {
+        role: user.role,
+        doctorProfile: doc
+          ? {
+              name: `Dr. ${doc.doctorName}`,
+              degree: doc.degree,
+              specialization: doc.specialization,
+              experienceYears: doc.yearsOfExperience,
+              status: doc.status,
+              websiteStatus: docWebsite?.publishStatus || (doc.status === "ACTIVE" ? "PUBLISHED" : "DRAFT"),
+              deactivatedBy:
+                doc.status !== "ACTIVE" && (doc.deactivatedByRole === "SUPERADMIN" || docWebsite?.deactivatedByRole === "SUPERADMIN")
+                  ? "Deactive by Superadmin"
+                  : doc.deactivatedByRole || docWebsite?.deactivatedByRole || null,
+              approvalStatus: doc.approvalStatus,
+              timings: doc.consultationHours || parentOrg?.workingHours || "N/A",
+              weeklyOff: doc.weeklyOff || parentOrg?.weeklyOff || "None",
+              appointmentRequired: doc.appointmentRequired,
+              newCaseFee: doc.newCaseFee ?? "N/A",
+              oldCaseFee: doc.oldCaseFee ?? "N/A",
+              clinicOrHospital: parentOrg?.name || doc.clinicName || "Clinic",
+              email: doc.email,
+              whatsApp: doc.whatsApp || "N/A",
+              address: doc.address || parentOrg?.address || null,
+              customDomain: docWebsite?.customDomain || null,
+              urlSlug: parentOrg?.slug && doc.slug ? `/${parentOrg.slug}/${doc.slug}` : `/${doc.slug}`,
+            }
+          : null,
+        appointmentsSummary: appts.counts,
+        recentAppointments: appts.recent,
+      };
+      return JSON.stringify(snapshot);
+    }
+
+    return JSON.stringify({ role: user.role, message: "No specific tenant records linked." });
+  }
+
+  /**
+   * Executes strict READ-ONLY backend queries with tenant isolation.
+   * ZERO mutation/write/delete/activate/deactivate tools exist here by design.
    */
   public async executeTool(
     toolName: string,
     args: Record<string, any>,
-    user: AuthUserPayload,
-    isConfirmed = false
-  ): Promise<{ result?: any; requiresConfirmation?: boolean; confirmationPrompt?: string; pendingAction?: IPendingAction }> {
+    user: AuthUserPayload
+  ): Promise<{ result: any }> {
     switch (toolName) {
-      // 1. getHospitalDoctors
-      case "getHospitalDoctors": {
-        const parsed = getHospitalDoctorsArgsSchema.safeParse(args);
-        if (!parsed.success) throw new Error("Invalid arguments for getHospitalDoctors");
+      case "searchAppointments": {
+        const parsed = searchAppointmentsArgsSchema.safeParse(args);
+        if (!parsed.success) throw new Error("Invalid searchAppointments parameters");
+        const limit = parsed.data.limit || 20;
 
-        if (user.role !== UserRole.HOSPITAL_ADMIN && user.role !== UserRole.SUPERADMIN) {
-          throw new Error("Forbidden: Only hospital administrators or superadmins can list hospital doctors");
+        const filter: Record<string, any> = {};
+        if (user.role === UserRole.ONLY_DOCTOR || user.role === UserRole.HOSPITAL_DOCTOR) {
+          if (!user.doctorProfileId) throw new Error("Doctor profile missing");
+          filter.doctorId = new mongoose.Types.ObjectId(user.doctorProfileId);
+        } else if (user.role === UserRole.HOSPITAL_ADMIN) {
+          if (!user.organizationId) throw new Error("Hospital organization missing");
+          filter.organizationId = new mongoose.Types.ObjectId(user.organizationId);
         }
 
-        const orgId = user.organizationId;
-        if (!orgId && user.role !== UserRole.SUPERADMIN) {
-          throw new Error("No organization associated with current administrator");
+        if (parsed.data.status) {
+          filter.status = parsed.data.status;
+        }
+        if (parsed.data.search) {
+          const safeRegex = { $regex: parsed.data.search.trim(), $options: "i" };
+          filter.$or = [
+            { patientName: safeRegex },
+            { patientPhone: safeRegex },
+            { appointmentId: safeRegex },
+          ];
+        }
+        if (parsed.data.doctorName && (user.role === UserRole.HOSPITAL_ADMIN || user.role === UserRole.SUPERADMIN)) {
+          const docFilter: Record<string, any> = {
+            doctorName: { $regex: parsed.data.doctorName.trim(), $options: "i" },
+          };
+          if (user.organizationId) {
+            docFilter.organizationId = new mongoose.Types.ObjectId(user.organizationId);
+          }
+          const matchingDocs = await Doctor.find(docFilter).select("_id").lean();
+          filter.doctorId = { $in: matchingDocs.map((d) => d._id) };
         }
 
-        const query: any = {};
-        if (orgId) query.organizationId = new mongoose.Types.ObjectId(orgId);
+        const [totalMatching, items] = await Promise.all([
+          Appointment.countDocuments(filter),
+          Appointment.find(filter)
+            .populate("doctorId", "doctorName specialization")
+            .populate("organizationId", "name")
+            .sort({ appointmentDate: -1, createdAt: -1 })
+            .limit(limit)
+            .select("appointmentId patientName patientAge patientPhone appointmentDate timeSlot status source notes doctorId organizationId")
+            .lean(),
+        ]);
+
+        return {
+          result: {
+            totalMatching,
+            appointments: items.map((a: any) => ({
+              appointmentId: a.appointmentId,
+              patientName: a.patientName,
+              patientAge: a.patientAge,
+              patientPhone: a.patientPhone,
+              doctorName: a.doctorId?.doctorName ? `Dr. ${a.doctorId.doctorName}` : "N/A",
+              hospitalName: a.organizationId?.name || null,
+              date: a.appointmentDate ? new Date(a.appointmentDate).toISOString().split("T")[0] : "N/A",
+              timeSlot: a.timeSlot,
+              status: a.status,
+              source: a.source || "WEBSITE_FORM",
+              notes: a.notes,
+            })),
+          },
+        };
+      }
+
+      case "listDoctors": {
+        const parsed = listDoctorsArgsSchema.safeParse(args);
+        if (!parsed.success) throw new Error("Invalid listDoctors parameters");
+
+        const query: Record<string, any> = {};
+        if (user.role === UserRole.ONLY_DOCTOR || user.role === UserRole.HOSPITAL_DOCTOR) {
+          if (!user.doctorProfileId) throw new Error("Doctor profile missing");
+          query._id = new mongoose.Types.ObjectId(user.doctorProfileId);
+        } else if (user.role === UserRole.HOSPITAL_ADMIN) {
+          if (!user.organizationId) throw new Error("Organization missing");
+          query.organizationId = new mongoose.Types.ObjectId(user.organizationId);
+        }
+
         if (parsed.data.status) query.status = parsed.data.status;
+        if (parsed.data.specialization) {
+          query.specialization = { $regex: parsed.data.specialization.trim(), $options: "i" };
+        }
 
         const doctors = await Doctor.find(query)
-          .select("doctorName specialization degree yearsOfExperience status email")
+          .populate("organizationId", "name slug")
+          .select("doctorName specialization degree yearsOfExperience status approvalStatus deactivatedByRole consultationHours weeklyOff newCaseFee oldCaseFee email whatsApp")
+          .sort({ createdAt: -1 })
+          .limit(parsed.data.limit || 50)
           .lean();
-
-        return { requiresConfirmation: false, result: { count: doctors.length, doctors } };
-      }
-
-      // 2. getDoctorProfile
-      case "getDoctorProfile": {
-        const parsed = getDoctorProfileArgsSchema.safeParse(args);
-        if (!parsed.success) throw new Error("Doctor ID is required");
-
-        if (
-          (user.role === UserRole.ONLY_DOCTOR || user.role === UserRole.HOSPITAL_DOCTOR) &&
-          user.doctorProfileId &&
-          user.doctorProfileId.toString() !== parsed.data.doctorId.toString()
-        ) {
-          throw new Error("Forbidden: Cannot access another doctor's profile");
-        }
-
-        const doctor = await Doctor.findById(parsed.data.doctorId);
-        if (!doctor) throw new Error("Doctor not found");
-
-        // Tenant check for hospital admin
-        if (
-          user.role === UserRole.HOSPITAL_ADMIN &&
-          user.organizationId &&
-          doctor.organizationId &&
-          doctor.organizationId.toString() !== user.organizationId.toString()
-        ) {
-          throw new Error("Forbidden: You cannot access doctors outside your hospital");
-        }
-
-        return { requiresConfirmation: false, result: doctor };
-      }
-
-      // 3. getUpcomingAppointments
-      case "getUpcomingAppointments": {
-        const parsed = getUpcomingAppointmentsArgsSchema.safeParse(args);
-        const limit = parsed.success && parsed.data.limit ? parsed.data.limit : 10;
-
-        const query: any = { status: { $in: ["PENDING", "CONFIRMED"] } };
-
-        if (user.role === UserRole.ONLY_DOCTOR || user.role === UserRole.HOSPITAL_DOCTOR) {
-          if (!user.doctorProfileId) throw new Error("Doctor profile not found for user");
-          query.doctorId = new mongoose.Types.ObjectId(user.doctorProfileId);
-        } else if (user.role === UserRole.HOSPITAL_ADMIN && user.organizationId) {
-          query.organizationId = new mongoose.Types.ObjectId(user.organizationId);
-          if (parsed.success && parsed.data.doctorId) {
-            query.doctorId = new mongoose.Types.ObjectId(parsed.data.doctorId);
-          }
-        }
-
-        const appointments = await Appointment.find(query)
-          .sort({ appointmentDate: 1, startTime: 1 })
-          .limit(limit)
-          .lean();
-
-        return { requiresConfirmation: false, result: { count: appointments.length, appointments } };
-      }
-
-      // 4. getHospitalOverview
-      case "getHospitalOverview": {
-        const parsed = getHospitalOverviewArgsSchema.safeParse(args);
-        const targetOrgId = parsed.success && parsed.data.organizationId ? parsed.data.organizationId : user.organizationId;
-
-        if (user.role !== UserRole.HOSPITAL_ADMIN && user.role !== UserRole.SUPERADMIN) {
-          throw new Error("Forbidden: Hospital overview requires hospital admin role");
-        }
-        if (
-          user.role === UserRole.HOSPITAL_ADMIN &&
-          user.organizationId &&
-          targetOrgId &&
-          targetOrgId.toString() !== user.organizationId.toString()
-        ) {
-          throw new Error("Forbidden: Cannot access another hospital's data");
-        }
-        if (!targetOrgId && user.role !== UserRole.SUPERADMIN) {
-          throw new Error("No organization associated with user");
-        }
-
-        const org = await Organization.findById(targetOrgId);
-        if (!org) throw new Error("Organization not found");
-
-        const doctorCount = await Doctor.countDocuments({ organizationId: org._id, status: "ACTIVE" });
-        const apptCount = await Appointment.countDocuments({ organizationId: org._id, status: "CONFIRMED" });
 
         return {
-          requiresConfirmation: false,
           result: {
-            name: org.name,
-            type: org.type,
-            workingHours: org.workingHours,
-            activeDoctors: doctorCount,
-            totalDoctors: doctorCount,
-            confirmedAppointments: apptCount,
-            about: org.about,
+            count: doctors.length,
+            doctors: doctors.map((d: any) => ({
+              name: `Dr. ${d.doctorName}`,
+              specialization: d.specialization,
+              degree: d.degree,
+              experienceYears: d.yearsOfExperience,
+              affiliation: d.organizationId?.name || "Only Doctor",
+              status: d.status,
+              approvalStatus: d.approvalStatus,
+              deactivatedBy: d.deactivatedByRole || null,
+              timings: d.consultationHours || "N/A",
+              weeklyOff: d.weeklyOff || "None",
+              newCaseFee: d.newCaseFee ?? "N/A",
+              oldCaseFee: d.oldCaseFee ?? "N/A",
+            })),
           },
         };
       }
 
-      // 5. updateDoctorProfile
-      case "updateDoctorProfile": {
-        const parsed = updateDoctorProfileArgsSchema.safeParse(args);
-        if (!parsed.success) throw new Error(parsed.error.issues.map((i) => i.message).join(", "));
+      case "getPlatformOrHospitalDetails": {
+        const parsed = getPlatformOrHospitalDetailsArgsSchema.safeParse(args);
+        if (!parsed.success) throw new Error("Invalid parameters");
 
-        const doctor = await Doctor.findById(parsed.data.doctorId);
-        if (!doctor) throw new Error("Doctor not found");
+        if (user.role === UserRole.SUPERADMIN) {
+          const orgFilter: Record<string, any> = {};
+          if (parsed.data.organizationStatus) orgFilter.status = parsed.data.organizationStatus;
 
-        // Tenant authorization
-        const isSelf = user.doctorProfileId && user.doctorProfileId.toString() === doctor._id.toString();
-        const isOrgAdmin =
-          user.role === UserRole.HOSPITAL_ADMIN &&
-          user.organizationId &&
-          doctor.organizationId &&
-          doctor.organizationId.toString() === user.organizationId.toString();
-        const isSuper = user.role === UserRole.SUPERADMIN;
+          const [orgs, customDomains] = await Promise.all([
+            Organization.find(orgFilter)
+              .select("name slug type status address.city workingHours")
+              .sort({ createdAt: -1 })
+              .limit(50)
+              .lean(),
+            parsed.data.includeCustomDomains !== false
+              ? Website.find({ customDomain: { $exists: true, $nin: [null, ""] } })
+                  .select("slug customDomain customDomainStatus customDomainRedirect")
+                  .lean()
+              : Promise.resolve([]),
+          ]);
 
-        if (!isSelf && !isOrgAdmin && !isSuper) {
-          throw new Error("Forbidden: You do not have permission to update this doctor");
+          return { result: { organizations: orgs, customDomains } };
         }
 
-        if (parsed.data.bio !== undefined) doctor.bio = parsed.data.bio;
-        if (parsed.data.yearsOfExperience !== undefined) doctor.yearsOfExperience = parsed.data.yearsOfExperience;
-        if (parsed.data.degree !== undefined) doctor.degree = parsed.data.degree;
-
-        await doctor.save();
-
-        await AuditLog.create({
-          userId: user.userId ? new mongoose.Types.ObjectId(user.userId) : null,
-          userRole: user.role as any,
-          action: "AI_ASSISTANT_UPDATE_DOCTOR",
-          entityType: "Doctor",
-          entityId: String(doctor._id),
-          details: { updatedFields: parsed.data },
-          timestamp: new Date(),
-        });
-
-        return { requiresConfirmation: false, result: { message: `Profile updated for Dr. ${doctor.doctorName}`, doctor } };
-      }
-
-      // 6. updateHospitalContent
-      case "updateHospitalContent": {
-        const parsed = updateHospitalContentArgsSchema.safeParse(args);
-        if (!parsed.success) throw new Error(parsed.error.issues.map((i) => i.message).join(", "));
-
-        if (user.role !== UserRole.HOSPITAL_ADMIN && user.role !== UserRole.SUPERADMIN) {
-          throw new Error("Forbidden: Only hospital administrators can update hospital content");
-        }
-
-        const org = await Organization.findById(user.organizationId);
-        if (!org) throw new Error("Organization not found");
-
-        if (parsed.data.about !== undefined) org.about = parsed.data.about;
-        await org.save();
-
-        await AuditLog.create({
-          userId: user.userId ? new mongoose.Types.ObjectId(user.userId) : null,
-          userRole: user.role as any,
-          action: "AI_ASSISTANT_UPDATE_HOSPITAL_CONTENT",
-          entityType: "Organization",
-          entityId: String(org._id),
-          details: { updatedFields: parsed.data },
-          timestamp: new Date(),
-        });
-
-        return { requiresConfirmation: false, result: { message: `Hospital content updated for ${org.name}` } };
-      }
-
-      // 7. updateWebsiteTabTitle
-      case "updateWebsiteTabTitle": {
-        const parsed = updateWebsiteTabTitleArgsSchema.safeParse(args);
-        if (!parsed.success) throw new Error("Tab title is required");
-
-        let website: any = null;
         if (user.role === UserRole.HOSPITAL_ADMIN && user.organizationId) {
-          website = await Website.findOne({ organizationId: new mongoose.Types.ObjectId(user.organizationId) });
-        } else if (user.doctorProfileId) {
-          website = await Website.findOne({ doctorId: new mongoose.Types.ObjectId(user.doctorProfileId) });
+          const org = await Organization.findById(user.organizationId).lean();
+          return { result: { hospital: org } };
         }
 
-        if (!website) throw new Error("Website not found for current tenant");
-
-        website.seoMetadata = {
-          ...website.seoMetadata,
-          title: parsed.data.tabTitle,
-        };
-        await website.save();
-
-        return { requiresConfirmation: false, result: { message: `Website tab title updated to: "${parsed.data.tabTitle}"` } };
-      }
-
-      // 8. updateHospitalBranding
-      case "updateHospitalBranding": {
-        const parsed = updateHospitalBrandingArgsSchema.safeParse(args);
-        if (!parsed.success) throw new Error("Invalid branding arguments");
-
-        if (user.role !== UserRole.HOSPITAL_ADMIN && user.role !== UserRole.SUPERADMIN) {
-          throw new Error("Forbidden: Hospital branding requires hospital administrator role");
-        }
-
-        const org = await Organization.findById(user.organizationId);
-        if (!org) throw new Error("Organization not found");
-
-        if (parsed.data.selectedTheme) org.selectedTheme = parsed.data.selectedTheme;
-        if (parsed.data.faviconUrl) org.faviconUrl = parsed.data.faviconUrl;
-        await org.save();
-
-        return { requiresConfirmation: false, result: { message: `Branding updated for ${org.name}` } };
-      }
-
-      // 9. createDoctor
-      case "createDoctor": {
-        const parsed = createDoctorArgsSchema.safeParse(args);
-        if (!parsed.success) throw new Error(parsed.error.issues.map((i) => i.message).join(", "));
-
-        if (user.role !== UserRole.HOSPITAL_ADMIN && user.role !== UserRole.SUPERADMIN) {
-          throw new Error("Forbidden: Only hospital administrators can register new doctors");
-        }
-
-        const orgId = user.organizationId;
-        if (!orgId) throw new Error("Organization context is missing");
-
-        const slug = parsed.data.doctorName
-          .toLowerCase()
-          .replace(/[^a-z0-9]+/g, "-")
-          .replace(/(^-|-$)/g, "");
-
-        const newDoctor = await Doctor.create({
-          organizationId: new mongoose.Types.ObjectId(orgId),
-          doctorName: parsed.data.doctorName,
-          slug: `dr-${slug}`,
-          degree: parsed.data.degree,
-          specialization: parsed.data.specialization,
-          yearsOfExperience: parsed.data.yearsOfExperience,
-          email: parsed.data.email,
-          gender: "MALE",
-          appointmentRequired: true,
-          status: "ACTIVE",
-        });
-
-        await AuditLog.create({
-          userId: user.userId ? new mongoose.Types.ObjectId(user.userId) : null,
-          userRole: user.role as any,
-          action: "AI_ASSISTANT_CREATE_DOCTOR",
-          entityType: "Doctor",
-          entityId: String(newDoctor._id),
-          details: { doctorName: newDoctor.doctorName, specialization: newDoctor.specialization },
-          timestamp: new Date(),
-        });
-
-        return { requiresConfirmation: false, result: { message: `Doctor Dr. ${newDoctor.doctorName} successfully created and added to roster`, doctorId: newDoctor._id } };
-      }
-
-      // 10. deactivateDoctor (DESTRUCTIVE ACTION: Explicit Confirmation Required)
-      case "deactivateDoctor": {
-        const parsed = deactivateDoctorArgsSchema.safeParse(args);
-        if (!parsed.success) throw new Error("Doctor ID is required");
-
-        const doctor = await Doctor.findById(parsed.data.doctorId);
-        if (!doctor) throw new Error("Doctor not found");
-
-        // Role & Tenant check
-        const isOrgAdmin =
-          user.role === UserRole.HOSPITAL_ADMIN &&
-          user.organizationId &&
-          doctor.organizationId &&
-          doctor.organizationId.toString() === user.organizationId.toString();
-        const isSuper = user.role === UserRole.SUPERADMIN;
-
-        if (!isOrgAdmin && !isSuper) {
-          throw new Error("Forbidden: You do not have permission to deactivate this doctor");
-        }
-
-        // DESTRUCTIVE ACTION SAFEGUARD: Require explicit confirmation
-        if (!isConfirmed) {
-          const actionId = new mongoose.Types.ObjectId().toString();
-          const prompt = `Are you sure you want to deactivate doctor "Dr. ${doctor.doctorName}"?`;
-
-          return {
-            requiresConfirmation: true,
-            confirmationPrompt: prompt,
-            pendingAction: {
-              actionId,
-              actionType: "deactivateDoctor",
-              toolName: "deactivateDoctor",
-              args: { doctorId: String(doctor._id) },
-              prompt,
-              targetDescription: `Dr. ${doctor.doctorName}`,
-              expiresAt: new Date(Date.now() + 5 * 60 * 1000), // 5 minutes
-            },
-            result: {
-              doctorStatus: doctor.status,
-            },
-          };
-        }
-
-        // Confirmed execution
-        doctor.status = "INACTIVE";
-        await doctor.save();
-
-        await AuditLog.create({
-          userId: toObjectIdSafe(user.userId),
-          userRole: user.role as any,
-          action: "CHATBOT_DEACTIVATE_DOCTOR",
-          entityType: "Doctor",
-          organizationId: toObjectIdSafe(user.organizationId),
-          entityId: String(doctor._id),
-          details: { doctorName: doctor.doctorName },
-          timestamp: new Date(),
-        });
-
-        return {
-          requiresConfirmation: false,
-          result: {
-            message: `Dr. ${doctor.doctorName} was deactivated successfully.`,
-            status: "INACTIVE",
-            doctorStatus: "INACTIVE",
-          },
-        };
+        return { result: { message: "Only basic clinic info is accessible for this role." } };
       }
 
       default:
-        throw new Error(`Unrecognized administrative tool: "${toolName}"`);
+        throw new Error(
+          `Read-only policy violation: "${toolName}" is not an authorized read tool.`
+        );
     }
   }
 
   /**
-   * Processes a turn for the Authenticated Admin AI Assistant
+   * Processes a turn for the Authenticated Read-Only Admin AI Assistant
    */
   public async handleAdminMessage(params: {
     user: AuthUserPayload;
@@ -1134,7 +1215,39 @@ export class AdminAssistantService {
     sessionId: string;
     pendingConfirmation?: IPendingAction | null;
   }> {
-    const { user, message, confirmActionId } = params;
+    const { user, message } = params;
+
+    // Enforce Admin AI Copilot status (doctor's own setting + parent hospital inheritance)
+    if (user.doctorProfileId) {
+      const doc = await Doctor.findById(user.doctorProfileId)
+        .select("isAdminChatbotEnabled organizationId")
+        .lean();
+      let isDisabled = Boolean(doc && doc.isAdminChatbotEnabled === false);
+      const targetOrgId = doc?.organizationId || user.organizationId;
+      if (!isDisabled && targetOrgId) {
+        const parentOrg = await Organization.findById(targetOrgId)
+          .select("isAdminChatbotEnabled")
+          .lean();
+        if (parentOrg && parentOrg.isAdminChatbotEnabled === false) {
+          isDisabled = true;
+        }
+      }
+      if (isDisabled) {
+        const disabledErr: any = new Error("Admin AI Copilot is currently disabled by administrator.");
+        disabledErr.status = 403;
+        disabledErr.code = "CHATBOT_DISABLED";
+        throw disabledErr;
+      }
+    } else if (user.organizationId) {
+      const org = await Organization.findById(user.organizationId).select("isAdminChatbotEnabled").lean();
+      if (org && org.isAdminChatbotEnabled === false) {
+        const disabledErr: any = new Error("Admin AI Copilot is currently disabled by administrator.");
+        disabledErr.status = 403;
+        disabledErr.code = "CHATBOT_DISABLED";
+        throw disabledErr;
+      }
+    }
+
     const sessionId = params.sessionId || new mongoose.Types.ObjectId().toString();
 
     let conversation = await ChatbotConversation.findOne({
@@ -1151,198 +1264,54 @@ export class AdminAssistantService {
         doctorId: toObjectIdSafe(user.doctorProfileId),
         messages: [],
       });
+    } else if (conversation.pendingAction) {
+      // Clear any legacy pendingAction from older sessions since assistant is strictly read-only
+      conversation.pendingAction = null;
     }
 
-    // 1. Check for Pending Confirmation Resolution
-    if (confirmActionId && conversation.pendingAction) {
-      if (conversation.pendingAction.actionId === confirmActionId) {
-        if (new Date() > conversation.pendingAction.expiresAt) {
-          conversation.pendingAction = null;
-          await conversation.save();
-          return {
-            response: "Confirmation request expired. Please re-trigger the action if still required.",
-            sessionId,
-            pendingConfirmation: null,
-          };
-        }
-
-        // Execute confirmed tool
-        const toolRes = await this.executeTool(
-          conversation.pendingAction.toolName,
-          conversation.pendingAction.args,
-          user,
-          true
-        );
-
-        conversation.pendingAction = null;
-        const confirmReply = sanitizeToPlainText(
-          toolRes.result?.message || "Action confirmed and executed successfully."
-        );
-
-        conversation.messages.push({
-          role: "user",
-          content: message || "Confirmed.",
-          timestamp: new Date(),
-        });
-        conversation.messages.push({
-          role: "assistant",
-          content: confirmReply,
-          timestamp: new Date(),
-        });
-        await conversation.save();
-
-        return {
-          response: confirmReply,
-          sessionId,
-          pendingConfirmation: null,
-        };
-      }
-    }
-
-    // Check if user is responding "confirm" or "cancel" in natural text to an existing pending action
-    if (conversation.pendingAction) {
-      const lower = message.trim().toLowerCase();
-      if (lower === "confirm" || lower === "yes" || lower.startsWith("yes, ")) {
-        const toolRes = await this.executeTool(
-          conversation.pendingAction.toolName,
-          conversation.pendingAction.args,
-          user,
-          true
-        );
-
-        conversation.pendingAction = null;
-        const confirmReply = sanitizeToPlainText(
-          toolRes.result?.message || "Action confirmed and executed successfully."
-        );
-
-        conversation.messages.push({
-          role: "user",
-          content: message,
-          timestamp: new Date(),
-        });
-        conversation.messages.push({
-          role: "assistant",
-          content: confirmReply,
-          timestamp: new Date(),
-        });
-        await conversation.save();
-
-        return {
-          response: confirmReply,
-          sessionId,
-          pendingConfirmation: null,
-        };
-      }
-
-      if (lower === "cancel" || lower === "no" || lower.startsWith("no, ")) {
-        conversation.pendingAction = null;
-        const cancelReply = sanitizeToPlainText("Action cancelled. No changes were made.");
-
-        conversation.messages.push({
-          role: "user",
-          content: message,
-          timestamp: new Date(),
-        });
-        conversation.messages.push({
-          role: "assistant",
-          content: cancelReply,
-          timestamp: new Date(),
-        });
-        await conversation.save();
-
-        return {
-          response: cancelReply,
-          sessionId,
-          pendingConfirmation: null,
-        };
-      }
-    }
-
-    // 2. Pure Conversational Courtesies (Greetings, OK, Thanks, Sorry) - Fast Path
+    // 1. Fast Path: Polite Conversational Courtesies (Hi, Hello, Thank You, Sorry, Kaise Ho, Ok, Bye)
     if (isConversationalGreeting(message)) {
       const greetingReply = sanitizeToPlainText(getConversationalReply(message));
-
-      conversation.messages.push({
-        role: "user",
-        content: message,
-        timestamp: new Date(),
-      });
-      conversation.messages.push({
-        role: "assistant",
-        content: greetingReply,
-        timestamp: new Date(),
-      });
+      conversation.messages.push({ role: "user", content: message, timestamp: new Date() });
+      conversation.messages.push({ role: "assistant", content: greetingReply, timestamp: new Date() });
       await conversation.save();
 
-      return {
-        response: greetingReply,
-        sessionId,
-        pendingConfirmation: null,
-      };
+      return { response: greetingReply, sessionId, pendingConfirmation: null };
     }
 
-    // 2b. Current Date & Day of Week Query (e.g. "aaj konsi date hai", "aaj kya din hai", "kal konsi date hai")
+    // 2. Fast Path: Current Real-World Date & Day Queries
     if (isDateOrDayQuery(message)) {
       const dateReply = sanitizeToPlainText(getRealDateAndDayReply(message));
-
-      conversation.messages.push({
-        role: "user",
-        content: message,
-        timestamp: new Date(),
-      });
-      conversation.messages.push({
-        role: "assistant",
-        content: dateReply,
-        timestamp: new Date(),
-      });
+      conversation.messages.push({ role: "user", content: message, timestamp: new Date() });
+      conversation.messages.push({ role: "assistant", content: dateReply, timestamp: new Date() });
       await conversation.save();
 
-      return {
-        response: dateReply,
-        sessionId,
-        pendingConfirmation: null,
-      };
+      return { response: dateReply, sessionId, pendingConfirmation: null };
     }
 
-    // 3. Strict Scope Boundary: Block & Refuse Outside / Off-Topic Questions
-    if (isOutsideOrOffTopicQuery(message)) {
+    // 3. Fast Path: Strictly Refuse ALL Delete / Edit / Modify / Create / Activate / Deactivate / Booking Commands
+    if (isMutationOrActionRequest(message)) {
+      const mutationRefusal = sanitizeToPlainText(getMutationRefusalReply(message));
+      conversation.messages.push({ role: "user", content: message, timestamp: new Date() });
+      conversation.messages.push({ role: "assistant", content: mutationRefusal, timestamp: new Date() });
+      await conversation.save();
+
+      return { response: mutationRefusal, sessionId, pendingConfirmation: null };
+    }
+
+    // 4. Fast Path: Strictly Refuse Outside World Knowledge & Medical Treatments / Home Remedies
+    if (isOutsideOrOffTopicQuery(message) || isAdminMedicalTreatmentOrRemedyQuery(message)) {
       const refusalReply = sanitizeToPlainText(getOutsideTopicRefusal(message));
-
-      conversation.messages.push({
-        role: "user",
-        content: message,
-        timestamp: new Date(),
-      });
-      conversation.messages.push({
-        role: "assistant",
-        content: refusalReply,
-        timestamp: new Date(),
-      });
+      conversation.messages.push({ role: "user", content: message, timestamp: new Date() });
+      conversation.messages.push({ role: "assistant", content: refusalReply, timestamp: new Date() });
       await conversation.save();
 
-      return {
-        response: refusalReply,
-        sessionId,
-        pendingConfirmation: null,
-      };
+      return { response: refusalReply, sessionId, pendingConfirmation: null };
     }
 
-    // 4. Fetch authenticated practice context for ground-truth factual answering
-    let practiceContext = "";
-    if (user.organizationId) {
-      const org = await Organization.findById(user.organizationId).lean();
-      if (org) {
-        practiceContext += `\nHospital / Organization Name: ${org.name}\nType: ${org.type}\nWorking Hours: ${org.workingHours || "N/A"}\nPhone: ${org.phone || "N/A"}\nEmail: ${org.email || "N/A"}`;
-      }
-    }
-    if (user.doctorProfileId) {
-      const doc = await Doctor.findById(user.doctorProfileId).lean();
-      if (doc) {
-        practiceContext += `\nDoctor Name: Dr. ${doc.doctorName}\nDegree: ${doc.degree || "N/A"}\nSpecialization: ${doc.specialization || "N/A"}\nExperience: ${doc.yearsOfExperience || 0} years\nClinic: ${doc.clinicName || "N/A"}\nTimings: ${doc.consultationHours || "N/A"}\nWeekly Off: ${doc.weeklyOff || "N/A"}`;
-      }
-    }
+    // 5. Load real-time role-scoped snapshot from MongoDB in parallel (~20ms)
+    const liveSnapshotJson = await this.buildLiveAdminSnapshot(user);
 
-    // 5. Call Assistant with Tool Declarations
     const now = new Date();
     const currentDateStr = now.toLocaleDateString("en-IN", {
       weekday: "long",
@@ -1353,64 +1322,45 @@ export class AdminAssistantService {
 
     const userLang = detectLanguage(message);
 
+    // Include up to last 4 turns for natural follow-up questions
+    const recentHistoryText = conversation.messages
+      .slice(-6)
+      .map((m) => `${m.role === "user" ? "Admin" : "Assistant"}: ${m.content}`)
+      .join("\n");
+
     const systemInstruction = `
-You are the official administrative assistant (Copilot) for this healthcare management portal.
-You are assisting an authenticated healthcare administrator with role: ${user.role}.
-Current Real-World Date: Today is ${currentDateStr}.
-Practice Details:
-${practiceContext || "Practice details loaded dynamically via tools."}
+You are the official READ-ONLY administrative information assistant for the Doczeno healthcare portal.
+Authenticated User Role: ${user.role}
+Current Real-World Date: ${currentDateStr}
 
-MANDATORY LANGUAGE MIRRORING DIRECTIVE (CRITICAL):
-Detected language of current user message: ${userLang}.
-You MUST respond in the EXACT SAME language and script:
-1. If English (e.g. user typed in English) -> Write your response in 100% pure, natural, professional English. Absolutely do NOT use any Hindi, Hinglish, or Gujarati words.
-2. If Gujarati script (ગુજરાતી લિપિ) -> Write your response in 100% Gujarati script.
-3. If Hindi script (हिंदी लिपि / देवनागरी) -> Write your response in 100% Hindi Devanagari script.
-4. If Gujlish (Roman Gujarati, e.g. 'kem cho', 'aaje ketla doctor chhe') -> Write your response in natural, polite Gujlish.
-5. If Hinglish (Roman Hindi, e.g. 'aaj kitne patient hain', 'appointments batao') -> Write your response in natural, polite Hinglish.
-NEVER default to Hinglish when the user writes in English or any other language!
+<LIVE_ADMIN_DATA_SNAPSHOT>
+${liveSnapshotJson}
+</LIVE_ADMIN_DATA_SNAPSHOT>
 
-STRICT SCOPE DIRECTIVE (CRITICAL - OUTSIDE QUESTIONS ARE STRICTLY FORBIDDEN):
-1. You are strictly and exclusively an administrative assistant for this healthcare portal.
-2. Inquiries about today's date, current day of the week, tomorrow's date, or calendar dates relative to appointments are completely allowed and should be answered accurately using the Current Real-World Date.
-3. ABSOLUTELY NEVER answer questions outside healthcare administration or this specific clinic/hospital portal.
-4. This includes:
-   - Celebrities, entrepreneurs, politicians, public figures (e.g. Elon Musk, Modi, etc.)
-   - General trivia, world news, entertainment, movies, sports, science, weather, coding, recipes
-   - General health advice, diet tips, nutrition, home remedies, wellness theories (e.g. "jyada pani pine se kya fayda hota hai", "benefits of drinking water", "weight loss tips", "exercise benefits")
-4. When ANY outside or general question is asked:
-   - DO NOT answer the question under any circumstances.
-   - Do NOT provide even a partial definition, background, or explanation of the outside topic.
-   - Do NOT define who Elon Musk is.
-   - Do NOT give reasons why drinking water is healthy.
-   - IMMEDIATELY and strictly refuse in plain text in the administrator's exact language (${userLang}), stating that you only assist with Doczeno hospital management, doctors roster, appointments, timings, and clinic administration.
-   - Ask how you can assist with hospital, doctors, appointments, or clinic administration.
+MANDATORY LANGUAGE & TONE MIRRORING (CRITICAL):
+Detected language of current message: ${userLang}.
+You MUST respond in the EXACT SAME language, script, and tone as the user's message:
+1. ENGLISH -> 100% pure, crisp, professional English. Never use Hindi/Hinglish/Gujarati words.
+2. HINDI_SCRIPT (देवनागरी) -> 100% Hindi Devanagari script.
+3. GUJARATI_SCRIPT (ગુજરાતી) -> 100% Gujarati script.
+4. GUJLISH (Roman Gujarati, e.g. "kem cho", "ketla doctor chhe") -> Natural, polite Gujlish.
+5. HINGLISH (Roman Hindi, e.g. "kon active hai", "fees aur timing batao") -> Natural, polite Hinglish.
 
-CONVERSATIONAL & LANGUAGE PRINCIPLES:
-1. Speak naturally, politely, and conversationally.
-2. Courtesies and greetings like "hi", "hello", "hey", "namaste", "kem chho", "good morning", "thank you", "thanks", "dhanyawad", "ok", "theek hai", "saru", "sorry", "bye" are permitted. Reply politely and warmly in the administrator's exact language (${userLang}), and ask how you can assist with hospital/clinic administration.
+STRICT READ-ONLY & NO-MUTATION POLICY (ABSOLUTE - NEVER VIOLATE):
+1. You ONLY read and present information from <LIVE_ADMIN_DATA_SNAPSHOT> or the read-only tools (searchAppointments, listDoctors, getPlatformOrHospitalDetails).
+2. You CANNOT delete, edit, modify, update, create, add, approve, reject, activate, deactivate, suspend, cancel, or book ANY record.
+3. If the user asks (directly OR indirectly) to perform ANY action/change (e.g. "deactivate Dr. X", "delete appointment", "change fees", "edit timing", "activate website", "add a doctor", "cancel booking"), you MUST politely refuse in their exact language (${userLang}) and tell them to use the buttons/controls inside the admin panel.
 
-STRICT PLAIN TEXT OUTPUT RULES (MANDATORY):
-1. Output ONLY pure plain text.
-2. NEVER use bold formatting: Do NOT use ** or __ around any word.
-3. NEVER use italic formatting: Do NOT use * or _ around any word.
-4. NEVER use underline formatting: Do NOT use <u> or HTML tags.
-5. NEVER use emojis: Absolutely no emojis of any kind (no symbols, pictographs, or icons).
-6. NEVER use markdown headers (# or ##) or markdown links.
-7. For lists, use simple numbers without bold titles: e.g. "1. Doctor name - details", NOT "1. **Doctor name:** details".
+STRICT SCOPE BOUNDARY (NO EXTERNAL WORLD OR MEDICAL REMEDIES):
+1. Answer ONLY questions about this admin panel's data (doctors, specialties, timings, fees, active/deactive status, websites, custom domains, hospital/platform overview, and appointments).
+2. Polite greetings ("hi", "hello", "thank you", "sorry", "kaise ho", "ok", "bye") and date/day queries are allowed.
+3. NEVER answer external world questions (news, politics, celebrities, coding, sports, weather, recipes, trivia).
+4. NEVER give medical treatment advice, disease cure explanations, prescriptions, or home remedies ("bimari ka ilaj kaise hota hai", "gharelu upay", diet/wellness tips). Politely refuse in the user's exact language (${userLang}).
 
-CRITICAL OPERATIONAL & TENANT RULES:
-1. STRICT TENANT ISOLATION & TRUTHFULNESS: Always stay strictly within the authenticated user's organization and permissions. Never access or reveal information from other healthcare practices.
-2. ZERO HALLUCINATION / REAL DATA ONLY: Never invent, guess, or assume appointments, patient names, inquiries, doctors, or practice statistics. Only report facts returned by database tools or provided in Practice Details. If there are 0 appointments or 0 inquiries, clearly and accurately state that there are no appointments scheduled.
-3. ABSOLUTE SYSTEM PRIVACY: Never reveal or discuss underlying technologies, programming languages, database systems, AI models, engine providers, or secrets. Always identify simply as the official clinic management assistant.
-4. When the administrator asks to query or perform administrative actions (e.g. view doctors, get upcoming appointments, update profile/bio, deactivate a doctor), invoke the corresponding tool function.
-5. For destructive actions like deactivating a doctor, invoke the deactivateDoctor tool so the system requests confirmation.
-
-ADMINISTRATIVE CONSOLE DIRECTIVE — NEVER SOLICIT APPOINTMENT BOOKINGS (MANDATORY):
-1. You are communicating exclusively with authenticated doctors, clinic administrators, hospital management, or platform superadmins inside their private management console. You are NOT talking to patients.
-2. ABSOLUTELY NEVER ask the administrator if they want to book an appointment.
-3. ABSOLUTELY NEVER propose or offer appointment booking for the user. Administrators do not book patient appointments for themselves here.
-4. If the administrator asks to check or list appointments, invoke the getUpcomingAppointments tool to summarize existing patient appointments. But NEVER treat the administrator as a patient seeking medical care or consultation.
+ACCURACY, SPEED & FORMATTING RULES:
+1. ZERO HALLUCINATION: Report ONLY exact names, numbers, fees, timings, appointment IDs, phone numbers, and active/deactive statuses present in <LIVE_ADMIN_DATA_SNAPSHOT> or tool results. If a list is empty or 0, clearly say so.
+2. Answer directly and concisely from <LIVE_ADMIN_DATA_SNAPSHOT> whenever the answer is already there (fast single-step response). Call a read-only tool ONLY if you need filtered search across older appointments or more doctors beyond the snapshot.
+3. Output ONLY pure plain text: NO bold (** or __), NO italic (* or _), NO markdown headers (#), NO HTML tags, NO emojis. Use simple numbered lines (1., 2., 3.) or plain dashes (-).
 `.trim();
 
     conversation.messages.push({
@@ -1419,9 +1369,13 @@ ADMINISTRATIVE CONSOLE DIRECTIVE — NEVER SOLICIT APPOINTMENT BOOKINGS (MANDATO
       timestamp: new Date(),
     });
 
+    const promptWithHistory = recentHistoryText
+      ? `Recent conversation:\n${recentHistoryText}\n\nCurrent Admin Question: ${message}`
+      : message;
+
     try {
       const geminiResponse = await this.generateContentWithFallback({
-        contents: message,
+        contents: promptWithHistory,
         systemInstruction,
         tools: [{ functionDeclarations: ADMIN_ASSISTANT_TOOL_DECLARATIONS as any }],
         organizationId: user.organizationId,
@@ -1429,7 +1383,6 @@ ADMINISTRATIVE CONSOLE DIRECTIVE — NEVER SOLICIT APPOINTMENT BOOKINGS (MANDATO
         userId: user.userId,
       });
 
-      // Check if Gemini invoked a tool call
       const functionCalls = geminiResponse.functionCalls;
 
       if (functionCalls && functionCalls.length > 0 && functionCalls[0]?.name) {
@@ -1437,41 +1390,20 @@ ADMINISTRATIVE CONSOLE DIRECTIVE — NEVER SOLICIT APPOINTMENT BOOKINGS (MANDATO
         const toolName = fc.name!;
         const toolArgs = (fc.args as Record<string, any>) || {};
 
-        const toolExecution = await this.executeTool(toolName, toolArgs, user, false);
-
-        if (toolExecution.requiresConfirmation && toolExecution.pendingAction) {
-          conversation.pendingAction = toolExecution.pendingAction;
-          await conversation.save();
-
-          const prompt = sanitizeToPlainText(
-            toolExecution.confirmationPrompt || "This action requires confirmation. Confirm?"
-          );
-          conversation.messages.push({
-            role: "assistant",
-            content: prompt,
-            timestamp: new Date(),
-          });
-          await conversation.save();
-
-          return {
-            response: prompt,
-            sessionId,
-            pendingConfirmation: toolExecution.pendingAction,
-          };
-        }
-
-        // Tool ran immediately; provide result summary to user
+        const toolExecution = await this.executeTool(toolName, toolArgs, user);
         const resultString = JSON.stringify(toolExecution.result, null, 2);
+
         const followUp = await this.generateContentWithFallback({
-          contents: `Tool ${toolName} returned result:\n${resultString}\n\nSummarize this cleanly and professionally for the administrator in response to: "${message}". Output pure plain text only, no bold, no italic, no underline, no emojis.\n\nCRITICAL LANGUAGE INSTRUCTION: You MUST write your entire response in the EXACT language used by the administrator (${userLang}):\n- If English, reply in pure English.\n- If Gujarati script, reply in Gujarati script.\n- If Hindi script, reply in Hindi script.\n- If Gujlish, reply in Gujlish.\n- If Hinglish, reply in Hinglish.`,
+          contents: `Read-only tool ${toolName} returned:\n${resultString}\n\nAnswer the administrator's question accurately in plain text only (no bold, no italic, no emojis): "${message}"\n\nReply strictly in ${userLang}.`,
           systemInstruction,
           organizationId: user.organizationId,
           doctorId: user.doctorProfileId,
           userId: user.userId,
         });
 
-        const rawFinal = followUp.text?.trim() || `Tool ${toolName} executed successfully.`;
-        const finalReply = sanitizeToPlainText(rawFinal);
+        const finalReply = sanitizeToPlainText(
+          followUp.text?.trim() || "Here are the requested details from your admin panel."
+        );
 
         conversation.messages.push({
           role: "assistant",
@@ -1487,14 +1419,14 @@ ADMINISTRATIVE CONSOLE DIRECTIVE — NEVER SOLICIT APPOINTMENT BOOKINGS (MANDATO
         };
       }
 
-      // Plain text conversational answer from assistant
-      const rawPlain = geminiResponse.text?.trim() || "How can I assist you with clinic administration today?";
+      const rawPlain =
+        geminiResponse.text?.trim() || "How can I help you check information from your admin panel?";
       let plainReply = rawPlain;
 
-      // Safety check: If model answered an outside query despite prompt
       if (
         /elon musk|spacex|tesla|hydration|skin glow|digestion|detoxification/i.test(plainReply) ||
-        isOutsideOrOffTopicQuery(message)
+        isOutsideOrOffTopicQuery(message) ||
+        isAdminMedicalTreatmentOrRemedyQuery(message)
       ) {
         plainReply = getOutsideTopicRefusal(message);
       }
@@ -1515,7 +1447,7 @@ ADMINISTRATIVE CONSOLE DIRECTIVE — NEVER SOLICIT APPOINTMENT BOOKINGS (MANDATO
       };
     } catch (err: any) {
       const errorReply = sanitizeToPlainText(
-        `Error processing assistant request: ${err?.message || "Operation failed"}`
+        `Error fetching admin information: ${err?.message || "Please try again."}`
       );
       conversation.messages.push({
         role: "assistant",

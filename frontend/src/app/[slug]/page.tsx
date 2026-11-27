@@ -63,17 +63,22 @@ export async function generateMetadata({ params }: PageProps): Promise<Metadata>
         apple: "/icon-round.png",
       };
 
+  const canonicalUrl =
+    data.customDomain && data.customDomainStatus === "VERIFIED"
+      ? `https://${data.customDomain}`
+      : `/${data.slug}`;
+
   return {
     title,
     description,
     alternates: {
-      canonical: `/${data.slug}`,
+      canonical: canonicalUrl,
     },
     icons,
     openGraph: {
       title,
       description,
-      url: `/${data.slug}`,
+      url: canonicalUrl,
       siteName: data.organizationName,
       images: ogImage ? [{ url: ogImage }] : [],
       type: data.websiteType === "ONLY_DOCTOR" ? "profile" : "website",
@@ -123,7 +128,7 @@ export default async function PublicWebsitePage({ params }: PageProps) {
 
   const cookieStore = await cookies();
   const cookieTheme = cookieStore.get("doczeno_site_theme_mode")?.value;
-  const initialThemeMode: "light" | "dark" = cookieTheme === "dark" ? "dark" : "light";
+  const initialThemeMode: "light" | "dark" = cookieTheme === "light" ? "light" : "dark";
 
   return <ThemeRenderer data={data} initialThemeMode={initialThemeMode} />;
 }

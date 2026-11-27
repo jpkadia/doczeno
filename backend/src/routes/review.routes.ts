@@ -28,8 +28,19 @@ reviewRouter.get(
           return;
         }
         filter.organizationId = user.organizationId;
-        // Optionally filter by doctor within hospital
-        if (req.query.doctorId) filter.doctorId = req.query.doctorId;
+        if (typeof req.query.doctorId === "string" && req.query.doctorId.trim()) {
+          const targetDoc = await Doctor.findOne({
+            _id: req.query.doctorId.trim(),
+            organizationId: user.organizationId,
+          }).select("_id");
+          if (!targetDoc) {
+            res.status(403).json({ success: false, error: "Doctor does not belong to your hospital", code: "FORBIDDEN" });
+            return;
+          }
+          filter.doctorId = targetDoc._id;
+        } else if (req.query.scope === "hospital") {
+          filter.$or = [{ doctorId: null }, { doctorId: { $exists: false } }];
+        }
       } else if (user.role === UserRole.HOSPITAL_DOCTOR || user.role === UserRole.ONLY_DOCTOR) {
         if (!user.doctorProfileId) {
           res.status(403).json({ success: false, error: "Missing doctor profile link", code: "FORBIDDEN" });
@@ -103,7 +114,17 @@ reviewRouter.post(
         doctorId = req.body.doctorId || null;
       } else if (user.role === UserRole.HOSPITAL_ADMIN) {
         organizationId = user.organizationId;
-        if (req.body.doctorId) doctorId = req.body.doctorId;
+        if (typeof req.body.doctorId === "string" && req.body.doctorId.trim()) {
+          const targetDoc = await Doctor.findOne({
+            _id: req.body.doctorId.trim(),
+            organizationId: user.organizationId,
+          }).select("_id");
+          if (!targetDoc) {
+            res.status(403).json({ success: false, error: "Doctor does not belong to your hospital", code: "FORBIDDEN" });
+            return;
+          }
+          doctorId = targetDoc._id;
+        }
       } else if (user.role === UserRole.HOSPITAL_DOCTOR || user.role === UserRole.ONLY_DOCTOR) {
         doctorId = user.doctorProfileId;
         if (user.organizationId) organizationId = user.organizationId;
@@ -111,8 +132,12 @@ reviewRouter.post(
 
       // Check review count constraint (Max 9 allowed)
       const countFilter: Record<string, unknown> = {};
-      if (doctorId) countFilter.doctorId = doctorId;
-      else if (organizationId) countFilter.organizationId = organizationId;
+      if (doctorId) {
+        countFilter.doctorId = doctorId;
+      } else if (organizationId) {
+        countFilter.organizationId = organizationId;
+        countFilter.$or = [{ doctorId: null }, { doctorId: { $exists: false } }];
+      }
       const currentCount = await Review.countDocuments(countFilter);
       if (currentCount >= 9) {
         res.status(400).json({
@@ -276,8 +301,12 @@ reviewRouter.delete(
 
       // Check min 3 reviews constraint (cannot delete below 3)
       const deleteCountFilter: Record<string, unknown> = {};
-      if (review.doctorId) deleteCountFilter.doctorId = review.doctorId;
-      else if (review.organizationId) deleteCountFilter.organizationId = review.organizationId;
+      if (review.doctorId) {
+        deleteCountFilter.doctorId = review.doctorId;
+      } else if (review.organizationId) {
+        deleteCountFilter.organizationId = review.organizationId;
+        deleteCountFilter.$or = [{ doctorId: null }, { doctorId: { $exists: false } }];
+      }
       const currentReviewCount = await Review.countDocuments(deleteCountFilter);
       if (currentReviewCount <= 3) {
         res.status(400).json({
@@ -324,12 +353,35 @@ reviewRouter.post(
       let doctorId: any = null;
 
       if (user.role === UserRole.HOSPITAL_ADMIN && user.organizationId) {
-        type = "HOSPITAL";
         organizationId = user.organizationId;
-        const org = await Organization.findById(user.organizationId);
-        if (org) {
-          hospitalName = org.name;
-          city = org.address?.city;
+        if (typeof req.body.doctorId === "string" && req.body.doctorId.trim()) {
+          const doc = await Doctor.findOne({
+            _id: req.body.doctorId.trim(),
+            organizationId: user.organizationId,
+          });
+          if (!doc) {
+            res.status(403).json({ success: false, error: "Doctor does not belong to your hospital", code: "FORBIDDEN" });
+            return;
+          }
+          type = "DOCTOR";
+          doctorId = doc._id;
+          doctorName = doc.doctorName;
+          specialization = doc.specialization;
+          degree = doc.degree;
+          clinicName = doc.clinicName;
+          city = doc.address?.city;
+          const org = await Organization.findById(user.organizationId);
+          if (org) {
+            hospitalName = org.name;
+            city = org.address?.city || city;
+          }
+        } else {
+          type = "HOSPITAL";
+          const org = await Organization.findById(user.organizationId);
+          if (org) {
+            hospitalName = org.name;
+            city = org.address?.city;
+          }
         }
       } else if (user.doctorProfileId) {
         type = "DOCTOR";
@@ -373,6 +425,14 @@ reviewRouter.post(
         }
       }
 
+      const scopeQuery: Record<string, any> = {};
+      if (doctorId) {
+        scopeQuery.doctorId = doctorId;
+      } else if (organizationId) {
+        scopeQuery.organizationId = organizationId;
+        scopeQuery.$or = [{ doctorId: null }, { doctorId: { $exists: false } }];
+      }
+
       const generated = await geminiService.generatePatientTestimonials({
         type,
         doctorName,
@@ -383,13 +443,20 @@ reviewRouter.post(
         city,
       });
 
-      if (mode === "REPLACE") {
-        const deleteQuery: Record<string, any> = {};
-        if (doctorId) deleteQuery.doctorId = doctorId;
-        else if (organizationId) deleteQuery.organizationId = organizationId;
-        if (Object.keys(deleteQuery).length > 0) {
-          await Review.deleteMany(deleteQuery);
+      if (mode === "APPEND") {
+        const existingCount = Object.keys(scopeQuery).length > 0
+          ? await Review.countDocuments(scopeQuery)
+          : 0;
+        if (existingCount + generated.length > 9) {
+          res.status(400).json({
+            success: false,
+            error: `Adding 4 AI reviews would exceed the maximum limit of 9 patient reviews (currently ${existingCount}/9).`,
+            code: "MAX_REVIEWS_REACHED",
+          });
+          return;
         }
+      } else if (Object.keys(scopeQuery).length > 0) {
+        await Review.deleteMany(scopeQuery);
       }
 
       const toInsert = generated.map((g) => ({

@@ -1,5 +1,6 @@
 import { Router, Request, Response, NextFunction } from "express";
 import { WebsiteService } from "@/services/website.service";
+import { CustomDomainService } from "@/services/custom-domain.service";
 import { requireAuthenticatedUser } from "@/middleware/auth";
 import { requireWebsiteAccess, requireRole } from "@/middleware/rbac";
 import { UserRole } from "@/types";
@@ -55,6 +56,38 @@ websiteRouter.get(
         return;
       }
       res.status(200).json({ success: true, data });
+    } catch (error) {
+      next(error);
+    }
+  }
+);
+
+/**
+ * Public: Resolves custom domain hostname to its internal Doczeno route path (for Next.js Edge Middleware)
+ */
+websiteRouter.get(
+  "/resolve-domain",
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const domain = typeof req.query.domain === "string" ? req.query.domain : "";
+      const resolved = await CustomDomainService.resolveDomainTarget(domain);
+      res.status(200).json({ success: true, data: resolved });
+    } catch (error) {
+      next(error);
+    }
+  }
+);
+
+/**
+ * Public: Checks if a platform path should permanently redirect to a verified custom domain
+ */
+websiteRouter.get(
+  "/check-redirect",
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const rawPath = typeof req.query.path === "string" ? req.query.path : "";
+      const result = await CustomDomainService.checkRedirectForPath(rawPath);
+      res.status(200).json({ success: true, data: result });
     } catch (error) {
       next(error);
     }

@@ -1,5 +1,6 @@
 import { Router, Request, Response, NextFunction } from "express";
 import { OrganizationService } from "@/services/organization.service";
+import { aiContentService, resolveOrganizationSpecialties } from "@/services/ai-content.service";
 import { organizationCreateSchema, organizationUpdateSchema } from "@/validations";
 import { requireAuthenticatedUser } from "@/middleware/auth";
 import { requireRole, requireOrganizationAccess } from "@/middleware/rbac";
@@ -256,17 +257,19 @@ organizationRouter.post(
       }
 
       const cleanDept = departmentName.trim();
-      const currentDepts = (org as any).departments || [];
-      if (!currentDepts.includes(cleanDept)) {
-        currentDepts.push(cleanDept);
-        (org as any).departments = currentDepts;
+      const currentSpecs = resolveOrganizationSpecialties(org as any);
+      if (!currentSpecs.some((s) => s.toLowerCase() === cleanDept.toLowerCase())) {
+        currentSpecs.push(cleanDept);
+        org.specialties = currentSpecs;
+        (org as any).departments = currentSpecs;
         await org.save();
+        await aiContentService.syncHospitalSpecialtiesToContent(org._id, currentSpecs, org.address?.city);
       }
 
       res.status(200).json({
         success: true,
-        message: `Department '${cleanDept}' added`,
-        data: { departments: (org as any).departments },
+        message: `Specialty '${cleanDept}' added`,
+        data: { departments: org.specialties, specialties: org.specialties },
       });
     } catch (error) {
       next(error);
@@ -292,14 +295,26 @@ organizationRouter.delete(
         return;
       }
 
-      const currentDepts = (org as any).departments || [];
-      (org as any).departments = currentDepts.filter((d: string) => d !== deptName);
+      const currentSpecs = resolveOrganizationSpecialties(org as any);
+      const nextSpecs = currentSpecs.filter((d: string) => d !== deptName);
+      if (nextSpecs.length === 0) {
+        res.status(400).json({
+          success: false,
+          error: "Minimum 1 medical specialty / department is required on your hospital website.",
+          code: "MIN_SPECIALTY_REQUIRED",
+        });
+        return;
+      }
+
+      org.specialties = nextSpecs;
+      (org as any).departments = nextSpecs;
       await org.save();
+      await aiContentService.syncHospitalSpecialtiesToContent(org._id, nextSpecs, org.address?.city);
 
       res.status(200).json({
         success: true,
-        message: `Department '${deptName}' removed`,
-        data: { departments: (org as any).departments },
+        message: `Specialty '${deptName}' removed`,
+        data: { departments: org.specialties, specialties: org.specialties },
       });
     } catch (error) {
       next(error);

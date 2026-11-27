@@ -10,8 +10,13 @@ export interface IAppointment extends Document {
   patientEmail?: string;
   appointmentDate: Date;
   timeSlot: string;
+  slotKey?: string;
+  tokenNumber?: number;
   status: "PENDING" | "CONFIRMED" | "CANCELLED" | "COMPLETED" | "PATIENT_NOT_COME";
   notes: string;
+  source?: string;
+  cancelledByRole?: string | null;
+  cancelledAt?: Date | null;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -67,6 +72,15 @@ const AppointmentSchema = new Schema<IAppointment>(
       required: true,
       trim: true,
     },
+    slotKey: {
+      type: String,
+      trim: true,
+      index: true,
+    },
+    tokenNumber: {
+      type: Number,
+      index: true,
+    },
     status: {
       type: String,
       enum: ["PENDING", "CONFIRMED", "CANCELLED", "COMPLETED", "PATIENT_NOT_COME"],
@@ -78,6 +92,20 @@ const AppointmentSchema = new Schema<IAppointment>(
       required: true,
       trim: true,
     },
+    source: {
+      type: String,
+      enum: ["WEBSITE_FORM", "AI_CHATBOT", "SLUG_ADMIN", "WALK_IN"],
+      default: "WEBSITE_FORM",
+      index: true,
+    },
+    cancelledByRole: {
+      type: String,
+      default: null,
+    },
+    cancelledAt: {
+      type: Date,
+      default: null,
+    },
   },
   {
     timestamps: true,
@@ -87,6 +115,7 @@ const AppointmentSchema = new Schema<IAppointment>(
 AppointmentSchema.index({ appointmentId: 1, doctorId: 1 });
 AppointmentSchema.index({ appointmentId: 1, organizationId: 1 });
 AppointmentSchema.index({ doctorId: 1, appointmentDate: 1, timeSlot: 1 });
+AppointmentSchema.index({ doctorId: 1, appointmentDate: 1, slotKey: 1, tokenNumber: 1 });
 AppointmentSchema.index({ organizationId: 1, appointmentDate: 1 });
 AppointmentSchema.index({ doctorId: 1, status: 1 });
 AppointmentSchema.index({ organizationId: 1, status: 1 });

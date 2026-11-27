@@ -79,6 +79,16 @@ export function HospitalCreationForm() {
   const [showPassword, setShowPassword] = React.useState(false);
   const [showConfirmPassword, setShowConfirmPassword] = React.useState(false);
 
+  // Security: Clean any session token so first-time admin access requires email & password login
+  React.useEffect(() => {
+    if (currentStep === 7 && typeof window !== "undefined") {
+      try {
+        localStorage.removeItem("doczeno_auth_token");
+        document.cookie = "doczeno_session=; path=/; max-age=0; SameSite=Lax; Secure";
+      } catch {}
+    }
+  }, [currentStep]);
+
   const {
     register,
     control,
@@ -748,7 +758,7 @@ export function HospitalCreationForm() {
                     <ImageUploader
                       label="Hospital / Clinic Logo"
                       category="CLINIC_LOGO"
-                      maxSizeBytes={2 * 1024 * 1024}
+                      maxSizeBytes={10 * 1024 * 1024}
                       required
                       value={field.value}
                       onChange={field.onChange}
@@ -767,7 +777,7 @@ export function HospitalCreationForm() {
                       cropAspect={3 / 4}
                       aspect={3 / 4}
                       cropDescription="Reposition, zoom, and adjust within the 3:4 vertical frame for the website homepage."
-                      maxSizeBytes={5 * 1024 * 1024}
+                      maxSizeBytes={10 * 1024 * 1024}
                       required
                       value={field.value}
                       onChange={field.onChange}
@@ -785,7 +795,7 @@ export function HospitalCreationForm() {
                       value={field.value || []}
                       onChange={field.onChange}
                       maxFiles={6}
-                      maxSizeBytes={3 * 1024 * 1024}
+                      maxSizeBytes={10 * 1024 * 1024}
                       error={errors.galleryPhotos?.message}
                     />
                   )}

@@ -38,6 +38,7 @@ interface AdminShellProps {
   userEmail?: string;
   onLogout?: () => void;
   hideHeader?: boolean;
+  isAdminChatbotEnabled?: boolean;
 }
 
 export function AdminShell({
@@ -53,10 +54,24 @@ export function AdminShell({
   userEmail: _userEmail = "doctor@doczeno.vercel.app",
   onLogout,
   hideHeader = false,
+  isAdminChatbotEnabled = true,
 }: AdminShellProps) {
   const [mobileMenuOpen, setMobileMenuOpen] = React.useState(false);
   const [copilotOpen, setCopilotOpen] = React.useState(false);
   const [qrOpen, setQrOpen] = React.useState(false);
+  const [effectivePublicUrl, setEffectivePublicUrl] = React.useState(publicWebsiteUrl);
+
+  React.useEffect(() => {
+    if (
+      publicWebsiteUrl &&
+      typeof window !== "undefined" &&
+      (window.location.pathname === "/admin" || window.location.pathname.startsWith("/admin/"))
+    ) {
+      setEffectivePublicUrl("/");
+    } else {
+      setEffectivePublicUrl(publicWebsiteUrl);
+    }
+  }, [publicWebsiteUrl]);
 
   const handleLogout = async () => {
     if (onLogout) {
@@ -125,9 +140,9 @@ export function AdminShell({
 
   return (
     <>
-      <div className="min-h-screen bg-[#f0f7ff]/40 flex flex-col md:flex-row text-slate-900 font-sans">
-        {/* 1. Desktop Sticky Sidebar - Light Theme */}
-        <aside className="w-64 bg-white text-slate-800 border-r border-blue-100/90 flex-col shrink-0 hidden md:flex sticky top-0 h-screen max-h-screen z-40 shadow-xs">
+      <div className="min-h-screen md:h-screen md:overflow-hidden bg-[#f0f7ff]/40 flex flex-col md:flex-row text-slate-900 font-sans">
+        {/* 1. Desktop Fixed-Height Sidebar - Light Theme */}
+        <aside className="w-64 bg-white text-slate-800 border-r border-blue-100/90 flex-col shrink-0 hidden md:flex md:h-full z-40 shadow-xs">
           {/* Brand Header */}
           <div className="h-16 px-6 flex items-center border-b border-blue-100/80 bg-white shrink-0">
             <div className="flex items-center gap-3">
@@ -217,7 +232,7 @@ export function AdminShell({
         )}
 
         {/* 2. Main Content Container */}
-        <div className="flex-1 flex flex-col min-w-0">
+        <div className="flex-1 flex flex-col min-w-0 md:h-full md:overflow-hidden">
           {/* Top Header */}
           {!hideHeader ? (
             <header className="h-16 bg-white border-b border-blue-100 px-4 sm:px-8 flex items-center justify-between sticky top-0 z-30 shadow-2xs">
@@ -259,7 +274,7 @@ export function AdminShell({
                     </Button>
 
                     <Button asChild size="sm" variant="default" className="bg-[#1a76d1] hover:bg-[#1560aa] text-white text-xs h-8 font-semibold rounded-lg shadow-xs">
-                      <Link href={publicWebsiteUrl} target="_blank">
+                      <Link href={effectivePublicUrl || publicWebsiteUrl} target="_blank">
                         <ExternalLink className="h-3 w-3 mr-1.5" />
                         Live Preview
                       </Link>
@@ -285,14 +300,16 @@ export function AdminShell({
           )}
 
           {/* Dynamic Admin Body Content */}
-          <main className="p-3.5 sm:p-6 lg:p-8 flex-1 overflow-y-auto max-w-7xl w-full mx-auto space-y-6">
-            {children}
+          <main className="p-3.5 sm:p-6 lg:p-8 flex-1 overflow-y-auto w-full">
+            <div className="max-w-7xl w-full mx-auto space-y-6">
+              {children}
+            </div>
           </main>
         </div>
       </div>
 
       {/* Floating AI Copilot Trigger for All Admin Panels */}
-      {!copilotOpen && (
+      {!copilotOpen && isAdminChatbotEnabled !== false && (
         <div className="fixed bottom-5 right-5 sm:bottom-6 sm:right-6 z-50 font-sans print:hidden">
           <button
             type="button"
@@ -312,12 +329,14 @@ export function AdminShell({
       )}
 
       {/* Slide-over Admin Assistant Copilot */}
-      <AdminAssistantDrawer
-        isOpen={copilotOpen}
-        onClose={() => setCopilotOpen(false)}
-        roleBadge={roleBadge}
-        portalTitle={title}
-      />
+      {isAdminChatbotEnabled !== false && (
+        <AdminAssistantDrawer
+          isOpen={copilotOpen}
+          onClose={() => setCopilotOpen(false)}
+          roleBadge={roleBadge}
+          portalTitle={title}
+        />
+      )}
 
       {/* Clinic Website QR Code Modal */}
       {publicWebsiteUrl && (

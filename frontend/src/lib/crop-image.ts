@@ -14,7 +14,10 @@ export function createImage(url: string): Promise<HTMLImageElement> {
     const image = new Image();
     image.addEventListener("load", () => resolve(image));
     image.addEventListener("error", (error) => reject(error));
-    image.setAttribute("crossOrigin", "anonymous");
+    // Safari / iOS WebKit throws security error or fails when crossOrigin is set on blob: or data: URIs
+    if (!url.startsWith("blob:") && !url.startsWith("data:")) {
+      image.setAttribute("crossOrigin", "anonymous");
+    }
     image.src = url;
   });
 }
@@ -24,8 +27,9 @@ export function getRadianAngle(degreeValue: number): number {
 }
 
 /**
- * Crops and rotates an image using an offscreen HTML5 Canvas
- * Returns both a File object (for multipart upload) and an objectUrl (for instant preview)
+ * Crops and rotates an image using an offscreen HTML5 Canvas.
+ * Caps output resolution to a maximum dimension of 1200px for optimal speed and sharpness.
+ * Employs 0.86 JPEG quality for fast compression and lightweight uploads (~150KB-250KB).
  */
 export async function getCroppedImg(
   imageSrc: string,
@@ -35,7 +39,7 @@ export async function getCroppedImg(
 ): Promise<{ file: File; objectUrl: string }> {
   const image = await createImage(imageSrc);
   const canvas = document.createElement("canvas");
-  const ctx = canvas.getContext("2d");
+  const ctx = canvas.getContext("2d", { willReadFrequently: false });
 
   if (!ctx) {
     throw new Error("Could not create canvas context for image cropping");
@@ -58,7 +62,21 @@ export async function getCroppedImg(
   // Draw rotated image onto canvas
   ctx.drawImage(image, 0, 0);
 
-  // Extract the specific cropped square region onto a new canvas
+  // Calculate optimized output dimensions (max 1200px) to prevent massive memory usage and slow uploads
+  const MAX_OUTPUT_DIMENSION = 1200;
+  let targetWidth = Math.max(1, Math.round(pixelCrop.width));
+  let targetHeight = Math.max(1, Math.round(pixelCrop.height));
+
+  if (targetWidth > MAX_OUTPUT_DIMENSION || targetHeight > MAX_OUTPUT_DIMENSION) {
+    if (targetWidth >= targetHeight) {
+      targetHeight = Math.max(1, Math.round((targetHeight * MAX_OUTPUT_DIMENSION) / targetWidth));
+      targetWidth = MAX_OUTPUT_DIMENSION;
+    } else {
+      targetWidth = Math.max(1, Math.round((targetWidth * MAX_OUTPUT_DIMENSION) / targetHeight));
+      targetHeight = MAX_OUTPUT_DIMENSION;
+    }
+  }
+
   const croppedCanvas = document.createElement("canvas");
   const croppedCtx = croppedCanvas.getContext("2d");
 
@@ -66,8 +84,12 @@ export async function getCroppedImg(
     throw new Error("Could not create cropped canvas context");
   }
 
-  croppedCanvas.width = pixelCrop.width;
-  croppedCanvas.height = pixelCrop.height;
+  croppedCanvas.width = targetWidth;
+  croppedCanvas.height = targetHeight;
+
+  // Enable smooth bicubic image scaling
+  croppedCtx.imageSmoothingEnabled = true;
+  croppedCtx.imageSmoothingQuality = "high";
 
   croppedCtx.drawImage(
     canvas,
@@ -77,8 +99,8 @@ export async function getCroppedImg(
     pixelCrop.height,
     0,
     0,
-    pixelCrop.width,
-    pixelCrop.height
+    targetWidth,
+    targetHeight
   );
 
   return new Promise((resolve, reject) => {
@@ -88,12 +110,12 @@ export async function getCroppedImg(
           reject(new Error("Canvas export to blob failed"));
           return;
         }
-        const file = new File([blob], fileName, { type: "image/jpeg" });
+        const file = new File([blob], fileName.replace(/\.[^/.]+$/, "") + ".jpg", { type: "image/jpeg" });
         const objectUrl = URL.createObjectURL(blob);
         resolve({ file, objectUrl });
       },
       "image/jpeg",
-      0.95
+      0.86
     );
   });
 }

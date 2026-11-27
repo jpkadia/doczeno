@@ -4,7 +4,7 @@ import * as React from "react";
 import { X, Send, Bot, AlertCircle, RefreshCw, RotateCcw, Copy, Check, Ticket } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
-import { apiClient } from "@/lib/api-client";
+import { apiClient, warmUpBackend } from "@/lib/api-client";
 import { resolveThemePalette } from "@/lib/theme-palettes";
 import { useWebsiteThemeMode } from "@/components/themes/shared/website-mode-context";
 
@@ -43,9 +43,11 @@ function cleanPlainText(text: string): string {
   // 2. Strip bold markdown (**text** or __text__)
   clean = clean.replace(/\*\*(.*?)\*\*/g, "$1");
   clean = clean.replace(/__(.*?)__/g, "$1");
-  // 3. Strip italic markdown (*text* or _text_)
+  // 3. Strip italic markdown (*text* or _text_) while preserving URLs
   clean = clean.replace(/(^|[^\*])\*([^\*\n]+)\*([^\*]|$)/g, "$1$2$3");
+  clean = clean.replace(/\bhttps?:\/\/[^\s]+/gi, (url) => url.replace(/_/g, "__URL_UNDERSCORE__"));
   clean = clean.replace(/(^|[^_])_([^_\n]+)_([^_]|$)/g, "$1$2$3");
+  clean = clean.replace(/__URL_UNDERSCORE__/g, "_");
   // 4. Strip html tags
   clean = clean.replace(/<\/?[a-zA-Z][^>]*>/g, "");
   // 5. Strip markdown headers
@@ -57,6 +59,34 @@ function cleanPlainText(text: string): string {
   // 8. Collapse extra whitespace
   clean = clean.replace(/[ \t]{2,}/g, " ");
   return clean.trim();
+}
+
+function renderMessageWithLinks(text: string, isUser: boolean, linkColor?: string): React.ReactNode {
+  const urlRegex = /(https?:\/\/[^\s]+)/gi;
+  const parts = text.split(urlRegex);
+  if (parts.length <= 1) return text;
+
+  return parts.map((part, idx) => {
+    if (!/^https?:\/\//i.test(part)) {
+      return <React.Fragment key={idx}>{part}</React.Fragment>;
+    }
+    const cleanUrl = part.replace(/[.,;!?)]+$/, "");
+    const trailing = part.slice(cleanUrl.length);
+    return (
+      <React.Fragment key={idx}>
+        <a
+          href={cleanUrl}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="underline font-semibold break-all hover:opacity-80"
+          style={isUser ? { color: "#ffffff" } : { color: linkColor || "#2563eb" }}
+        >
+          {cleanUrl}
+        </a>
+        {trailing}
+      </React.Fragment>
+    );
+  });
 }
 
 export function PublicChatbotWidget({
@@ -74,6 +104,22 @@ export function PublicChatbotWidget({
   const [loading, setLoading] = React.useState(false);
   const [errorMessage, setErrorMessage] = React.useState<string | null>(null);
   const [copiedId, setCopiedId] = React.useState<string | null>(null);
+  const textareaRef = React.useRef<HTMLTextAreaElement>(null);
+
+  React.useEffect(() => {
+    if (isOpen) {
+      warmUpBackend();
+    }
+  }, [isOpen]);
+
+  // Auto-expand textarea height like WhatsApp as text grows or Enter is pressed
+  React.useEffect(() => {
+    const el = textareaRef.current;
+    if (!el) return;
+    el.style.height = "auto";
+    const nextHeight = Math.min(Math.max(el.scrollHeight, 38), 128);
+    el.style.height = `${nextHeight}px`;
+  }, [input]);
 
   const handleCopyTrackingId = async (id: string) => {
     try {
@@ -301,6 +347,16 @@ export function PublicChatbotWidget({
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === "Enter" && !e.shiftKey) {
+      // On mobile devices (screen width < 768 or touch pointer):
+      // Enter key adds a new line; message is sent strictly by clicking the Send button
+      const isMobile =
+        typeof window !== "undefined" &&
+        (window.innerWidth < 768 || window.matchMedia("(pointer: coarse)").matches);
+
+      if (isMobile) {
+        return; // Allow native newline in textarea
+      }
+
       e.preventDefault();
       handleSendMessage();
     }
@@ -312,7 +368,7 @@ export function PublicChatbotWidget({
         "fixed z-50 font-sans print:hidden",
         isOpen
           ? "bottom-3 inset-x-3 sm:inset-x-auto sm:right-6 sm:bottom-6 flex justify-end"
-          : "bottom-5 right-5 sm:bottom-6 sm:right-6"
+          : "bottom-[calc(4.75rem+env(safe-area-inset-bottom,0px))] right-4 sm:right-6 min-[1033px]:bottom-6"
       )}
     >
       {/* Floating Toggle Button with Active Theme and Smooth Breathing Pulse Animation */}
@@ -467,7 +523,11 @@ export function PublicChatbotWidget({
                           }
                     }
                   >
-                    {cleanPlainText(msg.content)}
+                    {renderMessageWithLinks(
+                      cleanPlainText(msg.content),
+                      msg.role === "user",
+                      isDark ? "#60a5fa" : theme.primary
+                    )}
 
                     {/* Dedicated 1-Click Copy Card for Appointment Tracking ID */}
                     {trackingId && (
@@ -610,10 +670,11 @@ export function PublicChatbotWidget({
                 e.preventDefault();
                 handleSendMessage();
               }}
-              className="flex items-center gap-2"
+              className="flex items-end gap-2"
             >
               <div className="relative flex-1">
                 <textarea
+                  ref={textareaRef}
                   rows={1}
                   value={input}
                   onChange={(e) => setInput(e.target.value)}
@@ -622,7 +683,7 @@ export function PublicChatbotWidget({
                   maxLength={500}
                   disabled={loading}
                   className={cn(
-                    "w-full rounded-xl px-3.5 py-2 text-xs border focus:outline-none disabled:opacity-60 resize-none max-h-24 leading-normal overflow-y-auto [scrollbar-width:none] [-ms-overflow-style:none] [&::-webkit-scrollbar]:hidden transition-colors",
+                    "block w-full rounded-xl px-3.5 py-2.5 text-xs border focus:outline-none disabled:opacity-60 resize-none max-h-32 leading-relaxed overflow-y-auto transition-[height] duration-75",
                     isDark
                       ? "text-white placeholder-slate-500"
                       : "text-slate-800 placeholder-slate-400 focus:bg-white"
@@ -630,20 +691,22 @@ export function PublicChatbotWidget({
                   style={{
                     backgroundColor: isDark ? theme.innerCardBgDark : "#f1f5f9",
                     borderColor: isDark ? theme.cardBorderDark : "#cbd5e1",
+                    minHeight: "40px",
+                    maxHeight: "128px",
                   }}
                 />
               </div>
 
               <Button
                 type="submit"
-                size="sm"
+                aria-label="Send message"
                 disabled={loading || !input.trim()}
                 style={{
                   backgroundColor: theme.primary,
                 }}
-                className="hover:opacity-90 text-white rounded-xl h-9 px-3 shrink-0"
+                className="hover:opacity-90 text-white rounded-xl h-10 w-10 p-0 flex items-center justify-center shrink-0"
               >
-                <Send className="h-3.5 w-3.5" />
+                <Send className="h-4 w-4" />
               </Button>
             </form>
             <div className={cn("mt-2 text-center text-[10px]", isDark ? "text-slate-500" : "text-slate-400")}>

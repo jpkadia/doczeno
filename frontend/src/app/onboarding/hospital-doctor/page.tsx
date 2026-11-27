@@ -1,15 +1,26 @@
 import { Metadata } from "next";
 import { Suspense } from "react";
 import { HospitalDoctorFormWrapper } from "./form-wrapper";
+import { OnboardingDisabledNotice } from "@/components/forms/onboarding-disabled-notice";
+import { ServiceOffByAdmin } from "@/components/forms/service-off-by-admin";
+import { getOnboardingCategories } from "@/lib/onboarding-config";
 import Link from "next/link";
 import { ArrowLeft, UserCheck, Loader2 } from "lucide-react";
+
+export const dynamic = "force-dynamic";
 
 export const metadata: Metadata = {
   title: "Hospital Doctor Onboarding | Doczeno",
   description: "Join a verified healthcare organization and publish your clinical profile with hospital branding and address.",
 };
 
-export default function HospitalDoctorOnboardingPage() {
+export default async function HospitalDoctorOnboardingPage() {
+  const categories = await getOnboardingCategories();
+
+  if (!categories.portalEnabled) {
+    return <ServiceOffByAdmin />;
+  }
+
   return (
     <div className="min-h-screen bg-[#eaf4fd] bg-[url('/images/mobile.png')] md:bg-[url('/images/bg.png')] bg-cover bg-top md:bg-center bg-no-repeat bg-fixed py-6 sm:py-10 px-3 sm:px-6 lg:px-8 font-sans text-slate-900">
       <div className="max-w-4xl mx-auto space-y-4 sm:space-y-6">
@@ -28,15 +39,19 @@ export default function HospitalDoctorOnboardingPage() {
           </div>
         </div>
 
-        <Suspense
-          fallback={
-            <div className="flex justify-center items-center py-24">
-              <Loader2 className="h-8 w-8 animate-spin text-[#1a76d1]" />
-            </div>
-          }
-        >
-          <HospitalDoctorFormWrapper />
-        </Suspense>
+        {categories.hospitalDoctor ? (
+          <Suspense
+            fallback={
+              <div className="flex justify-center items-center py-24">
+                <Loader2 className="h-8 w-8 animate-spin text-[#1a76d1]" />
+              </div>
+            }
+          >
+            <HospitalDoctorFormWrapper />
+          </Suspense>
+        ) : (
+          <OnboardingDisabledNotice categoryLabel="Hospital Clinician Setup" />
+        )}
       </div>
     </div>
   );

@@ -2,6 +2,7 @@ import { createApp } from "./app";
 import { connectToDatabase, disconnectDatabase } from "./db/connection";
 import { AuthService } from "./services/auth.service";
 import { MediaService } from "./services/media.service";
+import { CustomDomainService } from "./services/custom-domain.service";
 import { getEnv } from "./config/env";
 
 async function bootstrap() {
@@ -28,6 +29,24 @@ async function bootstrap() {
       }
     }, cleanupIntervalHours * 60 * 60 * 1000);
 
+    // Schedule lightweight daily DNS health check for VERIFIED custom domains
+    // Checks domains not inspected in the last 23h sequentially (~0 MB overhead, Render-sleep resilient)
+    const runDomainHealthJob = async () => {
+      try {
+        const summary = await CustomDomainService.runDailyHealthCheck();
+        if (summary.checked > 0 || summary.skippedReason) {
+          console.log(
+            `[Doczeno Domain Health]: checked=${summary.checked}, healthy=${summary.healthy}, autoDisabled=${summary.disabled}${summary.skippedReason ? ` (${summary.skippedReason})` : ""}`
+          );
+        }
+      } catch (err) {
+        console.error("[Doczeno Domain Health Error]:", err);
+      }
+    };
+
+    const startupDomainHealthTimer = setTimeout(runDomainHealthJob, 45 * 1000);
+    const domainHealthIntervalTimer = setInterval(runDomainHealthJob, 24 * 60 * 60 * 1000);
+
     const server = app.listen(env.PORT, () => {
       console.log(`[Doczeno Server]: Backend API listening on port ${env.PORT} (${env.NODE_ENV})`);
     });
@@ -35,6 +54,8 @@ async function bootstrap() {
     const shutdown = async (signal: string) => {
       console.log(`[Doczeno Server]: Received ${signal}. Shutting down gracefully...`);
       clearInterval(orphanCleanupTimer);
+      clearTimeout(startupDomainHealthTimer);
+      clearInterval(domainHealthIntervalTimer);
       server.close(async () => {
         await disconnectDatabase();
         console.log("[Doczeno Server]: Database disconnected. Server terminated.");

@@ -15,13 +15,18 @@ import {
   Info,
   QrCode,
   MessageSquare,
-  MessageSquareQuote,
   Trash2,
   Globe,
   Save,
+  CalendarPlus,
+  ShieldCheck,
+  XCircle,
 } from "lucide-react";
+import { cn } from "@/lib/utils";
 import { AdminShell, NavItem } from "../admin-shell";
+import { LiveOpdQueueCard } from "../live-opd-queue-card";
 import { ClinicQrCard } from "../clinic-qr-dialog";
+import { fetchDoctorLiveSlots, LiveSlotOption, formatSlotSelectLabel } from "@/lib/appointment-slots";
 import { Card, CardHeader, CardTitle, CardContent, CardDescription, CardFooter } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -40,11 +45,11 @@ import { FormField } from "@/components/forms/form-field";
 import { PhoneInput } from "@/components/ui/phone-input";
 import { AIContentPanel } from "../ai-content-panel";
 import { AIChatHistoryView } from "../ai-chat-history-view";
-import { TestimonialsManagementView } from "./testimonials-management-view";
 import { ImageUploader } from "@/components/forms/image-uploader";
 import { SlugInput } from "@/components/forms/slug-input";
 import { ConsultationHoursBuilder, DEFAULT_WEEK_SCHEDULE, DaySchedule } from "@/components/forms/consultation-hours-builder";
 import { AccountSettingsCard } from "../account-settings-card";
+import { AdminLogView } from "../admin-log-view";
 import { MediaAsset } from "@/types";
 import { apiClient } from "@/lib/api-client";
 import { toast } from "sonner";
@@ -97,6 +102,8 @@ export interface HospitalDoctorData {
   services?: Array<{ title: string; description: string }>;
   faqs?: Array<{ question: string; answer: string }>;
   publishStatus?: "PUBLISHED" | "DRAFT";
+  isWebsiteChatbotEnabled?: boolean;
+  isAdminChatbotEnabled?: boolean;
 }
 
 function parseSchedules(raw?: string): DaySchedule[] {
@@ -114,6 +121,9 @@ function parseSchedules(raw?: string): DaySchedule[] {
 
 export interface DoctorAppointmentItem {
   id: string;
+  appointmentId?: string;
+  tokenNumber?: number;
+  source?: string;
   patientName: string;
   patientAge?: number;
   patientPhone: string;
@@ -192,12 +202,12 @@ export function HospitalDoctorAdmin({
     { id: "professional", label: "Professional Info", icon: GraduationCap },
     { id: "schedule", label: "Consultation Hours", icon: Clock },
     { id: "appointments", label: "Appointments", icon: CalendarCheck, badge: String(appointments.length) },
-    { id: "testimonials", label: "Testimonials", icon: MessageSquareQuote },
     { id: "aichats", label: "AI Patient Chats", icon: MessageSquare },
     { id: "ai", label: "Live Website Content", icon: Globe },
     { id: "qrcode", label: "Doctor QR Code", icon: QrCode },
     { id: "photo", label: "Doctor Photo", icon: Camera },
     { id: "inherited", label: "Hospital Facility & Brand", icon: Building2, isLocked: true },
+    { id: "admin-logs", label: "Admin Log", icon: ShieldCheck },
     { id: "settings", label: "Account Settings", icon: Settings },
   ];
 
@@ -226,7 +236,10 @@ export function HospitalDoctorAdmin({
         toast.success("Doctor website URL slug updated successfully! Redirecting to your new admin portal...");
         setTimeout(() => {
           const orgSlug = parentHospital?.organizationSlug || "";
-          window.location.replace(`/${orgSlug}/${clean}/admin`);
+          const isCustomDomain =
+            typeof window !== "undefined" &&
+            (window.location.pathname === "/admin" || window.location.pathname.startsWith("/admin/"));
+          window.location.replace(isCustomDomain ? "/admin" : `/${orgSlug}/${clean}/admin`);
         }, 1200);
       }
     } catch (err: unknown) {
@@ -235,6 +248,9 @@ export function HospitalDoctorAdmin({
       setIsSavingSlug(false);
     }
   };
+
+  const [queueRefreshTick, setQueueRefreshTick] = React.useState(0);
+  const [liveSlots, setLiveSlots] = React.useState<LiveSlotOption[]>([]);
 
   const handleStatusChange = async (
     appointmentId: string,
@@ -245,6 +261,7 @@ export function HospitalDoctorAdmin({
       setAppointments((prev) =>
         prev.map((a) => (a.id === appointmentId ? { ...a, status } : a))
       );
+      setQueueRefreshTick((t) => t + 1);
       toast.success(`Appointment status updated to ${status === "PATIENT_NOT_COME" ? "Patient Not Come" : status}`);
       if (onUpdateAppointmentStatus) {
         await onUpdateAppointmentStatus(appointmentId, status);
@@ -264,6 +281,7 @@ export function HospitalDoctorAdmin({
     try {
       await apiClient.delete(`/appointments/${deleteApptId}`);
       setAppointments((prev) => prev.filter((a) => a.id !== deleteApptId));
+      setQueueRefreshTick((t) => t + 1);
       toast.success("Appointment permanently deleted from database");
       setDeleteApptId(null);
     } catch (err: unknown) {
@@ -274,8 +292,113 @@ export function HospitalDoctorAdmin({
     }
   };
 
+  // Manual Appointment Booking from Hospital Doctor Admin
+  const [bookModalOpen, setBookModalOpen] = React.useState(false);
+  const [bookName, setBookName] = React.useState("");
+  const [bookAge, setBookAge] = React.useState("");
+  const [bookPhone, setBookPhone] = React.useState("");
+  const [bookDate, setBookDate] = React.useState(() => new Date().toISOString().split("T")[0] || "");
+  const [bookSlot, setBookSlot] = React.useState("Regular Consultation");
+  const [bookNotes, setBookNotes] = React.useState("");
+  const [isBookingSubmitting, setIsBookingSubmitting] = React.useState(false);
+
+  React.useEffect(() => {
+    if (!bookModalOpen || !data.id || !bookDate) return;
+    let cancelled = false;
+    fetchDoctorLiveSlots({
+      doctorId: data.id,
+      organizationId: parentHospital.organizationId,
+      date: bookDate,
+    }).then((res) => {
+      if (cancelled || !res) return;
+      setLiveSlots(res.slots || []);
+      const firstOpen = res.slots.find((s) => !s.isFull) || res.slots[0];
+      if (firstOpen) {
+        setBookSlot(firstOpen.displayLabel);
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [bookModalOpen, data.id, parentHospital.organizationId, bookDate]);
+
+  const handleAdminBookDoctorAppointment = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!bookName.trim() || !bookPhone.trim() || !bookDate) {
+      toast.error("Please fill in patient name, phone number, and appointment date.");
+      return;
+    }
+    setIsBookingSubmitting(true);
+    try {
+      const res: any = await apiClient.post("/appointments", {
+        doctorId: data.id,
+        organizationId: parentHospital.organizationId,
+        patientName: bookName.trim(),
+        patientAge: Number(bookAge) || 30,
+        patientPhone: bookPhone.trim(),
+        appointmentDate: new Date(bookDate),
+        timeSlot: bookSlot,
+        notes: bookNotes.trim() || "Doctor walk-in consultation",
+        source: "SLUG_ADMIN",
+      });
+
+      const newAppt = res?.data?.appointment || res?.data;
+      const genId = res?.data?.appointmentId || newAppt?.appointmentId;
+      const genToken = res?.data?.tokenNumber ?? newAppt?.tokenNumber;
+      const resolvedSlot = res?.data?.timeSlot || bookSlot;
+      if (newAppt) {
+        setAppointments((prev) => [
+          {
+            id: newAppt._id || newAppt.id || String(Date.now()),
+            appointmentId: genId || "",
+            tokenNumber: typeof genToken === "number" ? genToken : undefined,
+            patientName: bookName.trim(),
+            patientAge: Number(bookAge) || 30,
+            patientPhone: bookPhone.trim(),
+            appointmentDate: bookDate,
+            timeSlot: resolvedSlot,
+            status: "CONFIRMED",
+            notes: bookNotes.trim() || "Doctor walk-in consultation",
+            source: "SLUG_ADMIN",
+          },
+          ...prev,
+        ]);
+      }
+      setQueueRefreshTick((t) => t + 1);
+      toast.success(
+        `Appointment booked! ID: ${genId || ""}${typeof genToken === "number" ? ` • Token #${genToken}` : ""}`
+      );
+      setBookModalOpen(false);
+      setBookName("");
+      setBookAge("");
+      setBookPhone("");
+      setBookNotes("");
+    } catch (err: any) {
+      toast.error(err?.response?.data?.error || err?.message || "Failed to book appointment");
+    } finally {
+      setIsBookingSubmitting(false);
+    }
+  };
+
   const appointmentColumns = React.useMemo<ColumnDef<DoctorAppointmentItem>[]>(
     () => [
+      {
+        key: "appointmentId",
+        header: "Appointment ID & Token",
+        accessorFn: (appt) => `${appt.appointmentId || appt.id} ${appt.tokenNumber || ""}`,
+        cell: (appt) => (
+          <div className="flex flex-col gap-1 items-start">
+            <span className="font-mono text-[11px] font-bold text-[#1a76d1] bg-blue-50 dark:bg-blue-950/40 px-2 py-0.5 rounded border border-blue-200 dark:border-blue-900/60 inline-block">
+              {appt.appointmentId || (appt.id ? appt.id.slice(-6).toUpperCase() : "—")}
+            </span>
+            {typeof appt.tokenNumber === "number" && (
+              <span className="font-mono text-[10px] font-bold text-emerald-700 bg-emerald-50 border border-emerald-200 px-1.5 py-0.5 rounded">
+                Token #{appt.tokenNumber}
+              </span>
+            )}
+          </div>
+        ),
+      },
       {
         key: "patientName",
         header: "Patient",
@@ -314,6 +437,28 @@ export function HospitalDoctorAdmin({
             <span className="text-[11px] text-slate-500">{appt.timeSlot}</span>
           </div>
         ),
+      },
+      {
+        key: "source",
+        header: "Booked Via",
+        accessorFn: (appt) => appt.source || "WEBSITE_FORM",
+        cell: (appt) => {
+          const src = appt.source || "WEBSITE_FORM";
+          let label = "Website";
+          let badgeClass = "bg-slate-100 text-slate-700 border-slate-300";
+          if (src === "AI_CHATBOT") {
+            label = "AI Chatbot";
+            badgeClass = "bg-purple-100 text-purple-800 border-purple-300";
+          } else if (src === "SLUG_ADMIN" || src === "WALK_IN") {
+            label = "Admin / Walk-in";
+            badgeClass = "bg-emerald-100 text-emerald-800 border-emerald-300";
+          }
+          return (
+            <Badge variant="outline" className={cn("text-[10px] font-semibold", badgeClass)}>
+              {label}
+            </Badge>
+          );
+        },
       },
       {
         key: "status",
@@ -373,14 +518,19 @@ export function HospitalDoctorAdmin({
                     Not Come
                   </Button>
                 )}
-                {appt.status !== "PENDING" && (
+                {appt.status !== "COMPLETED" && (
                   <Button
                     size="sm"
                     variant="outline"
-                    onClick={() => handleStatusChange(appt.id, "PENDING")}
-                    className="text-[10px] h-7 px-2 border-amber-300 text-amber-700 hover:bg-amber-50"
+                    onClick={() => {
+                      if (window.confirm("Cancel this appointment? Slot capacity will open up for other patients.")) {
+                        handleStatusChange(appt.id, "CANCELLED");
+                      }
+                    }}
+                    className="text-[10px] h-7 px-2 border-rose-300 text-rose-700 hover:bg-rose-50"
                   >
-                    Pending
+                    <XCircle className="h-3 w-3 mr-1" />
+                    Cancel
                   </Button>
                 )}
               </>
@@ -416,6 +566,7 @@ export function HospitalDoctorAdmin({
       onTabChange={setActiveTab}
       userEmail={data.email}
       onLogout={onLogout}
+      isAdminChatbotEnabled={data.isAdminChatbotEnabled !== false}
     >
       {saveSuccess && (
         <div className="bg-blue-50 border border-blue-200 text-[#1560aa] text-xs px-4 py-2.5 rounded-xl flex items-center justify-between animate-in fade-in shadow-2xs">
@@ -842,6 +993,7 @@ export function HospitalDoctorAdmin({
           <CardContent className="space-y-6 max-w-2xl">
             <ConsultationHoursBuilder
               value={schedules}
+              showCapacityControls={true}
               hospitalWeeklyOff={hospitalOffDays}
               hospitalName={parentHospital?.organizationName}
               onChange={(newSchedules) => {
@@ -908,18 +1060,57 @@ export function HospitalDoctorAdmin({
 
       {/* TAB 5: APPOINTMENTS */}
       {activeTab === "appointments" && (
-        <Card className="bg-white border-slate-200">
+        <div className="space-y-4">
+          <LiveOpdQueueCard
+            doctorId={data.id}
+            refreshTrigger={queueRefreshTick}
+            onQueueAdvanced={async () => {
+              try {
+                const res = await apiClient.get<{ success: boolean; data?: { appointments?: any[] } }>("/appointments");
+                if (res?.success && res.data?.appointments) {
+                  setAppointments(
+                    res.data.appointments.map((a: any) => ({
+                      id: a._id || a.id,
+                      appointmentId: a.appointmentId || "",
+                      tokenNumber: typeof a.tokenNumber === "number" ? a.tokenNumber : undefined,
+                      source: a.source || "WEBSITE_FORM",
+                      patientName: a.patientName,
+                      patientPhone: a.patientPhone,
+                      patientAge: a.patientAge,
+                      appointmentDate: a.appointmentDate ? (new Date(a.appointmentDate).toISOString().split("T")[0] || "") : "",
+                      timeSlot: a.timeSlot || "Regular Consultation",
+                      status: a.status,
+                      notes: a.notes,
+                    }))
+                  );
+                }
+              } catch {
+                // Keep existing state
+              }
+            }}
+          />
+          <Card className="bg-white border-slate-200">
           <CardHeader>
-            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
               <div>
                 <CardTitle className="text-base font-bold text-slate-900">Appointments</CardTitle>
                 <CardDescription className="text-xs">
-                  Direct patient requests from your website booking CTA.
+                  Direct patient requests from your website booking CTA and walk-in consultations.
                 </CardDescription>
               </div>
-              <Badge variant="outline" className="text-xs self-start sm:self-auto font-mono">
-                {appointments.length} Appointments
-              </Badge>
+              <div className="flex items-center gap-2 self-start sm:self-auto">
+                <Button
+                  type="button"
+                  onClick={() => setBookModalOpen(true)}
+                  className="bg-[#1a76d1] hover:bg-[#1560aa] text-white text-xs font-semibold h-8.5 px-3 rounded-lg shadow-xs flex items-center gap-1.5 shrink-0"
+                >
+                  <CalendarPlus className="h-4 w-4" />
+                  <span>Book Appointment</span>
+                </Button>
+                <Badge variant="outline" className="text-xs font-mono">
+                  {appointments.length} Appointments
+                </Badge>
+              </div>
             </div>
           </CardHeader>
           <CardContent className="p-6">
@@ -928,19 +1119,134 @@ export function HospitalDoctorAdmin({
               data={appointments}
               searchPlaceholder="Search patient, phone, slot..."
               pageSize={10}
+              exportFileName="doctor_appointments"
               emptyMessage="No appointment requests received yet."
             />
           </CardContent>
         </Card>
+        </div>
       )}
 
-      {/* TAB: TESTIMONIALS */}
-      {activeTab === "testimonials" && (
-        <TestimonialsManagementView
-          portalType="HOSPITAL_DOCTOR"
-          practiceName={data.doctorName}
-        />
-      )}
+      {/* Manual Walk-in Appointment Booking Dialog for Hospital Doctor */}
+      <Dialog open={bookModalOpen} onOpenChange={setBookModalOpen}>
+        <DialogContent className="max-w-md bg-white">
+          <DialogHeader>
+            <DialogTitle className="text-base font-bold text-slate-900 flex items-center gap-2">
+              <CalendarPlus className="h-5 w-5 text-[#1a76d1]" />
+              <span>Book Walk-in Appointment</span>
+            </DialogTitle>
+            <DialogDescription className="text-xs text-slate-500">
+              Schedule an in-clinic consultation with Dr. {data.doctorName} at {parentHospital.organizationName}.
+            </DialogDescription>
+          </DialogHeader>
+
+          <form onSubmit={handleAdminBookDoctorAppointment} className="space-y-3.5 pt-2">
+            <div className="space-y-1">
+              <label className="text-xs font-semibold text-slate-700">Patient Full Name *</label>
+              <Input
+                placeholder="e.g. Ramesh Patel"
+                value={bookName}
+                onChange={(e) => setBookName(e.target.value)}
+                required
+                className="h-9 text-xs"
+              />
+            </div>
+
+            <div className="grid grid-cols-2 gap-3">
+              <div className="space-y-1">
+                <label className="text-xs font-semibold text-slate-700">Patient Age *</label>
+                <Input
+                  type="number"
+                  placeholder="e.g. 35"
+                  value={bookAge}
+                  onChange={(e) => setBookAge(e.target.value)}
+                  min={1}
+                  max={120}
+                  required
+                  className="h-9 text-xs"
+                />
+              </div>
+              <div className="space-y-1">
+                <label className="text-xs font-semibold text-slate-700">Phone Number *</label>
+                <Input
+                  type="tel"
+                  placeholder="10-digit mobile"
+                  value={bookPhone}
+                  onChange={(e) => setBookPhone(e.target.value)}
+                  required
+                  className="h-9 text-xs font-mono"
+                />
+              </div>
+            </div>
+
+            <div className="grid grid-cols-2 gap-3">
+              <div className="space-y-1">
+                <label className="text-xs font-semibold text-slate-700">Appointment Date *</label>
+                <Input
+                  type="date"
+                  value={bookDate}
+                  onChange={(e) => setBookDate(e.target.value)}
+                  required
+                  className="h-9 text-xs font-mono"
+                />
+              </div>
+              <div className="space-y-1">
+                <label className="text-xs font-semibold text-slate-700">Time Slot *</label>
+                <select
+                  value={bookSlot}
+                  onChange={(e) => setBookSlot(e.target.value)}
+                  className="w-full h-9 rounded-md border border-slate-200 bg-white px-3 text-xs text-slate-800 outline-none focus:border-[#1a76d1]"
+                >
+                  {liveSlots.length > 0 ? (
+                    liveSlots.map((sl) => (
+                      <option key={sl.slotKey} value={sl.displayLabel} disabled={sl.isFull}>
+                        {formatSlotSelectLabel(sl)}
+                      </option>
+                    ))
+                  ) : (
+                    <>
+                      <option value="Morning (09:00 AM - 01:00 PM)">Morning (09:00 AM - 01:00 PM)</option>
+                      <option value="Evening (05:00 PM - 08:00 PM)">Evening (05:00 PM - 08:00 PM)</option>
+                      <option value="Regular Consultation">Regular Consultation</option>
+                    </>
+                  )}
+                </select>
+              </div>
+            </div>
+
+            <div className="space-y-1">
+              <label className="text-xs font-semibold text-slate-700">Reason for Visit / Symptoms *</label>
+              <Input
+                placeholder="e.g. Follow-up consultation, routine checkup, symptoms"
+                value={bookNotes}
+                onChange={(e) => setBookNotes(e.target.value)}
+                required
+                className="h-9 text-xs"
+              />
+            </div>
+
+            <DialogFooter className="pt-2">
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={() => setBookModalOpen(false)}
+                className="text-xs"
+              >
+                Cancel
+              </Button>
+              <Button
+                type="submit"
+                size="sm"
+                disabled={isBookingSubmitting}
+                className="bg-[#1a76d1] hover:bg-[#1560aa] text-white text-xs font-semibold"
+              >
+                {isBookingSubmitting ? "Booking..." : "Confirm Booking"}
+              </Button>
+            </DialogFooter>
+          </form>
+        </DialogContent>
+      </Dialog>
 
       {/* TAB: AI PATIENT CHATS */}
       {activeTab === "aichats" && (
@@ -956,6 +1262,10 @@ export function HospitalDoctorAdmin({
           <AIContentPanel
             targetType="HOSPITAL_DOCTOR"
             targetId={data.id}
+            practiceName={data.doctorName}
+            galleryPhotos={parentHospital.galleryPhotos || []}
+            isGalleryInherited={true}
+            inheritedHospitalName={parentHospital.organizationName}
             onPublished={() => {
               handleUpdate({});
             }}
@@ -1240,10 +1550,27 @@ export function HospitalDoctorAdmin({
         </div>
       )}
 
+      {/* TAB: ADMIN LOGS */}
+      {activeTab === "admin-logs" && (
+        <AdminLogView
+          title="Doctor Admin Login & Session Logs"
+          description="Monitor your admin portal login history in IST, device, browser, IP address, active sessions, and logout reason."
+        />
+      )}
+
       {/* TAB 8: SETTINGS */}
       {activeTab === "settings" && (
         <AccountSettingsCard
           email={data.email}
+          contactEmail={data.email}
+          onUpdateContactEmail={async (newContactEmail) => {
+            if (onSave) {
+              await onSave({ email: newContactEmail });
+            } else {
+              await apiClient.patch("/doctors/me", { email: newContactEmail });
+            }
+            setData((prev) => ({ ...prev, email: newContactEmail }));
+          }}
           roleTitle="Hospital Doctor Account"
           slug={`${parentHospital.organizationSlug}/${data.slug}`}
           publishStatus="PUBLISHED"

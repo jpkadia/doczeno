@@ -4,7 +4,7 @@ import * as React from "react";
 import { EffectiveWebsiteData } from "@/types";
 import { OnlyDoctorAdmin, OnlyDoctorData, AppointmentItem } from "@/components/admin/views/only-doctor-admin";
 import { HospitalAdmin, HospitalData, HospitalDoctorItem, HospitalAppointmentItem } from "@/components/admin/views/hospital-admin";
-import { apiClient } from "@/lib/api-client";
+import { apiClient, clearClientAuthState } from "@/lib/api-client";
 import { useRouter } from "next/navigation";
 
 import { InactivityGuard } from "@/components/admin/inactivity-guard";
@@ -20,8 +20,15 @@ export function AdminClient({ initialWebsite, slug }: AdminClientProps) {
   const router = useRouter();
   const [isAuthenticated, setIsAuthenticated] = React.useState(false);
   const [isCheckingAuth, setIsCheckingAuth] = React.useState(true);
+  const [loginPath, setLoginPath] = React.useState(`/${slug}/admin/login`);
 
   React.useEffect(() => {
+    const isCustomDomain =
+      typeof window !== "undefined" &&
+      (window.location.pathname === "/admin" || window.location.pathname.startsWith("/admin/"));
+    const targetLoginPath = isCustomDomain ? "/admin/login" : `/${slug}/admin/login`;
+    setLoginPath(targetLoginPath);
+
     async function verifyAuth() {
       try {
         const res = await apiClient.get<{ success: boolean; data?: { authorized?: boolean } }>(
@@ -31,25 +38,30 @@ export function AdminClient({ initialWebsite, slug }: AdminClientProps) {
           setIsAuthenticated(true);
         } else {
           if (typeof window !== "undefined") {
-            window.location.replace(`/${slug}/admin/login?unauthorized=true`);
+            window.location.replace(`${targetLoginPath}?unauthorized=true`);
           } else {
-            router.replace(`/${slug}/admin/login?unauthorized=true`);
+            router.replace(`${targetLoginPath}?unauthorized=true`);
           }
         }
       } catch (err: unknown) {
         const status = (err as { status?: number })?.status;
+        const code = (err as { data?: { code?: string } })?.data?.code;
         if (status === 403) {
           toast.error("Unauthorized: You do not have permission to manage this portal.");
           if (typeof window !== "undefined") {
-            window.location.replace(`/${slug}/admin/login?unauthorized=true`);
+            window.location.replace(`${targetLoginPath}?unauthorized=true`);
           } else {
-            router.replace(`/${slug}/admin/login?unauthorized=true`);
+            router.replace(`${targetLoginPath}?unauthorized=true`);
           }
         } else {
+          const redirectDest =
+            code === "SESSION_INACTIVITY_EXPIRED"
+              ? `${targetLoginPath}?reason=inactivity`
+              : targetLoginPath;
           if (typeof window !== "undefined") {
-            window.location.replace(`/${slug}/admin/login`);
+            window.location.replace(redirectDest);
           } else {
-            router.replace(`/${slug}/admin/login`);
+            router.replace(redirectDest);
           }
         }
       } finally {
@@ -70,10 +82,11 @@ export function AdminClient({ initialWebsite, slug }: AdminClientProps) {
     } catch {
       // Ignore
     } finally {
+      clearClientAuthState();
       if (typeof window !== "undefined") {
-        window.location.replace(`/${slug}/admin/login`);
+        window.location.replace(loginPath);
       } else {
-        router.replace(`/${slug}/admin/login`);
+        router.replace(loginPath);
       }
     }
   };
@@ -81,19 +94,19 @@ export function AdminClient({ initialWebsite, slug }: AdminClientProps) {
   const isDoctor = initialWebsite.websiteType === "ONLY_DOCTOR";
 
   if (isDoctor) {
-    return <OnlyDoctorAdminWrapper initialWebsite={initialWebsite} slug={slug} handleLogout={handleLogout} />;
+    return <OnlyDoctorAdminWrapper initialWebsite={initialWebsite} loginPath={loginPath} handleLogout={handleLogout} />;
   }
 
-  return <HospitalAdminWrapper initialWebsite={initialWebsite} slug={slug} handleLogout={handleLogout} />;
+  return <HospitalAdminWrapper initialWebsite={initialWebsite} loginPath={loginPath} handleLogout={handleLogout} />;
 }
 
 function OnlyDoctorAdminWrapper({
   initialWebsite,
-  slug,
+  loginPath,
   handleLogout,
 }: {
   initialWebsite: EffectiveWebsiteData;
-  slug: string;
+  loginPath: string;
   handleLogout: () => Promise<void>;
 }) {
   const [appointments, setAppointments] = React.useState<AppointmentItem[]>([]);
@@ -109,8 +122,12 @@ function OnlyDoctorAdminWrapper({
           setAppointments(
             res.data.appointments.map((a: any) => ({
               id: a._id || a.id,
+              appointmentId: a.appointmentId || "",
+              tokenNumber: typeof a.tokenNumber === "number" ? a.tokenNumber : undefined,
+              source: a.source || "WEBSITE_FORM",
               patientName: a.patientName,
               patientPhone: a.patientPhone,
+              patientAge: a.patientAge,
               appointmentDate: a.appointmentDate ? (new Date(a.appointmentDate).toISOString().split("T")[0] || "") : "",
               timeSlot: a.timeSlot || a.preferredTimeSlot || "Morning",
               status: a.status,
@@ -149,6 +166,8 @@ function OnlyDoctorAdminWrapper({
     faviconUrl: initialWebsite.faviconUrl,
     browserTabTitle: initialWebsite.browserTabTitle,
     publishStatus: "PUBLISHED",
+    isWebsiteChatbotEnabled: initialWebsite.isWebsiteChatbotEnabled !== false,
+    isAdminChatbotEnabled: initialWebsite.isAdminChatbotEnabled !== false,
   };
 
   const handleSave = async (updated: Partial<OnlyDoctorData>) => {
@@ -173,7 +192,7 @@ function OnlyDoctorAdminWrapper({
   };
 
   return (
-    <InactivityGuard logoutRedirectUrl={`/${slug}/admin/login`}>
+    <InactivityGuard logoutRedirectUrl={loginPath}>
       <OnlyDoctorAdmin
         initialData={doctorData}
         initialAppointments={appointments}
@@ -187,14 +206,69 @@ function OnlyDoctorAdminWrapper({
 
 function HospitalAdminWrapper({
   initialWebsite,
-  slug,
+  loginPath,
   handleLogout,
 }: {
   initialWebsite: EffectiveWebsiteData;
-  slug: string;
+  loginPath: string;
   handleLogout: () => Promise<void>;
 }) {
   const [appointments, setAppointments] = React.useState<HospitalAppointmentItem[]>([]);
+  const [hospitalDoctors, setHospitalDoctors] = React.useState<HospitalDoctorItem[]>(() =>
+    (initialWebsite.doctorDirectory || []).map((doc) => ({
+      id: doc.id || doc.slug,
+      doctorName: doc.doctorName,
+      slug: doc.slug,
+      gender: (doc as any).gender || "Male",
+      degree: doc.degree,
+      specialization: doc.specialization,
+      yearsOfExperience: doc.yearsOfExperience,
+      email: `${doc.slug}@${initialWebsite.slug}.com`,
+      status: "ACTIVE" as const,
+      approvalStatus: "APPROVED" as const,
+      doctorPhoto: doc.doctorPhoto,
+    }))
+  );
+
+  React.useEffect(() => {
+    async function loadHospitalDoctors() {
+      try {
+        const res = await apiClient.get<{
+          success: boolean;
+          data?: { doctors?: any[] };
+        }>("/doctors/hospital-directory");
+        if (res.success && Array.isArray(res.data?.doctors)) {
+          setHospitalDoctors(
+            res.data.doctors.map((doc: any) => ({
+              id: doc._id || doc.id,
+              doctorName: doc.doctorName,
+              slug: doc.slug,
+              tempSlug: doc.tempSlug,
+              approvalStatus: doc.approvalStatus || "APPROVED",
+              gender: doc.gender || "MALE",
+              degree: doc.degree || "",
+              specialization: doc.specialization || "",
+              yearsOfExperience: doc.yearsOfExperience || 0,
+              newCaseFee: doc.newCaseFee,
+              oldCaseFee: doc.oldCaseFee,
+              whatsApp: doc.whatsApp,
+              email: doc.email || "",
+              doctorPhoto: doc.doctorPhoto,
+              status: doc.status || "ACTIVE",
+              deactivatedByRole: doc.deactivatedByRole || null,
+              consultationHours: doc.consultationHours,
+              weeklyOff: doc.weeklyOff,
+              appointmentRequired: doc.appointmentRequired,
+              createdAt: doc.createdAt,
+            }))
+          );
+        }
+      } catch {
+        // Keep fallback directory
+      }
+    }
+    loadHospitalDoctors();
+  }, []);
 
   React.useEffect(() => {
     async function loadHospitalAppointments() {
@@ -207,8 +281,13 @@ function HospitalAdminWrapper({
           setAppointments(
             res.data.appointments.map((a: any) => ({
               id: a._id || a.id,
+              appointmentId: a.appointmentId || "",
+              tokenNumber: typeof a.tokenNumber === "number" ? a.tokenNumber : undefined,
+              source: a.source || "WEBSITE_FORM",
               patientName: a.patientName,
               patientPhone: a.patientPhone,
+              patientAge: a.patientAge,
+              notes: a.notes,
               appointmentDate: a.appointmentDate ? (new Date(a.appointmentDate).toISOString().split("T")[0] || "") : "",
               timeSlot: a.timeSlot || a.preferredTimeSlot || "Morning",
               status: a.status,
@@ -242,20 +321,10 @@ function HospitalAdminWrapper({
     faviconUrl: initialWebsite.faviconUrl,
     browserTabTitle: initialWebsite.browserTabTitle,
     departments: initialWebsite.departments || [],
+    specialties: initialWebsite.specialties || initialWebsite.departments || [],
+    isWebsiteChatbotEnabled: initialWebsite.isWebsiteChatbotEnabled !== false,
+    isAdminChatbotEnabled: initialWebsite.isAdminChatbotEnabled !== false,
   };
-
-  const initialDoctors: HospitalDoctorItem[] = (initialWebsite.doctorDirectory || []).map((doc) => ({
-    id: doc.id || doc.slug,
-    doctorName: doc.doctorName,
-    slug: doc.slug,
-    gender: (doc as any).gender || "Male",
-    degree: doc.degree,
-    specialization: doc.specialization,
-    yearsOfExperience: doc.yearsOfExperience,
-    email: `${doc.slug}@${initialWebsite.slug}.com`,
-    status: "ACTIVE" as const,
-    doctorPhoto: doc.doctorPhoto,
-  }));
 
   const handleSaveHospital = async (updated: Partial<HospitalData>) => {
     try {
@@ -281,8 +350,13 @@ function HospitalAdminWrapper({
   const handleToggleDoctorStatus = async (doctorId: string, status: "ACTIVE" | "INACTIVE") => {
     try {
       await apiClient.patch(`/doctors/${doctorId}/status`, { status });
-    } catch (err) {
-      console.warn("Doctor status toggle fallback:", err);
+    } catch (err: unknown) {
+      const msg =
+        err instanceof Error
+          ? err.message
+          : "Failed to update doctor website status";
+      toast.error(msg);
+      throw err;
     }
   };
 
@@ -303,10 +377,10 @@ function HospitalAdminWrapper({
   };
 
   return (
-    <InactivityGuard logoutRedirectUrl={`/${slug}/admin/login`}>
+    <InactivityGuard logoutRedirectUrl={loginPath}>
       <HospitalAdmin
         initialHospital={hospitalData}
-        initialDoctors={initialDoctors}
+        initialDoctors={hospitalDoctors}
         initialAppointments={appointments}
         onSaveHospital={handleSaveHospital}
         onAddDoctor={handleAddDoctor}

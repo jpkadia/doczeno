@@ -1,6 +1,7 @@
 import { Organization, IOrganization, Doctor, Website, Media } from "@/models";
 import { logAuditEvent } from "./audit.service";
 import { MediaService } from "./media.service";
+import { aiContentService, resolveOrganizationSpecialties } from "./ai-content.service";
 import { AuthUserPayload } from "@/types";
 import { RESERVED_SLUGS } from "@/constants/healthcare";
 
@@ -43,11 +44,21 @@ export class OrganizationService {
     const existingOrg = await Organization.findById(id);
     if (!existingOrg) return null;
 
-    // Keep specialties and departments synchronized
-    if (updateData.departments && !updateData.specialties) {
-      updateData.specialties = updateData.departments;
-    } else if (updateData.specialties && !updateData.departments) {
-      updateData.departments = updateData.specialties;
+    // Keep specialties and departments strictly synchronized (minimum 1 specialty required)
+    const incomingSpecs =
+      Array.isArray(updateData.specialties) || Array.isArray(updateData.departments)
+        ? resolveOrganizationSpecialties({
+            specialties: updateData.specialties,
+            departments: updateData.departments,
+          })
+        : null;
+
+    if (incomingSpecs !== null) {
+      if (incomingSpecs.length === 0) {
+        throw new Error("At least 1 medical specialty / department is required for a hospital or clinic.");
+      }
+      updateData.specialties = incomingSpecs;
+      updateData.departments = incomingSpecs;
     }
 
     if (updateData.slug && typeof updateData.slug === "string") {
@@ -111,6 +122,14 @@ export class OrganizationService {
       { $set: updateData },
       { new: true, runValidators: true }
     );
+
+    if (updated && incomingSpecs !== null) {
+      await aiContentService.syncHospitalSpecialtiesToContent(
+        updated._id,
+        updated.specialties || incomingSpecs,
+        updated.address?.city
+      );
+    }
 
     if (updated && actor) {
       await logAuditEvent({

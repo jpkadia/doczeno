@@ -2,7 +2,7 @@
 
 import * as React from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { apiClient } from "@/lib/api-client";
+import { apiClient, clearClientAuthState } from "@/lib/api-client";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -58,9 +58,20 @@ export function AdminLoginClient() {
 
     async function checkExistingAuth() {
       if (isInactiveReason) {
+        clearClientAuthState();
         setIsCheckingAuth(false);
         return;
       }
+
+      try {
+        const storedLast = Number(localStorage.getItem("doczeno_last_activity_at") || "0");
+        if (storedLast > 0 && Date.now() - storedLast >= 15 * 60 * 1000) {
+          await apiClient.post("/auth/logout", { reason: "INACTIVITY" }).catch(() => {});
+          clearClientAuthState();
+          if (isMounted) setIsCheckingAuth(false);
+          return;
+        }
+      } catch {}
 
       try {
         const res = await apiClient.get<AuthMeResponse>("/auth/me");

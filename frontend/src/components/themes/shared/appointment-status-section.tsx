@@ -25,6 +25,8 @@ interface AppointmentStatusSectionProps {
 
 interface AppointmentStatusData {
   appointmentId: string;
+  tokenNumber?: number | null;
+  slotKey?: string;
   status: "PENDING" | "CONFIRMED" | "COMPLETED" | "CANCELLED" | "NO_SHOW" | "PATIENT_NOT_COME";
   patientName: string;
   patientAge?: number;
@@ -35,6 +37,16 @@ interface AppointmentStatusData {
   doctorSpecialization?: string;
   hospitalName?: string;
   createdAt?: string;
+  queueInfo?: {
+    tokenNumber: number | null;
+    slotKey: string;
+    slotLabel: string;
+    currentServingToken: number;
+    patientsAhead: number;
+    isYourTurn: boolean;
+    isNext: boolean;
+    queueMessage: string;
+  };
 }
 
 export function AppointmentStatusSection({
@@ -238,14 +250,54 @@ export function AppointmentStatusSection({
                 <div className={cn("flex flex-wrap items-center justify-between gap-3 pb-4 border-b", isDark ? "border-slate-700" : "border-slate-200")}>
                   <div>
                     <span className={cn("text-[11px] uppercase tracking-wider font-semibold block", isDark ? "text-slate-400" : "text-slate-500")}>
-                      Appointment ID
+                      Appointment ID &amp; Token
                     </span>
-                    <span className={cn("text-xl font-bold font-mono", isDark ? "text-white" : "text-slate-900")}>
-                      {result.appointmentId}
-                    </span>
+                    <div className="flex flex-wrap items-center gap-2.5 mt-0.5">
+                      <span className={cn("text-xl font-bold font-mono", isDark ? "text-white" : "text-slate-900")}>
+                        {result.appointmentId}
+                      </span>
+                      {typeof (result.tokenNumber ?? result.queueInfo?.tokenNumber) === "number" && (
+                        <Badge className="bg-emerald-600 hover:bg-emerald-600 text-white font-mono text-xs px-2.5 py-0.5">
+                          Token #{result.tokenNumber ?? result.queueInfo?.tokenNumber}
+                        </Badge>
+                      )}
+                    </div>
                   </div>
                   <div>{getStatusBadge(result.status)}</div>
                 </div>
+
+                {/* Live OPD Queue Tracker Banner */}
+                {result.queueInfo && (result.status === "PENDING" || result.status === "CONFIRMED") && (
+                  <div
+                    className={cn(
+                      "rounded-xl border px-4 py-3 flex flex-col sm:flex-row sm:items-center justify-between gap-2",
+                      result.queueInfo.isYourTurn
+                        ? "bg-emerald-500/15 border-emerald-500/40 text-emerald-700 dark:text-emerald-300"
+                        : isDark
+                        ? "bg-white/5 border-white/15 text-slate-200"
+                        : "bg-blue-50/80 border-blue-200 text-slate-800"
+                    )}
+                  >
+                    <div className="space-y-0.5">
+                      <span className="text-[10px] font-bold uppercase tracking-wider opacity-80 block">
+                        Live OPD Queue Status
+                      </span>
+                      <p className="text-xs sm:text-sm font-semibold">
+                        {result.queueInfo.queueMessage}
+                      </p>
+                    </div>
+                    {result.queueInfo.currentServingToken > 0 && (
+                      <div className="text-right shrink-0">
+                        <span className="text-[10px] uppercase tracking-wider opacity-75 block">
+                          Now Serving
+                        </span>
+                        <span className="text-base font-black font-mono">
+                          Token #{result.queueInfo.currentServingToken}
+                        </span>
+                      </div>
+                    )}
+                  </div>
+                )}
 
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-xs sm:text-sm">
                   {/* Patient Details */}

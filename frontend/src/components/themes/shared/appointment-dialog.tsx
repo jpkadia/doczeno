@@ -14,7 +14,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { PhoneInput } from "@/components/ui/phone-input";
 import { CalendarPicker } from "@/components/ui/calendar-picker";
-import { Phone, MessageSquare, CheckCircle2, AlertCircle, Calendar } from "lucide-react";
+import { Phone, MessageSquare, CheckCircle2, AlertCircle, Calendar, Copy, Check, Stethoscope, Clock } from "lucide-react";
 import { apiClient } from "@/lib/api-client";
 import { toast } from "sonner";
 import {
@@ -22,6 +22,7 @@ import {
   validateAppointmentBookingDate,
   BookingDayOption,
 } from "@/lib/appointment-schedule";
+import { fetchDoctorLiveSlots, LiveSlotOption, formatSlotSelectLabel } from "@/lib/appointment-slots";
 import { cn } from "@/lib/utils";
 import { useWebsiteThemeMode } from "./website-mode-context";
 import { resolveThemePalette } from "@/lib/theme-palettes";
@@ -37,6 +38,16 @@ interface AppointmentDialogProps {
   weeklyOff?: string;
   children?: React.ReactNode;
   selectedTheme?: string;
+  doctorDirectory?: Array<{
+    id: string;
+    doctorName: string;
+    slug?: string;
+    specialization: string;
+    degree?: string;
+    consultationHours?: string;
+    weeklyOff?: string;
+  }>;
+  websiteType?: string;
 }
 
 export function AppointmentDialog({
@@ -50,11 +61,14 @@ export function AppointmentDialog({
   weeklyOff,
   children,
   selectedTheme,
+  doctorDirectory,
+  websiteType: _websiteType,
 }: AppointmentDialogProps) {
   const { isDark } = useWebsiteThemeMode();
   const theme = resolveThemePalette(selectedTheme);
 
   const [isOpen, setIsOpen] = React.useState(false);
+  const [selectedDoctorId, setSelectedDoctorId] = React.useState<string>(doctorId || "");
   const [patientName, setPatientName] = React.useState("");
   const [patientAge, setPatientAge] = React.useState("");
   const [patientPhone, setPatientPhone] = React.useState("");
@@ -63,6 +77,24 @@ export function AppointmentDialog({
   const [submitted, setSubmitted] = React.useState(false);
   const [isSubmitting, setIsSubmitting] = React.useState(false);
   const [bookedAppointmentId, setBookedAppointmentId] = React.useState<string | null>(null);
+  const [bookedTokenNumber, setBookedTokenNumber] = React.useState<number | null>(null);
+  const [bookedTimeSlot, setBookedTimeSlot] = React.useState<string>("");
+  const [selectedTimeSlot, setSelectedTimeSlot] = React.useState<string>("");
+  const [liveSlots, setLiveSlots] = React.useState<LiveSlotOption[]>([]);
+  const [slotsLoading, setSlotsLoading] = React.useState(false);
+  const [copiedId, setCopiedId] = React.useState(false);
+
+  const handleCopyId = async () => {
+    if (!bookedAppointmentId) return;
+    try {
+      await navigator.clipboard.writeText(bookedAppointmentId);
+      setCopiedId(true);
+      toast.success("Appointment ID copied to clipboard!");
+      setTimeout(() => setCopiedId(false), 2500);
+    } catch {
+      toast.info(`Appointment ID: ${bookedAppointmentId}`);
+    }
+  };
 
   const inputClass = cn(
     "rounded-xl border transition-all h-10 text-xs sm:text-sm shadow-2xs",
@@ -100,6 +132,45 @@ export function AppointmentDialog({
       }
     }
   }, [isOpen, bookingDays, preferredDate]);
+
+  React.useEffect(() => {
+    if (isOpen && !selectedDoctorId && doctorDirectory && doctorDirectory.length > 0) {
+      setSelectedDoctorId(doctorDirectory[0]?.id || "");
+    }
+  }, [isOpen, selectedDoctorId, doctorDirectory]);
+
+  // Fetch doctor's live open slots + remaining seat capacity when modal/doctor/date changes
+  React.useEffect(() => {
+    if (!isOpen || !preferredDate) return;
+    const effectiveDocId = selectedDoctorId || doctorId;
+    if (!effectiveDocId && !organizationId) return;
+    let cancelled = false;
+    setSlotsLoading(true);
+    fetchDoctorLiveSlots({
+      doctorId: effectiveDocId || undefined,
+      organizationId: organizationId || undefined,
+      date: preferredDate,
+    })
+      .then((res) => {
+        if (cancelled) return;
+        const list = res?.slots || [];
+        setLiveSlots(list);
+        const firstAvailable = list.find((s) => !s.isFull);
+        if (firstAvailable) {
+          setSelectedTimeSlot(firstAvailable.displayLabel);
+        } else if (list[0]) {
+          setSelectedTimeSlot(list[0].displayLabel);
+        } else {
+          setSelectedTimeSlot("");
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setSlotsLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [isOpen, preferredDate, selectedDoctorId, doctorId, organizationId]);
 
   // Real-time validation for selected date
   const dateValidation = React.useMemo(() => {
@@ -141,6 +212,10 @@ export function AppointmentDialog({
     setSubmitted(false);
     setIsOpen(false);
     setBookedAppointmentId(null);
+    setBookedTokenNumber(null);
+    setBookedTimeSlot("");
+    setSelectedTimeSlot("");
+    setLiveSlots([]);
     setPatientName("");
     setPatientAge("");
     setPatientPhone("");
@@ -181,25 +256,46 @@ export function AppointmentDialog({
       return;
     }
 
+    const chosenSlotObj = liveSlots.find((s) => s.displayLabel === selectedTimeSlot);
+    if (chosenSlotObj?.isFull) {
+      toast.error("Selected time slot is FULL. Please choose another available slot or date.");
+      return;
+    }
+    if (liveSlots.length > 0 && !selectedTimeSlot) {
+      toast.error("Please select an available consultation time slot.");
+      return;
+    }
+
     setIsSubmitting(true);
     try {
       const res: any = await apiClient.post("/appointments", {
-        doctorId: doctorId || undefined,
+        doctorId: selectedDoctorId || doctorId || undefined,
         organizationId: organizationId || undefined,
         patientName: patientName.trim(),
         patientAge: parsedAge,
         patientPhone: patientPhone.trim(),
         appointmentDate: new Date(preferredDate),
-        timeSlot: "Regular Consultation",
+        timeSlot: selectedTimeSlot || "Regular Consultation",
         notes: notes.trim(),
+        source: "WEBSITE_FORM",
       });
 
       const genId = res?.data?.appointmentId || res?.data?.appointment?.appointmentId;
+      const genToken = res?.data?.tokenNumber ?? res?.data?.appointment?.tokenNumber;
+      const resSlot = res?.data?.timeSlot || selectedTimeSlot;
       if (genId) {
         setBookedAppointmentId(genId);
       }
+      if (typeof genToken === "number") {
+        setBookedTokenNumber(genToken);
+      }
+      if (resSlot) {
+        setBookedTimeSlot(resSlot);
+      }
       setSubmitted(true);
-      toast.success("Appointment booked successfully!");
+      toast.success(
+        `Appointment booked!${typeof genToken === "number" ? ` Token #${genToken}` : ""}`
+      );
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : "Failed to book appointment. Please try again.";
       toast.error(msg);
@@ -291,6 +387,60 @@ export function AppointmentDialog({
                 >
                   {bookedAppointmentId}
                 </p>
+
+                {bookedTokenNumber !== null && (
+                  <div className="pt-1 flex flex-wrap items-center justify-center gap-2">
+                    <span
+                      className={cn(
+                        "inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-extrabold font-mono border",
+                        isDark
+                          ? "bg-emerald-500/15 text-emerald-300 border-emerald-500/30"
+                          : "bg-emerald-50 text-emerald-700 border-emerald-200"
+                      )}
+                    >
+                      Your Queue Token: #{bookedTokenNumber}
+                    </span>
+                    {bookedTimeSlot && (
+                      <span
+                        className={cn(
+                          "inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[11px] font-semibold border",
+                          isDark ? "border-white/15 text-slate-300" : "border-slate-200 text-slate-600 bg-white"
+                        )}
+                      >
+                        <Clock className="h-3 w-3" />
+                        {bookedTimeSlot}
+                      </span>
+                    )}
+                  </div>
+                )}
+
+                {/* Direct Copy Button for Appointment Tracking */}
+                <div className="pt-0.5 pb-1 flex justify-center">
+                  <button
+                    type="button"
+                    onClick={handleCopyId}
+                    className={cn(
+                      "inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg text-xs font-semibold border transition-all active:scale-95 cursor-pointer shadow-xs",
+                      copiedId
+                        ? "bg-emerald-500/10 text-emerald-600 border-emerald-500/30 dark:text-emerald-400"
+                        : isDark
+                        ? "bg-white/10 hover:bg-white/15 text-slate-100 border-white/20"
+                        : "bg-white hover:bg-slate-50 text-slate-800 border-slate-200"
+                    )}
+                  >
+                    {copiedId ? (
+                      <>
+                        <Check className="h-3.5 w-3.5 text-emerald-500 animate-in zoom-in-75" />
+                        <span>Copied to Clipboard!</span>
+                      </>
+                    ) : (
+                      <>
+                        <Copy className="h-3.5 w-3.5 text-slate-500" />
+                        <span>Copy Appointment ID</span>
+                      </>
+                    )}
+                  </button>
+                </div>
                 <p className={cn("text-[11px] pt-1", isDark ? "text-slate-400" : "text-slate-600")}>
                   You can use this ID in the <strong>Appointment Status</strong> section on this website to track your status live.
                 </p>
@@ -377,6 +527,47 @@ export function AppointmentDialog({
             </div>
 
             <form onSubmit={handleSubmitRequest} className="space-y-2 sm:space-y-2.5">
+              {/* Doctor Selection for Hospital Website Appointments */}
+              {doctorDirectory && doctorDirectory.length > 0 && !doctorId && (
+                <div className="space-y-1">
+                  <Label
+                    htmlFor="select-hospital-doctor"
+                    className={cn(
+                      "text-xs font-semibold h-5 flex items-center gap-1.5",
+                      isDark ? "text-slate-200" : "text-slate-700"
+                    )}
+                  >
+                    <Stethoscope className="h-3.5 w-3.5" style={{ color: isDark ? theme.primaryLight : theme.primary }} />
+                    <span>Select Specialist / Doctor *</span>
+                  </Label>
+                  <select
+                    id="select-hospital-doctor"
+                    value={selectedDoctorId}
+                    onChange={(e) => setSelectedDoctorId(e.target.value)}
+                    className={cn(
+                      "w-full rounded-xl border text-xs sm:text-sm px-3 h-10 outline-hidden transition-all shadow-2xs font-medium cursor-pointer",
+                      "focus:border-[var(--theme-primary)] focus:ring-2 focus:ring-[var(--theme-primary)]/30"
+                    )}
+                    style={{
+                      backgroundColor: isDark ? theme.innerCardBgDark : "#ffffff",
+                      borderColor: isDark ? theme.cardBorderDark : theme.cardBorderLight,
+                      color: isDark ? "#ffffff" : "#0f172a",
+                    }}
+                    required
+                  >
+                    {doctorDirectory.map((doc) => (
+                      <option
+                        key={doc.id}
+                        value={doc.id}
+                        className={isDark ? "bg-slate-900 text-white" : "bg-white text-slate-900"}
+                      >
+                        Dr. {doc.doctorName} — {doc.specialization} {doc.degree ? `(${doc.degree})` : ""}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )}
+
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 sm:gap-2.5">
                 <div className="space-y-1 sm:col-span-2">
                   <Label htmlFor="patient-name" className={cn("text-xs font-semibold h-5 flex items-center", isDark ? "text-slate-200" : "text-slate-700")}>
@@ -532,6 +723,61 @@ export function AppointmentDialog({
                   </div>
                 )}
               </div>
+
+              {/* Live Time Slot Selection with Seat Availability */}
+              {(!dateValidation || dateValidation.isValid) && (
+                <div className="space-y-1">
+                  <Label
+                    htmlFor="appointment-slot-select"
+                    className={cn("text-xs font-semibold h-5 flex items-center justify-between", isDark ? "text-slate-200" : "text-slate-700")}
+                  >
+                    <span className="flex items-center gap-1.5">
+                      <Clock className="h-3.5 w-3.5 shrink-0" style={{ color: isDark ? theme.primaryLight : theme.primary }} />
+                      <span>Select Time Slot *</span>
+                    </span>
+                    {slotsLoading && (
+                      <span className="text-[10px] font-normal opacity-75">Checking seats...</span>
+                    )}
+                  </Label>
+                  {liveSlots.length > 0 ? (
+                    <select
+                      id="appointment-slot-select"
+                      value={selectedTimeSlot}
+                      onChange={(e) => setSelectedTimeSlot(e.target.value)}
+                      className={cn(
+                        "w-full rounded-xl border text-xs sm:text-sm px-3 h-10 outline-hidden transition-all shadow-2xs font-medium cursor-pointer",
+                        "focus:border-[var(--theme-primary)] focus:ring-2 focus:ring-[var(--theme-primary)]/30"
+                      )}
+                      style={{
+                        backgroundColor: isDark ? theme.innerCardBgDark : "#ffffff",
+                        borderColor: isDark ? theme.cardBorderDark : theme.cardBorderLight,
+                        color: isDark ? "#ffffff" : "#0f172a",
+                      }}
+                      required
+                    >
+                      {liveSlots.map((sl) => (
+                        <option
+                          key={sl.slotKey}
+                          value={sl.displayLabel}
+                          disabled={sl.isFull}
+                          className={isDark ? "bg-slate-900 text-white" : "bg-white text-slate-900"}
+                        >
+                          {formatSlotSelectLabel(sl)}
+                        </option>
+                      ))}
+                    </select>
+                  ) : (
+                    <div
+                      className={cn(
+                        "rounded-xl border px-3 py-2 text-xs",
+                        isDark ? "border-white/10 text-slate-300" : "border-slate-200 text-slate-600 bg-slate-50"
+                      )}
+                    >
+                      {slotsLoading ? "Loading consultation slots..." : "Regular Consultation"}
+                    </div>
+                  )}
+                </div>
+              )}
 
               <div className="space-y-1">
                 <Label htmlFor="patient-notes" className={cn("text-xs font-semibold h-5 flex items-center", isDark ? "text-slate-200" : "text-slate-700")}>

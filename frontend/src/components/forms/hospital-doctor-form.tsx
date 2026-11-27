@@ -31,6 +31,7 @@ import {
   ArrowRight,
   Eye,
   EyeOff,
+  Clock,
 } from "lucide-react";
 import { toast } from "sonner";
 import { OtpVerificationDialog } from "./otp-verification-dialog";
@@ -67,9 +68,20 @@ export function HospitalDoctorForm({
   const [publishedUrl, setPublishedUrl] = React.useState<string | null>(null);
   const [showOtpDialog, setShowOtpDialog] = React.useState(false);
   const [createdDocSlug, setCreatedDocSlug] = React.useState<string | null>(null);
+  const [isPendingApproval, setIsPendingApproval] = React.useState(false);
   const [showPassword, setShowPassword] = React.useState(false);
   const [showConfirmPassword, setShowConfirmPassword] = React.useState(false);
   const { formatPrefix, formatUrl } = usePlatformDomain();
+
+  // Security: Clean any session token so first-time admin access requires email & password login
+  React.useEffect(() => {
+    if ((publishedUrl || currentStep === 8) && typeof window !== "undefined") {
+      try {
+        localStorage.removeItem("doczeno_auth_token");
+        document.cookie = "doczeno_session=; path=/; max-age=0; SameSite=Lax; Secure";
+      } catch {}
+    }
+  }, [publishedUrl, currentStep]);
 
   const defaultValues: Partial<HospitalDoctorFormValues> = React.useMemo(
     () => ({
@@ -461,7 +473,12 @@ export function HospitalDoctorForm({
       setIsSubmitting(true);
       setValue("otp", otp);
 
-      const res = await apiClient.post<{ publicUrl?: string; data?: { publicUrl?: string } }>(
+      const res = await apiClient.post<{
+        publicUrl?: string;
+        pendingApproval?: boolean;
+        message?: string;
+        data?: { publicUrl?: string; pendingApproval?: boolean; requestedSlug?: string };
+      }>(
         "/onboarding/hospital-doctor",
         {
           ...formValues,
@@ -470,13 +487,24 @@ export function HospitalDoctorForm({
         }
       );
 
+      const pending = Boolean(res.pendingApproval || res.data?.pendingApproval);
+      setIsPendingApproval(pending);
+
       const url = res.publicUrl || res.data?.publicUrl || "";
       setPublishedUrl(url);
-      const docSlug = url.split("/").pop() || "";
+      const docSlug =
+        res.data?.requestedSlug ||
+        (url ? url.split("/").pop() || "" : "") ||
+        formValues.customSlug ||
+        "";
       setCreatedDocSlug(docSlug);
       clearDraft();
       setCurrentStep(8);
-      toast.success("Affiliated Doctor Registered Successfully!");
+      toast.success(
+        pending
+          ? "Your request is sent to the admin for approval, kindly wait some time."
+          : "Affiliated Doctor Registered Successfully!"
+      );
     } catch (err: unknown) {
       const msg =
         err instanceof Error
@@ -500,12 +528,60 @@ export function HospitalDoctorForm({
     8: "Doctor Affiliation Successfully Published!",
   };
 
-  if (publishedUrl || currentStep === 8) {
+  if (publishedUrl || isPendingApproval || currentStep === 8) {
     const orgSlug = selectedHospital?.slug || "hospital";
     const doctorSlug =
       createdDocSlug ||
       formValues.customSlug ||
       "dr-" + formValues.doctorName.toLowerCase().replace(/[^a-z0-9]/g, "-");
+
+    if (isPendingApproval) {
+      return (
+        <div className="py-4 sm:py-8 flex items-center justify-center min-h-[55vh]">
+          <Card className="w-full max-w-lg mx-auto border border-amber-200/80 rounded-2xl shadow-xl bg-white/95 backdrop-blur-md">
+            <CardContent className="p-6 sm:p-8 text-center space-y-4">
+              <div className="h-14 w-14 rounded-full bg-amber-50 border border-amber-200 text-amber-600 flex items-center justify-center mx-auto shadow-xs">
+                <Clock className="h-7 w-7" />
+              </div>
+              <div className="space-y-2">
+                <span className="inline-block px-3 py-1 rounded-full bg-amber-100 text-amber-800 text-[11px] font-bold uppercase tracking-wider">
+                  Pending Hospital Admin Approval
+                </span>
+                <h2 className="text-xl sm:text-2xl font-bold text-slate-900">
+                  Request Sent for Approval
+                </h2>
+                <p className="text-sm text-slate-700 font-medium max-w-md mx-auto leading-relaxed">
+                  Your request is sent to the admin for approval, kindly wait some time.
+                </p>
+              </div>
+
+              <div className="w-full p-4 bg-slate-50 rounded-xl border border-slate-200 text-left space-y-2 text-xs">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-slate-500 font-medium">Hospital:</span>
+                  <span className="font-bold text-slate-900">{selectedHospital?.name || orgSlug}</span>
+                </div>
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-slate-500 font-medium">Doctor:</span>
+                  <span className="font-bold text-slate-900">Dr. {formValues.doctorName}</span>
+                </div>
+                <div className="pt-2 border-t border-slate-200 space-y-1">
+                  <span className="font-semibold text-slate-700 block">
+                    Requested Website URL (Will activate after approval):
+                  </span>
+                  <div className="p-2 bg-white rounded-lg border border-slate-200 font-mono text-[11px] text-slate-700 font-semibold break-all">
+                    {formatUrl(`${orgSlug}/${doctorSlug}`)}
+                  </div>
+                </div>
+              </div>
+
+              <p className="text-[11px] text-slate-500 leading-relaxed">
+                Once the {selectedHospital?.name || "hospital"} administrator reviews and approves your profile, your website and doctor admin portal will become active.
+              </p>
+            </CardContent>
+          </Card>
+        </div>
+      );
+    }
 
     return (
       <div className="py-4 sm:py-8 flex items-center justify-center min-h-[55vh]">
@@ -836,22 +912,26 @@ export function HospitalDoctorForm({
             {currentStep === 3 && (
               <div className="space-y-5">
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                  <FormField id="email" label="Doctor Email" required error={errors.email?.message}>
+                  <FormField id="email" label="Public Inquiries & Contact Email" required hint="Displayed publicly on your website" error={errors.email?.message}>
                     <Input id="email" type="email" {...register("email")} placeholder="doctor@hospital.com" />
                   </FormField>
 
-                  <FormField id="whatsApp" label="WhatsApp Number" required error={errors.whatsApp?.message}>
-                    <PhoneInput
-                      id="whatsApp"
-                      value={formValues.whatsApp}
-                      onChange={(val) => {
-                        setValue("whatsApp", val, { shouldValidate: true, shouldDirty: true });
-                      }}
-                      error={errors.whatsApp?.message}
-                      required
-                    />
+                  <FormField id="adminEmail" label="Doctor Admin Login Email (Optional)" hint="Leave blank to use inquiry email" error={errors.adminEmail?.message}>
+                    <Input id="adminEmail" type="email" {...register("adminEmail")} placeholder="Leave blank to use inquiry email" />
                   </FormField>
                 </div>
+
+                <FormField id="whatsApp" label="WhatsApp Number" required error={errors.whatsApp?.message}>
+                  <PhoneInput
+                    id="whatsApp"
+                    value={formValues.whatsApp}
+                    onChange={(val) => {
+                      setValue("whatsApp", val, { shouldValidate: true, shouldDirty: true });
+                    }}
+                    error={errors.whatsApp?.message}
+                    required
+                  />
+                </FormField>
               </div>
             )}
 
@@ -919,7 +999,7 @@ export function HospitalDoctorForm({
                     <ImageUploader
                       label="Doctor Profile Photo"
                       category="DOCTOR_PHOTO"
-                      maxSizeBytes={3 * 1024 * 1024}
+                      maxSizeBytes={10 * 1024 * 1024}
                       required
                       enableCrop
                       value={field.value}

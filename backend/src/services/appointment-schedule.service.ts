@@ -33,6 +33,7 @@ const DAY_ALIASES: Record<DayName, string[]> = {
 export interface DaySlotInfo {
   startTime: string;
   endTime: string;
+  maxPatients?: number | null;
 }
 
 export interface DayScheduleItem {

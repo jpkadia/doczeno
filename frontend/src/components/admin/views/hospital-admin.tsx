@@ -7,23 +7,30 @@ import {
   Clock,
   Users,
   CalendarCheck,
-  Image as ImageIcon,
   Palette,
   Settings,
   Plus,
+  CalendarPlus,
   Trash2,
   CheckCircle,
   Stethoscope,
   QrCode,
   MessageSquare,
-  MessageSquareQuote,
   Globe,
   ExternalLink,
   Edit3,
   FileText,
   AlertTriangle,
+  UserCheck,
+  Eye,
+  ShieldCheck,
+  Lock,
+  XCircle,
 } from "lucide-react";
+import { cn } from "@/lib/utils";
 import { AdminShell, NavItem } from "../admin-shell";
+import { LiveOpdQueueCard } from "../live-opd-queue-card";
+import { fetchDoctorLiveSlots, LiveSlotOption, formatSlotSelectLabel } from "@/lib/appointment-slots";
 import { ClinicQrCard } from "../clinic-qr-dialog";
 import { Card, CardHeader, CardTitle, CardContent, CardDescription, CardFooter } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -36,12 +43,13 @@ import { PhoneInput } from "@/components/ui/phone-input";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter, DialogTrigger } from "@/components/ui/dialog";
 import { AIContentPanel } from "../ai-content-panel";
 import { AIChatHistoryView } from "../ai-chat-history-view";
-import { TestimonialsManagementView } from "./testimonials-management-view";
 import { ImageUploader } from "@/components/forms/image-uploader";
-import { GalleryUploader } from "@/components/forms/gallery-uploader";
 import { SlugInput } from "@/components/forms/slug-input";
 import { ThemeColorSelector } from "@/components/forms/theme-color-selector";
+import { SpecialtiesMultiSelect } from "@/components/forms/specialties-multi-select";
+import { ConsultationHoursBuilder, DaySchedule, DEFAULT_WEEK_SCHEDULE } from "@/components/forms/consultation-hours-builder";
 import { AccountSettingsCard } from "../account-settings-card";
+import { AdminLogView } from "../admin-log-view";
 import { MediaAsset } from "@/types";
 import { apiClient } from "@/lib/api-client";
 import { toast } from "sonner";
@@ -60,9 +68,26 @@ export interface HospitalDoctorItem {
   email: string;
   doctorPhoto?: MediaAsset;
   status: "ACTIVE" | "INACTIVE";
+  deactivatedByRole?: "SUPERADMIN" | "HOSPITAL_ADMIN" | null;
+  tempSlug?: string;
+  approvalStatus?: "PENDING" | "APPROVED" | "REJECTED";
+  createdAt?: string;
   consultationHours?: string;
   weeklyOff?: string;
   appointmentRequired?: boolean;
+}
+
+function parseSchedules(raw?: string): DaySchedule[] {
+  if (!raw) return DEFAULT_WEEK_SCHEDULE;
+  try {
+    const parsed = JSON.parse(raw);
+    if (Array.isArray(parsed) && parsed.length > 0 && parsed[0].day) {
+      return parsed;
+    }
+  } catch {
+    // fallback
+  }
+  return DEFAULT_WEEK_SCHEDULE;
 }
 
 export interface HospitalData {
@@ -90,6 +115,7 @@ export interface HospitalData {
   galleryPhotos?: MediaAsset[];
   faviconUrl?: string;
   browserTabTitle?: string;
+  specialties?: string[];
   departments?: string[];
   departmentsDetailed?: Array<{ name: string; description: string }>;
   tagline?: string;
@@ -97,10 +123,15 @@ export interface HospitalData {
   services?: Array<{ title: string; description: string }>;
   faqs?: Array<{ question: string; answer: string }>;
   publishStatus?: "PUBLISHED" | "DRAFT";
+  isWebsiteChatbotEnabled?: boolean;
+  isAdminChatbotEnabled?: boolean;
 }
 
 export interface AppointmentItem {
   id: string;
+  appointmentId?: string;
+  tokenNumber?: number;
+  source?: string;
   patientName: string;
   patientAge?: number;
   patientPhone: string;
@@ -140,6 +171,9 @@ export function HospitalAdmin({
   void onUpdateDoctor;
   const [activeTab, setActiveTab] = React.useState("dashboard");
   const [hospital, setHospital] = React.useState<HospitalData>(initialHospital);
+  const [schedules, setSchedules] = React.useState<DaySchedule[]>(() =>
+    parseSchedules(initialHospital.workingHours)
+  );
   const [doctors, setDoctors] = React.useState<HospitalDoctorItem[]>(initialDoctors);
   const [appointments, setAppointments] = React.useState<AppointmentItem[]>(initialAppointments);
   const [isSaving, setIsSaving] = React.useState(false);
@@ -154,8 +188,38 @@ export function HospitalAdmin({
 
   const [deletingDoctor, setDeletingDoctor] = React.useState<HospitalDoctorItem | null>(null);
   const [isDeletingDoctor, setIsDeletingDoctor] = React.useState(false);
+  const [approvingDoctorId, setApprovingDoctorId] = React.useState<string | null>(null);
 
   const [aiTargetDocId, setAiTargetDocId] = React.useState<string | null>(null);
+
+  const pendingDoctors = React.useMemo(
+    () => doctors.filter((d) => d.approvalStatus === "PENDING"),
+    [doctors]
+  );
+  const approvedDoctors = React.useMemo(
+    () => doctors.filter((d) => d.approvalStatus !== "PENDING"),
+    [doctors]
+  );
+
+  const handleApproveDoctor = async (doc: HospitalDoctorItem) => {
+    setApprovingDoctorId(doc.id);
+    try {
+      await apiClient.patch(`/doctors/${doc.id}/approve`, {});
+      setDoctors((prev) =>
+        prev.map((d) =>
+          d.id === doc.id
+            ? { ...d, approvalStatus: "APPROVED", status: "ACTIVE" }
+            : d
+        )
+      );
+      toast.success(`Dr. ${doc.doctorName} approved! Live URL /${hospital.slug}/${doc.slug} is now active and temporary preview link expired.`);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : "Failed to approve doctor request";
+      toast.error(msg);
+    } finally {
+      setApprovingDoctorId(null);
+    }
+  };
 
   const handleStartEditDoctor = (doc: HospitalDoctorItem) => {
     setEditingDoctor(doc);
@@ -184,7 +248,10 @@ export function HospitalAdmin({
       if (res.success) {
         toast.success("Hospital website URL slug updated successfully! Redirecting to new portal...");
         setTimeout(() => {
-          window.location.replace(`/${clean}/admin`);
+          const isCustomDomain =
+            typeof window !== "undefined" &&
+            (window.location.pathname === "/admin" || window.location.pathname.startsWith("/admin/"));
+          window.location.replace(isCustomDomain ? "/admin" : `/${clean}/admin`);
         }, 1200);
       }
     } catch (err: unknown) {
@@ -244,7 +311,13 @@ export function HospitalAdmin({
 
   React.useEffect(() => {
     setHospital(initialHospital);
+    if (initialHospital.workingHours) {
+      setSchedules(parseSchedules(initialHospital.workingHours));
+    }
   }, [initialHospital]);
+
+  const [queueRefreshTick, setQueueRefreshTick] = React.useState(0);
+  const [liveSlots, setLiveSlots] = React.useState<LiveSlotOption[]>([]);
 
   const handleApptStatusChange = async (id: string, status: string) => {
     try {
@@ -252,6 +325,7 @@ export function HospitalAdmin({
       setAppointments((prev) =>
         prev.map((a) => (a.id === id ? { ...a, status: status as AppointmentItem["status"] } : a))
       );
+      setQueueRefreshTick((t) => t + 1);
       toast.success(`Appointment status updated to ${status === "PATIENT_NOT_COME" ? "Patient Not Come" : status}`);
       if (onUpdateAppointmentStatus) {
         await onUpdateAppointmentStatus(id, status);
@@ -271,6 +345,7 @@ export function HospitalAdmin({
     try {
       await apiClient.delete(`/appointments/${deleteApptId}`);
       setAppointments((prev) => prev.filter((a) => a.id !== deleteApptId));
+      setQueueRefreshTick((t) => t + 1);
       toast.success("Appointment permanently deleted from database");
       setDeleteApptId(null);
     } catch (err: unknown) {
@@ -311,11 +386,17 @@ export function HospitalAdmin({
       {
         key: "status",
         header: "Status",
-        cell: (doc) => (
-          <Badge variant={doc.status === "ACTIVE" ? "success" : "secondary"} className="text-[10px]">
-            {doc.status}
-          </Badge>
-        ),
+        cell: (doc) =>
+          doc.status !== "ACTIVE" && doc.deactivatedByRole === "SUPERADMIN" ? (
+            <Badge className="bg-rose-100 text-rose-800 border border-rose-300 text-[10px] font-bold gap-1">
+              <Lock className="h-2.5 w-2.5" />
+              Deactive by Superadmin
+            </Badge>
+          ) : (
+            <Badge variant={doc.status === "ACTIVE" ? "success" : "secondary"} className="text-[10px]">
+              {doc.status}
+            </Badge>
+          ),
       },
       {
         key: "actions",
@@ -366,27 +447,45 @@ export function HospitalAdmin({
               Content
             </Button>
 
-            <Button
-              size="sm"
-              variant="outline"
-              className={`h-7 px-2 text-[11px] ${
-                doc.status === "ACTIVE"
-                  ? "text-amber-700 border-amber-200 hover:bg-amber-50"
-                  : "text-[#1560aa] border-blue-200 hover:bg-blue-50"
-              }`}
-              onClick={() => handleToggleDoc(doc.id, doc.status)}
-            >
-              {doc.status === "ACTIVE" ? "Deactivate" : "Activate"}
-            </Button>
+            {doc.status !== "ACTIVE" && doc.deactivatedByRole === "SUPERADMIN" ? (
+              <Button
+                size="sm"
+                variant="outline"
+                className="h-7 px-2 text-[11px] text-rose-700 border-rose-200 bg-rose-50/70 hover:bg-rose-100"
+                onClick={() =>
+                  toast.error(
+                    "Deactive by Superadmin — Only Superadmin can reactivate this doctor's website."
+                  )
+                }
+                title="Deactive by Superadmin"
+              >
+                <Lock className="h-3 w-3 mr-1" />
+                Deactive by Superadmin
+              </Button>
+            ) : (
+              <Button
+                size="sm"
+                variant="outline"
+                className={`h-7 px-2 text-[11px] ${
+                  doc.status === "ACTIVE"
+                    ? "text-amber-700 border-amber-200 hover:bg-amber-50"
+                    : "text-[#1560aa] border-blue-200 hover:bg-blue-50"
+                }`}
+                onClick={() => handleToggleDoc(doc.id, doc.status)}
+              >
+                {doc.status === "ACTIVE" ? "Deactivate" : "Activate"}
+              </Button>
+            )}
 
             <Button
               size="sm"
               variant="outline"
               className="h-7 px-2 text-[11px] text-rose-600 border-rose-200 hover:bg-rose-50"
               onClick={() => setDeletingDoctor(doc)}
-              title="Permanently Delete Doctor"
+              title="Permanently Delete Doctor & Website"
             >
-              <Trash2 className="h-3 w-3" />
+              <Trash2 className="h-3 w-3 mr-1" />
+              Delete
             </Button>
           </div>
         ),
@@ -395,8 +494,131 @@ export function HospitalAdmin({
     [hospital.slug, doctors]
   );
 
+  // Manual Appointment Booking from Hospital Admin
+  const [bookModalOpen, setBookModalOpen] = React.useState(false);
+  const [bookDoctorId, setBookDoctorId] = React.useState("");
+  const [bookName, setBookName] = React.useState("");
+  const [bookAge, setBookAge] = React.useState("");
+  const [bookPhone, setBookPhone] = React.useState("");
+  const [bookDate, setBookDate] = React.useState(() => new Date().toISOString().split("T")[0]);
+  const [bookSlot, setBookSlot] = React.useState("Regular Consultation");
+  const [bookNotes, setBookNotes] = React.useState("");
+  const [isBookingSubmitting, setIsBookingSubmitting] = React.useState(false);
+
+  // Set default doctor when modal opens
+  React.useEffect(() => {
+    if (bookModalOpen && !bookDoctorId && doctors.length > 0) {
+      setBookDoctorId(doctors[0]?.id || "");
+    }
+  }, [bookModalOpen, bookDoctorId, doctors]);
+
+  // Fetch selected doctor's live open slots for the chosen date
+  React.useEffect(() => {
+    if (!bookModalOpen || !bookDate) return;
+    const docId = bookDoctorId || doctors[0]?.id;
+    if (!docId) return;
+    let cancelled = false;
+    fetchDoctorLiveSlots({
+      doctorId: docId,
+      organizationId: hospital.id,
+      date: bookDate,
+    }).then((res) => {
+      if (cancelled || !res) return;
+      setLiveSlots(res.slots || []);
+      const firstOpen = res.slots.find((s) => !s.isFull) || res.slots[0];
+      if (firstOpen) {
+        setBookSlot(firstOpen.displayLabel);
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [bookModalOpen, bookDoctorId, bookDate, doctors, hospital.id]);
+
+  const handleAdminBookHospitalAppointment = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!bookName.trim() || !bookPhone.trim() || !bookDate) {
+      toast.error("Please fill in patient name, phone number, and appointment date.");
+      return;
+    }
+    const chosenDoctor = doctors.find((d) => d.id === bookDoctorId) || doctors[0];
+    if (!chosenDoctor) {
+      toast.error("Please select a doctor to book the appointment.");
+      return;
+    }
+
+    setIsBookingSubmitting(true);
+    try {
+      const res: any = await apiClient.post("/appointments", {
+        doctorId: chosenDoctor.id,
+        organizationId: hospital.id,
+        patientName: bookName.trim(),
+        patientAge: Number(bookAge) || 30,
+        patientPhone: bookPhone.trim(),
+        appointmentDate: new Date(bookDate),
+        timeSlot: bookSlot,
+        notes: bookNotes.trim() || "Hospital walk-in appointment",
+        source: "SLUG_ADMIN",
+      });
+
+      const newAppt = res?.data?.appointment || res?.data;
+      const genId = res?.data?.appointmentId || newAppt?.appointmentId;
+      const genToken = res?.data?.tokenNumber ?? newAppt?.tokenNumber;
+      const resolvedSlot = res?.data?.timeSlot || bookSlot;
+      if (newAppt) {
+        setAppointments((prev) => [
+          {
+            id: newAppt._id || newAppt.id || String(Date.now()),
+            appointmentId: genId || "",
+            tokenNumber: typeof genToken === "number" ? genToken : undefined,
+            patientName: bookName.trim(),
+            patientAge: Number(bookAge) || 30,
+            patientPhone: bookPhone.trim(),
+            doctorName: chosenDoctor.doctorName,
+            appointmentDate: bookDate,
+            timeSlot: resolvedSlot,
+            status: "CONFIRMED",
+            notes: bookNotes.trim() || "Hospital walk-in appointment",
+            source: "SLUG_ADMIN",
+          },
+          ...prev,
+        ]);
+      }
+      setQueueRefreshTick((t) => t + 1);
+      toast.success(
+        `Appointment booked! ID: ${genId || ""}${typeof genToken === "number" ? ` • Token #${genToken}` : ""}`
+      );
+      setBookModalOpen(false);
+      setBookName("");
+      setBookAge("");
+      setBookPhone("");
+      setBookNotes("");
+    } catch (err: any) {
+      toast.error(err?.response?.data?.error || err?.message || "Failed to book appointment");
+    } finally {
+      setIsBookingSubmitting(false);
+    }
+  };
+
   const appointmentColumns = React.useMemo<ColumnDef<HospitalAppointmentItem>[]>(
     () => [
+      {
+        key: "appointmentId",
+        header: "Appointment ID & Token",
+        accessorFn: (appt) => `${appt.appointmentId || appt.id} ${appt.tokenNumber || ""}`,
+        cell: (appt) => (
+          <div className="flex flex-col gap-1 items-start">
+            <span className="font-mono text-[11px] font-bold text-[#1a76d1] bg-blue-50 dark:bg-blue-950/40 px-2 py-0.5 rounded border border-blue-200 dark:border-blue-900/60 inline-block">
+              {appt.appointmentId || (appt.id ? appt.id.slice(-6).toUpperCase() : "—")}
+            </span>
+            {typeof appt.tokenNumber === "number" && (
+              <span className="font-mono text-[10px] font-bold text-emerald-700 bg-emerald-50 border border-emerald-200 px-1.5 py-0.5 rounded">
+                Token #{appt.tokenNumber}
+              </span>
+            )}
+          </div>
+        ),
+      },
       {
         key: "patientName",
         header: "Patient",
@@ -435,6 +657,28 @@ export function HospitalAdmin({
             <span className="text-[11px] text-slate-500">{appt.timeSlot}</span>
           </div>
         ),
+      },
+      {
+        key: "source",
+        header: "Booked Via",
+        accessorFn: (appt) => appt.source || "WEBSITE_FORM",
+        cell: (appt) => {
+          const src = appt.source || "WEBSITE_FORM";
+          let label = "Website";
+          let badgeClass = "bg-slate-100 text-slate-700 border-slate-300";
+          if (src === "AI_CHATBOT") {
+            label = "AI Chatbot";
+            badgeClass = "bg-purple-100 text-purple-800 border-purple-300";
+          } else if (src === "SLUG_ADMIN" || src === "WALK_IN") {
+            label = "Admin / Walk-in";
+            badgeClass = "bg-emerald-100 text-emerald-800 border-emerald-300";
+          }
+          return (
+            <Badge variant="outline" className={cn("text-[10px] font-semibold", badgeClass)}>
+              {label}
+            </Badge>
+          );
+        },
       },
       {
         key: "status",
@@ -494,14 +738,19 @@ export function HospitalAdmin({
                     Not Come
                   </Button>
                 )}
-                {appt.status !== "PENDING" && (
+                {appt.status !== "COMPLETED" && (
                   <Button
                     size="sm"
                     variant="outline"
-                    className="h-7 px-2 text-[11px] text-slate-700 hover:bg-slate-50"
-                    onClick={() => handleApptStatusChange(appt.id, "PENDING")}
+                    className="h-7 px-2 text-[11px] text-rose-700 border-rose-200 hover:bg-rose-50"
+                    onClick={() => {
+                      if (window.confirm("Cancel this doctor's appointment? Slot capacity will open up for other patients.")) {
+                        handleApptStatusChange(appt.id, "CANCELLED");
+                      }
+                    }}
                   >
-                    Pending
+                    <XCircle className="h-3 w-3 mr-1" />
+                    Cancel
                   </Button>
                 )}
               </>
@@ -540,23 +789,27 @@ export function HospitalAdmin({
     appointmentRequired: true,
   });
 
-  // Department input
-  const [newDepartmentName, setNewDepartmentName] = React.useState("");
+  // Selected specialties state synchronized with onboarding & AI Content
+  const [selectedSpecialties, setSelectedSpecialties] = React.useState<string[]>(() =>
+    initialHospital.specialties && initialHospital.specialties.length > 0
+      ? initialHospital.specialties
+      : initialHospital.departments || []
+  );
 
   const navItems: NavItem[] = [
     { id: "dashboard", label: "Dashboard", icon: LayoutDashboard },
     { id: "profile", label: "Hospital Profile", icon: Building2 },
     { id: "location", label: "Location & Address", icon: MapPin },
     { id: "hours", label: "Working Hours", icon: Clock },
-    { id: "doctors", label: "Specialist Doctors", icon: Users, badge: String(doctors.length) },
-    { id: "departments", label: "Departments", icon: Stethoscope },
+    { id: "requests", label: "New Requests", icon: UserCheck, badge: pendingDoctors.length > 0 ? String(pendingDoctors.length) : undefined },
+    { id: "doctors", label: "Specialist Doctors", icon: Users, badge: String(approvedDoctors.length) },
+    { id: "departments", label: "Specialties", icon: Stethoscope, badge: String(selectedSpecialties.length) },
     { id: "appointments", label: "Appointments", icon: CalendarCheck, badge: String(appointments.length) },
-    { id: "testimonials", label: "Testimonials", icon: MessageSquareQuote },
     { id: "aichats", label: "AI Patient Chats", icon: MessageSquare },
     { id: "ai", label: "Live Website Content", icon: Globe },
     { id: "qrcode", label: "Hospital QR Code", icon: QrCode },
-    { id: "gallery", label: "Facility Gallery", icon: ImageIcon },
     { id: "branding", label: "Branding & SEO", icon: Palette },
+    { id: "admin-logs", label: "Admin Log", icon: ShieldCheck },
     { id: "settings", label: "Account Settings", icon: Settings },
   ];
 
@@ -609,26 +862,48 @@ export function HospitalAdmin({
   };
 
   const handleToggleDoc = async (id: string, currentStatus: "ACTIVE" | "INACTIVE") => {
+    const targetDoc = doctors.find((d) => d.id === id);
     const newStatus = currentStatus === "ACTIVE" ? "INACTIVE" : "ACTIVE";
-    setDoctors((prev) => prev.map((d) => (d.id === id ? { ...d, status: newStatus } : d)));
-    if (onToggleDoctorStatus) {
-      await onToggleDoctorStatus(id, newStatus);
+
+    if (newStatus === "ACTIVE" && targetDoc?.deactivatedByRole === "SUPERADMIN") {
+      toast.error("Deactive by Superadmin — Only Superadmin can reactivate this doctor's website.");
+      return;
+    }
+
+    try {
+      if (onToggleDoctorStatus) {
+        await onToggleDoctorStatus(id, newStatus);
+      }
+      setDoctors((prev) =>
+        prev.map((d) =>
+          d.id === id
+            ? {
+                ...d,
+                status: newStatus,
+                deactivatedByRole: newStatus === "ACTIVE" ? null : "HOSPITAL_ADMIN",
+              }
+            : d
+        )
+      );
+      toast.success(
+        `Dr. ${targetDoc?.doctorName || "Doctor"} website ${
+          newStatus === "ACTIVE" ? "activated" : "deactivated"
+        } successfully.`
+      );
+    } catch {
+      // Error toast already displayed by caller
     }
   };
 
-  const handleAddDept = () => {
-    if (!newDepartmentName.trim()) return;
-    const current = hospital.departments || [];
-    if (current.includes(newDepartmentName.trim())) return;
-    const updated = [...current, newDepartmentName.trim()];
-    handleUpdateHospital({ departments: updated });
-    setNewDepartmentName("");
-  };
-
-  const handleRemoveDept = (deptName: string) => {
-    const current = hospital.departments || [];
-    const updated = current.filter((d) => d !== deptName);
-    handleUpdateHospital({ departments: updated });
+  const handleSaveSpecialties = async () => {
+    if (selectedSpecialties.length === 0) {
+      toast.error("Minimum 1 specialty / department is required on your hospital website.");
+      return;
+    }
+    await handleUpdateHospital({
+      specialties: selectedSpecialties,
+      departments: selectedSpecialties,
+    });
   };
 
   return (
@@ -643,6 +918,7 @@ export function HospitalAdmin({
       onTabChange={setActiveTab}
       userEmail={hospital.email}
       onLogout={onLogout}
+      isAdminChatbotEnabled={hospital.isAdminChatbotEnabled !== false}
     >
       {saveSuccess && (
         <div className="bg-blue-50 border border-blue-200 text-[#1560aa] text-xs px-4 py-2.5 rounded-xl flex items-center justify-between animate-in fade-in shadow-2xs">
@@ -655,9 +931,17 @@ export function HospitalAdmin({
       )}
 
       {/* TAB 1: DASHBOARD */}
-      {activeTab === "dashboard" && (
+      {activeTab === "dashboard" && (() => {
+        const isHospitalSiteActive =
+          hospital.publishStatus !== "DRAFT" && (hospital.publishStatus as string) !== "SUSPENDED";
+        const activeDoctorSites = approvedDoctors.filter((d) => d.status === "ACTIVE").length;
+        const deactiveDoctorSites = approvedDoctors.filter((d) => d.status !== "ACTIVE").length;
+        const activeWebsitesCount = activeDoctorSites + (isHospitalSiteActive ? 1 : 0);
+        const deactiveWebsitesCount = deactiveDoctorSites + (isHospitalSiteActive ? 0 : 1);
+
+        return (
         <div className="space-y-6">
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4">
             <Card className="bg-white border-blue-100 rounded-2xl shadow-xs">
               <CardHeader className="p-4 pb-2">
                 <CardDescription className="text-xs">Website Status</CardDescription>
@@ -671,13 +955,33 @@ export function HospitalAdmin({
               </CardContent>
             </Card>
 
+            <Card className="bg-white border-emerald-200 rounded-2xl shadow-xs">
+              <CardHeader className="p-4 pb-2">
+                <CardDescription className="text-xs font-medium text-emerald-700">Active Websites</CardDescription>
+                <CardTitle className="text-2xl font-bold text-emerald-700">{activeWebsitesCount}</CardTitle>
+              </CardHeader>
+              <CardContent className="p-4 pt-0 text-xs text-slate-500">
+                {activeDoctorSites} Doctor + {isHospitalSiteActive ? 1 : 0} Hospital live
+              </CardContent>
+            </Card>
+
+            <Card className="bg-white border-rose-200 rounded-2xl shadow-xs">
+              <CardHeader className="p-4 pb-2">
+                <CardDescription className="text-xs font-medium text-rose-700">Deactive Websites</CardDescription>
+                <CardTitle className="text-2xl font-bold text-rose-600">{deactiveWebsitesCount}</CardTitle>
+              </CardHeader>
+              <CardContent className="p-4 pt-0 text-xs text-slate-500">
+                {deactiveDoctorSites} Doctor deactivated
+              </CardContent>
+            </Card>
+
             <Card className="bg-white border-slate-200 shadow-2xs">
               <CardHeader className="p-4 pb-2">
                 <CardDescription className="text-xs">Specialist Doctors</CardDescription>
-                <CardTitle className="text-2xl font-bold text-slate-900">{doctors.length}</CardTitle>
+                <CardTitle className="text-2xl font-bold text-slate-900">{approvedDoctors.length}</CardTitle>
               </CardHeader>
               <CardContent className="p-4 pt-0 text-xs text-slate-500">
-                {doctors.filter((d) => d.status === "ACTIVE").length} Active specialists
+                {activeDoctorSites} Active specialists
               </CardContent>
             </Card>
 
@@ -741,7 +1045,8 @@ export function HospitalAdmin({
             </CardContent>
           </Card>
         </div>
-      )}
+        );
+      })()}
 
       {/* TAB 2: HOSPITAL PROFILE */}
       {activeTab === "profile" && (
@@ -917,34 +1222,54 @@ export function HospitalAdmin({
       {activeTab === "hours" && (
         <Card className="bg-white border-slate-200 max-w-3xl">
           <CardHeader>
-            <CardTitle className="text-base font-bold">Working Hours</CardTitle>
-            <CardDescription className="text-xs">Hospital-level OPD and Emergency operating schedule.</CardDescription>
+            <CardTitle className="text-base font-bold">Working Hours & Weekly Off</CardTitle>
+            <CardDescription className="text-xs">
+              Configure hospital-level OPD and Emergency operating schedule, time slots, and closed days using the interactive builder below.
+            </CardDescription>
           </CardHeader>
-          <CardContent className="space-y-4">
-            <FormField id="workingHours" label="Operating / Working Hours Description">
-              <Input
-                id="workingHours"
-                value={hospital.workingHours || "24 Hours Emergency & Regular OPD 09:00 - 18:00"}
-                onChange={(e) => setHospital({ ...hospital, workingHours: e.target.value })}
-              />
-            </FormField>
+          <CardContent className="space-y-6">
+            <ConsultationHoursBuilder
+              value={schedules}
+              onChange={(newSchedules) => {
+                setSchedules(newSchedules);
+              }}
+              onClosedDaysChange={(closedDays) => {
+                setHospital((prev) => ({ ...prev, weeklyOff: closedDays.join(", ") }));
+              }}
+            />
 
-            <FormField id="weeklyOff" label="Weekly Off (if any)">
-              <Input
-                id="weeklyOff"
-                value={hospital.weeklyOff || "None (Open 24/7)"}
-                onChange={(e) => setHospital({ ...hospital, weeklyOff: e.target.value })}
+            <div className="flex items-center gap-3 pt-2 border-t border-slate-100">
+              <input
+                type="checkbox"
+                id="hospitalAppointmentRequired"
+                checked={hospital.appointmentRequired ?? true}
+                onChange={(e) => setHospital({ ...hospital, appointmentRequired: e.target.checked })}
+                className="h-4 w-4 rounded border-slate-300 text-[#1a76d1]"
               />
-            </FormField>
+              <label htmlFor="hospitalAppointmentRequired" className="text-xs font-medium text-slate-700 cursor-pointer">
+                Prior Appointment Required (displays appointment CTA and badge on public site)
+              </label>
+            </div>
           </CardContent>
-          <CardFooter className="flex justify-end">
+          <CardFooter className="border-t border-slate-100 flex justify-end">
             <Button
-              onClick={() =>
+              onClick={() => {
+                const serialized = JSON.stringify(schedules);
+                const closedDays = schedules
+                  .filter((s) => s.isClosed)
+                  .map((s) => s.day)
+                  .join(", ");
+                setHospital((prev) => ({
+                  ...prev,
+                  workingHours: serialized,
+                  weeklyOff: closedDays,
+                }));
                 handleUpdateHospital({
-                  workingHours: hospital.workingHours,
-                  weeklyOff: hospital.weeklyOff,
-                })
-              }
+                  workingHours: serialized,
+                  weeklyOff: closedDays,
+                  appointmentRequired: hospital.appointmentRequired,
+                });
+              }}
               disabled={isSaving}
               className="bg-[#1a76d1] hover:bg-[#1560aa] text-white font-semibold rounded-xl shadow-xs"
             >
@@ -952,6 +1277,122 @@ export function HospitalAdmin({
             </Button>
           </CardFooter>
         </Card>
+      )}
+
+      {/* TAB 4B: NEW DOCTOR AFFILIATION REQUESTS */}
+      {activeTab === "requests" && (
+        <div className="space-y-4">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <div>
+              <h2 className="text-base font-bold text-slate-900">New Doctor Affiliation Requests</h2>
+              <p className="text-xs text-slate-500">
+                Review newly submitted doctor websites using their private temporary preview link before approving them to go live.
+              </p>
+            </div>
+            {pendingDoctors.length > 0 && (
+              <Badge className="bg-amber-100 text-amber-800 border border-amber-200 text-xs px-3 py-1">
+                {pendingDoctors.length} Pending Approval
+              </Badge>
+            )}
+          </div>
+
+          {pendingDoctors.length === 0 ? (
+            <Card className="bg-white border-slate-200">
+              <CardContent className="p-10 text-center space-y-2">
+                <UserCheck className="h-10 w-10 text-slate-300 mx-auto" />
+                <p className="text-sm font-semibold text-slate-700">No Pending Requests</p>
+                <p className="text-xs text-slate-500">
+                  All doctor affiliation requests have been reviewed. New requests will appear here automatically.
+                </p>
+              </CardContent>
+            </Card>
+          ) : (
+            <div className="grid grid-cols-1 gap-4">
+              {pendingDoctors.map((doc) => (
+                <Card key={doc.id} className="bg-white border-amber-200/80 shadow-xs">
+                  <CardContent className="p-5 flex flex-col lg:flex-row lg:items-center justify-between gap-4">
+                    <div className="space-y-1.5">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <span className="font-bold text-slate-900 text-sm">Dr. {doc.doctorName}</span>
+                        <Badge variant="secondary" className="text-[10px] bg-amber-100 text-amber-800 border-amber-200">
+                          Under Approval
+                        </Badge>
+                        {doc.specialization && (
+                          <Badge variant="outline" className="text-[10px]">
+                            {doc.specialization}
+                          </Badge>
+                        )}
+                      </div>
+                      <div className="text-xs text-slate-600 flex flex-wrap gap-x-4 gap-y-1">
+                        {doc.degree && <span>Degree: <strong className="text-slate-800">{doc.degree}</strong></span>}
+                        {doc.yearsOfExperience !== undefined && (
+                          <span>Experience: <strong className="text-slate-800">{doc.yearsOfExperience} yrs</strong></span>
+                        )}
+                        {doc.email && <span>Email: <strong className="text-slate-800">{doc.email}</strong></span>}
+                      </div>
+                      <div className="text-[11px] text-slate-500 space-y-0.5 pt-1">
+                        <div>
+                          Requested Live URL:{" "}
+                          <span className="font-mono text-slate-700 font-semibold">
+                            /{hospital.slug}/{doc.slug}
+                          </span>
+                        </div>
+                        {doc.tempSlug && (
+                          <div>
+                            Private Preview URL:{" "}
+                            <span className="font-mono text-[#1a76d1] font-semibold">
+                              /{hospital.slug}/{doc.tempSlug}
+                            </span>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+
+                    <div className="flex items-center gap-2 flex-wrap shrink-0">
+                      {doc.tempSlug && (
+                        <a
+                          href={`/${hospital.slug}/${doc.tempSlug}`}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                        >
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            className="h-8 px-3 text-xs text-[#1a76d1] border-blue-200 hover:bg-blue-50"
+                          >
+                            <Eye className="h-3.5 w-3.5 mr-1.5" />
+                            Preview Website
+                          </Button>
+                        </a>
+                      )}
+
+                      <Button
+                        size="sm"
+                        disabled={approvingDoctorId === doc.id}
+                        onClick={() => handleApproveDoctor(doc)}
+                        className="h-8 px-3 text-xs bg-emerald-600 hover:bg-emerald-700 text-white font-semibold"
+                      >
+                        <CheckCircle className="h-3.5 w-3.5 mr-1.5" />
+                        {approvingDoctorId === doc.id ? "Approving..." : "Approve & Go Live"}
+                      </Button>
+
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={() => setDeletingDoctor(doc)}
+                        className="h-8 px-2.5 text-xs text-rose-600 border-rose-200 hover:bg-rose-50"
+                        title="Reject & Delete Request"
+                      >
+                        <Trash2 className="h-3.5 w-3.5 mr-1" />
+                        Reject
+                      </Button>
+                    </div>
+                  </CardContent>
+                </Card>
+              ))}
+            </div>
+          )}
+        </div>
       )}
 
       {/* TAB 5: SPECIALIST DOCTORS */}
@@ -1111,9 +1552,10 @@ export function HospitalAdmin({
             <CardContent className="p-6">
               <DataTable
                 columns={doctorColumns}
-                data={doctors}
+                data={approvedDoctors}
                 searchPlaceholder="Search doctor, specialization, slug..."
                 pageSize={10}
+                exportFileName="hospital_doctors"
                 emptyMessage='No doctors registered yet. Click "Add Doctor" above.'
               />
             </CardContent>
@@ -1310,54 +1752,103 @@ export function HospitalAdmin({
         </div>
       )}
 
-      {/* TAB 6: DEPARTMENTS */}
+      {/* TAB 6: SPECIALTIES & DEPARTMENTS */}
       {activeTab === "departments" && (
         <Card className="bg-white border-slate-200 max-w-3xl">
           <CardHeader>
-            <CardTitle className="text-base font-bold">Departments</CardTitle>
-            <CardDescription className="text-xs">Configure clinical specialties and departments displayed on your public website.</CardDescription>
+            <div className="flex items-center justify-between gap-2 flex-wrap">
+              <div>
+                <CardTitle className="text-base font-bold">Hospital Specialties &amp; Departments</CardTitle>
+                <CardDescription className="text-xs">
+                  Add or remove clinical specialties here. Both your public website Specializations cards and Live Website Content section stay strictly synced with this exact list ({selectedSpecialties.length} selected).
+                </CardDescription>
+              </div>
+              <Badge variant="outline" className="bg-blue-50 text-[#1560aa] border-blue-200 font-semibold">
+                {selectedSpecialties.length} {selectedSpecialties.length === 1 ? "Specialty" : "Specialties"}
+              </Badge>
+            </div>
           </CardHeader>
           <CardContent className="space-y-4">
-            <div className="flex gap-2">
-              <Input
-                placeholder="e.g. Interventional Cardiology, Pediatric ICU"
-                value={newDepartmentName}
-                onChange={(e) => setNewDepartmentName(e.target.value)}
-              />
-              <Button onClick={handleAddDept} size="sm" className="bg-slate-900 text-white shrink-0">
-                <Plus className="h-4 w-4 mr-1" />
-                Add Department
-              </Button>
-            </div>
+            <SpecialtiesMultiSelect
+              value={selectedSpecialties}
+              onChange={(next) => {
+                if (next.length === 0) {
+                  toast.error("Minimum 1 specialty is required for your hospital website.");
+                  return;
+                }
+                setSelectedSpecialties(next);
+              }}
+              placeholder="Search and select hospital specialties or add custom..."
+            />
 
-            <div className="flex flex-wrap gap-2 pt-2">
-              {(hospital.departments || []).map((dept) => (
-                <span
-                  key={dept}
-                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-slate-200 bg-slate-50 text-xs font-semibold text-slate-800"
-                >
-                  <span>{dept}</span>
-                  <button
-                    type="button"
-                    onClick={() => handleRemoveDept(dept)}
-                    className="text-slate-400 hover:text-rose-600 transition-colors"
-                    title="Remove department"
-                  >
-                    &times;
-                  </button>
-                </span>
-              ))}
+            <div className="rounded-xl border border-blue-100 bg-blue-50/50 px-3.5 py-2.5 text-[11px] text-slate-700 leading-relaxed">
+              <strong>Connected Rule:</strong> In the <strong>Live Website Content</strong> tab, you can customize descriptions for these{" "}
+              <strong>{selectedSpecialties.length}</strong> selected specialties, but cards cannot be added or deleted there. To change the count, add or remove specialties here and save.
             </div>
           </CardContent>
+          <CardFooter className="border-t border-slate-100 pt-4 flex items-center justify-end gap-2">
+            <Button
+              type="button"
+              onClick={handleSaveSpecialties}
+              disabled={isSaving || selectedSpecialties.length === 0}
+              className="bg-[#1a76d1] hover:bg-[#1560aa] text-white text-xs font-semibold"
+            >
+              {isSaving ? "Saving & Syncing..." : "Save Specialties"}
+            </Button>
+          </CardFooter>
         </Card>
       )}
 
       {/* TAB 7: APPOINTMENTS (DATA TABLE) */}
       {activeTab === "appointments" && (
-        <Card className="bg-white border-slate-200">
-          <CardHeader className="border-b border-slate-100 pb-4">
-            <CardTitle className="text-base font-bold">Appointments</CardTitle>
-            <CardDescription className="text-xs">Manage patient consultations across all hospital doctors.</CardDescription>
+        <div className="space-y-4">
+          <LiveOpdQueueCard
+            doctorOptions={approvedDoctors.map((d) => ({
+              id: d.id,
+              doctorName: d.doctorName,
+              specialization: d.specialization,
+            }))}
+            refreshTrigger={queueRefreshTick}
+            onQueueAdvanced={async () => {
+              try {
+                const res = await apiClient.get<{ success: boolean; data?: { appointments?: any[] } }>("/appointments");
+                if (res?.success && res.data?.appointments) {
+                  setAppointments(
+                    res.data.appointments.map((a: any) => ({
+                      id: a._id || a.id,
+                      appointmentId: a.appointmentId || "",
+                      tokenNumber: typeof a.tokenNumber === "number" ? a.tokenNumber : undefined,
+                      source: a.source || "WEBSITE_FORM",
+                      patientName: a.patientName,
+                      patientPhone: a.patientPhone,
+                      patientAge: a.patientAge,
+                      notes: a.notes,
+                      appointmentDate: a.appointmentDate ? (new Date(a.appointmentDate).toISOString().split("T")[0] || "") : "",
+                      timeSlot: a.timeSlot || "Regular Consultation",
+                      status: a.status,
+                      doctorName: a.doctorId?.doctorName || "",
+                    }))
+                  );
+                }
+              } catch {
+                // Keep existing state
+              }
+            }}
+          />
+          <Card className="bg-white border-slate-200">
+          <CardHeader className="border-b border-slate-100 pb-4 flex flex-row items-center justify-between gap-4">
+            <div>
+              <CardTitle className="text-base font-bold">Appointments</CardTitle>
+              <CardDescription className="text-xs">Manage patient consultations across all hospital doctors.</CardDescription>
+            </div>
+            <Button
+              type="button"
+              onClick={() => setBookModalOpen(true)}
+              className="bg-[#1a76d1] hover:bg-[#1560aa] text-white text-xs font-semibold h-8.5 px-3 rounded-lg shadow-xs flex items-center gap-1.5 shrink-0"
+            >
+              <CalendarPlus className="h-4 w-4" />
+              <span>Book Appointment</span>
+            </Button>
           </CardHeader>
           <CardContent className="p-6">
             <DataTable
@@ -1365,19 +1856,156 @@ export function HospitalAdmin({
               data={appointments}
               searchPlaceholder="Search patient, phone, doctor, slot..."
               pageSize={10}
+              exportFileName="hospital_appointments"
               emptyMessage="No appointments booked at this hospital yet."
             />
           </CardContent>
         </Card>
+        </div>
       )}
 
-      {/* TAB: TESTIMONIALS */}
-      {activeTab === "testimonials" && (
-        <TestimonialsManagementView
-          portalType="HOSPITAL"
-          practiceName={hospital.name}
-        />
-      )}
+      {/* Manual Walk-in Appointment Booking Dialog for Hospital Admin */}
+      <Dialog open={bookModalOpen} onOpenChange={setBookModalOpen}>
+        <DialogContent className="max-w-md bg-white">
+          <DialogHeader>
+            <DialogTitle className="text-base font-bold text-slate-900 flex items-center gap-2">
+              <CalendarPlus className="h-5 w-5 text-[#1a76d1]" />
+              <span>Book Hospital Walk-in Appointment</span>
+            </DialogTitle>
+            <DialogDescription className="text-xs text-slate-500">
+              Schedule an in-hospital appointment and assign a specialist doctor.
+            </DialogDescription>
+          </DialogHeader>
+
+          <form onSubmit={handleAdminBookHospitalAppointment} className="space-y-3.5 pt-2">
+            <div className="space-y-1">
+              <label className="text-xs font-semibold text-slate-700">Assign Specialist / Doctor *</label>
+              {doctors.length > 0 ? (
+                <select
+                  value={bookDoctorId}
+                  onChange={(e) => setBookDoctorId(e.target.value)}
+                  className="w-full h-9 rounded-md border border-slate-200 bg-white px-3 text-xs text-slate-800 outline-none focus:border-[#1a76d1]"
+                  required
+                >
+                  {doctors.map((doc) => (
+                    <option key={doc.id} value={doc.id}>
+                      Dr. {doc.doctorName} — {doc.specialization} ({doc.degree})
+                    </option>
+                  ))}
+                </select>
+              ) : (
+                <div className="text-xs text-amber-700 bg-amber-50 p-2.5 rounded-lg border border-amber-200">
+                  No active doctors available. Please register doctors under the Doctor Directory tab.
+                </div>
+              )}
+            </div>
+
+            <div className="space-y-1">
+              <label className="text-xs font-semibold text-slate-700">Patient Full Name *</label>
+              <Input
+                placeholder="e.g. Ramesh Patel"
+                value={bookName}
+                onChange={(e) => setBookName(e.target.value)}
+                required
+                className="h-9 text-xs"
+              />
+            </div>
+
+            <div className="grid grid-cols-2 gap-3">
+              <div className="space-y-1">
+                <label className="text-xs font-semibold text-slate-700">Patient Age *</label>
+                <Input
+                  type="number"
+                  placeholder="e.g. 35"
+                  value={bookAge}
+                  onChange={(e) => setBookAge(e.target.value)}
+                  min={1}
+                  max={120}
+                  required
+                  className="h-9 text-xs"
+                />
+              </div>
+              <div className="space-y-1">
+                <label className="text-xs font-semibold text-slate-700">Phone Number *</label>
+                <Input
+                  type="tel"
+                  placeholder="10-digit mobile"
+                  value={bookPhone}
+                  onChange={(e) => setBookPhone(e.target.value)}
+                  required
+                  className="h-9 text-xs font-mono"
+                />
+              </div>
+            </div>
+
+            <div className="grid grid-cols-2 gap-3">
+              <div className="space-y-1">
+                <label className="text-xs font-semibold text-slate-700">Appointment Date *</label>
+                <Input
+                  type="date"
+                  value={bookDate}
+                  onChange={(e) => setBookDate(e.target.value)}
+                  required
+                  className="h-9 text-xs font-mono"
+                />
+              </div>
+              <div className="space-y-1">
+                <label className="text-xs font-semibold text-slate-700">Time Slot *</label>
+                <select
+                  value={bookSlot}
+                  onChange={(e) => setBookSlot(e.target.value)}
+                  className="w-full h-9 rounded-md border border-slate-200 bg-white px-3 text-xs text-slate-800 outline-none focus:border-[#1a76d1]"
+                >
+                  {liveSlots.length > 0 ? (
+                    liveSlots.map((sl) => (
+                      <option key={sl.slotKey} value={sl.displayLabel} disabled={sl.isFull}>
+                        {formatSlotSelectLabel(sl)}
+                      </option>
+                    ))
+                  ) : (
+                    <>
+                      <option value="Morning (09:00 AM - 01:00 PM)">Morning (09:00 AM - 01:00 PM)</option>
+                      <option value="Evening (05:00 PM - 08:00 PM)">Evening (05:00 PM - 08:00 PM)</option>
+                      <option value="Regular Consultation">Regular Consultation</option>
+                    </>
+                  )}
+                </select>
+              </div>
+            </div>
+
+            <div className="space-y-1">
+              <label className="text-xs font-semibold text-slate-700">Primary Medical Concern / Reason *</label>
+              <Input
+                placeholder="e.g. Cardiology checkup, fever, diagnostic consultation"
+                value={bookNotes}
+                onChange={(e) => setBookNotes(e.target.value)}
+                required
+                className="h-9 text-xs"
+              />
+            </div>
+
+            <DialogFooter className="pt-2">
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={() => setBookModalOpen(false)}
+                className="text-xs"
+              >
+                Cancel
+              </Button>
+              <Button
+                type="submit"
+                size="sm"
+                disabled={isBookingSubmitting || doctors.length === 0}
+                className="bg-[#1a76d1] hover:bg-[#1560aa] text-white text-xs font-semibold"
+              >
+                {isBookingSubmitting ? "Booking..." : "Confirm Booking"}
+              </Button>
+            </DialogFooter>
+          </form>
+        </DialogContent>
+      </Dialog>
 
       {/* TAB: AI CHAT MANAGEMENT */}
       {activeTab === "aichats" && (
@@ -1452,15 +2080,27 @@ export function HospitalAdmin({
               key={aiTargetDocId}
               targetType="HOSPITAL_DOCTOR"
               targetId={aiTargetDocId}
+              practiceName={doctors.find((d) => d.id === aiTargetDocId)?.doctorName}
+              galleryPhotos={hospital.galleryPhotos || []}
+              isGalleryInherited={true}
+              inheritedHospitalName={hospital.name}
+              doctorIdForReviews={aiTargetDocId}
               onPublished={() => {
                 toast.success("Doctor website content published successfully.");
               }}
             />
           ) : (
             <AIContentPanel
-              key="hospital-main"
+              key={`hospital-main-${(hospital.specialties || hospital.departments || []).join("|")}`}
               targetType="HOSPITAL"
               targetId={hospital.id}
+              practiceName={hospital.name}
+              galleryPhotos={hospital.galleryPhotos || []}
+              onGalleryChange={(assets) => {
+                setHospital((prev) => ({ ...prev, galleryPhotos: assets }));
+                handleUpdateHospital({ galleryPhotos: assets });
+              }}
+              hasDoctorsSection={approvedDoctors.length > 0}
               onPublished={() => {
                 handleUpdateHospital({});
               }}
@@ -1479,29 +2119,6 @@ export function HospitalAdmin({
             logoUrl={hospital.logo?.url}
           />
         </div>
-      )}
-
-      {/* TAB 8: FACILITY GALLERY */}
-      {activeTab === "gallery" && (
-        <Card className="bg-white border-slate-200 max-w-3xl">
-          <CardHeader>
-            <CardTitle className="text-base font-bold">Facility Gallery</CardTitle>
-            <CardDescription className="text-xs">
-              Upload up to 6 facility photos displayed on the hospital page and all affiliated doctor websites.
-            </CardDescription>
-          </CardHeader>
-          <CardContent className="space-y-4">
-            <GalleryUploader
-              label="Hospital Facility & Campus Photos"
-              value={hospital.galleryPhotos || []}
-              onChange={(assets) => {
-                setHospital((prev) => ({ ...prev, galleryPhotos: assets }));
-                handleUpdateHospital({ galleryPhotos: assets });
-              }}
-              maxFiles={6}
-            />
-          </CardContent>
-        </Card>
       )}
 
       {/* TAB 9: BRANDING & SEO */}
@@ -1573,7 +2190,7 @@ export function HospitalAdmin({
                   cropAspect={3 / 4}
                   aspect={3 / 4}
                   cropDescription="Reposition, zoom, and adjust within the 3:4 vertical frame for the website homepage."
-                  maxSizeBytes={5 * 1024 * 1024}
+                  maxSizeBytes={10 * 1024 * 1024}
                   value={hospital.buildingPhoto}
                   onChange={(asset) => {
                     setHospital((prev) => ({ ...prev, buildingPhoto: asset }));
@@ -1630,10 +2247,27 @@ export function HospitalAdmin({
         </div>
       )}
 
+      {/* TAB: ADMIN LOGS */}
+      {activeTab === "admin-logs" && (
+        <AdminLogView
+          title="Hospital Admin Login & Session Logs"
+          description="Monitor your hospital admin login history in IST, device, browser, IP address, active sessions, and logout reason."
+        />
+      )}
+
       {/* TAB 10: SETTINGS */}
       {activeTab === "settings" && (
         <AccountSettingsCard
           email={hospital.email}
+          contactEmail={hospital.email}
+          onUpdateContactEmail={async (newContactEmail) => {
+            if (onSaveHospital) {
+              await onSaveHospital({ email: newContactEmail });
+            } else {
+              await apiClient.patch("/organizations/me", { email: newContactEmail });
+            }
+            setHospital((prev) => ({ ...prev, email: newContactEmail }));
+          }}
           roleTitle="Hospital Account"
           slug={hospital.slug}
           publishStatus="PUBLISHED"

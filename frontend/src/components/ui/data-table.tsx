@@ -21,7 +21,9 @@ import {
   ArrowUpDown,
   ArrowUp,
   ArrowDown,
+  FileSpreadsheet,
 } from "lucide-react";
+import { toast } from "sonner";
 import { cn } from "@/lib/utils";
 
 export interface ColumnDef<T> {
@@ -43,6 +45,8 @@ export interface DataTableProps<T> {
   pageSizeOptions?: number[];
   toolbarExtra?: React.ReactNode;
   emptyMessage?: string;
+  exportFileName?: string;
+  enableExportExcel?: boolean;
 }
 
 export function DataTable<T extends Record<string, any>>({
@@ -54,6 +58,8 @@ export function DataTable<T extends Record<string, any>>({
   pageSizeOptions = [5, 10, 20, 50],
   toolbarExtra,
   emptyMessage = "No records found.",
+  exportFileName = "table_data",
+  enableExportExcel = true,
 }: DataTableProps<T>) {
   const [searchQuery, setSearchQuery] = React.useState("");
   const [pageSize, setPageSize] = React.useState(initialPageSize);
@@ -142,6 +148,89 @@ export function DataTable<T extends Record<string, any>>({
     }
   };
 
+  const handleExportExcel = () => {
+    try {
+      if (!filteredData || filteredData.length === 0) {
+        toast.error("No data available to export.");
+        return;
+      }
+
+      // 1. Identify exportable columns (skip actions, controls, etc.)
+      const exportableColumns = columns.filter((col) => {
+        const key = col.key.toLowerCase();
+        return key !== "actions" && key !== "action" && key !== "select" && key !== "operations";
+      });
+
+      if (exportableColumns.length === 0) {
+        toast.error("No exportable columns found.");
+        return;
+      }
+
+      // 2. Generate Header Row
+      const headers = exportableColumns.map((col) => {
+        if (typeof col.header === "string") return col.header;
+        return col.key
+          .replace(/([A-Z])/g, " $1")
+          .replace(/^./, (str) => str.toUpperCase())
+          .trim();
+      });
+
+      // 3. Generate Data Rows
+      const rows = filteredData.map((row) => {
+        return exportableColumns.map((col) => {
+          let val: any;
+          if (col.accessorFn) {
+            val = col.accessorFn(row);
+          } else if (col.key in row) {
+            val = row[col.key];
+          }
+
+          if (val === null || val === undefined) return "";
+          if (val instanceof Date) return val.toLocaleDateString("en-IN");
+          if (typeof val === "boolean") return val ? "Yes" : "No";
+          if (typeof val === "object") return "";
+          return String(val);
+        });
+      });
+
+      // 4. Build CSV string with UTF-8 BOM (\uFEFF) for full Excel compatibility
+      const escapeCsvField = (field: string) => {
+        const str = String(field);
+        if (str.includes(",") || str.includes('"') || str.includes("\n") || str.includes("\r")) {
+          return `"${str.replace(/"/g, '""')}"`;
+        }
+        return `"${str}"`;
+      };
+
+      const csvContent =
+        "\uFEFF" +
+        [
+          headers.map(escapeCsvField).join(","),
+          ...rows.map((r) => r.map(escapeCsvField).join(",")),
+        ].join("\r\n");
+
+      // 5. Trigger download
+      const blob = new Blob([csvContent], { type: "text/csv;charset=utf-8;" });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      const safeFileName = (exportFileName || "export")
+        .toLowerCase()
+        .replace(/[^a-z0-9_-]/g, "_");
+      const dateStr = new Date().toISOString().slice(0, 10);
+      link.href = url;
+      link.setAttribute("download", `${safeFileName}_${dateStr}.csv`);
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      URL.revokeObjectURL(url);
+
+      toast.success("Excel sheet downloaded successfully!");
+    } catch (err) {
+      console.error("Export error:", err);
+      toast.error("Failed to export Excel. Please try again.");
+    }
+  };
+
   return (
     <div className="space-y-3.5 w-full">
       {/* Toolbar: Global Search & Additional Actions */}
@@ -164,7 +253,23 @@ export function DataTable<T extends Record<string, any>>({
             </button>
           )}
         </div>
-        {toolbarExtra && <div className="flex items-center gap-2">{toolbarExtra}</div>}
+        <div className="flex items-center gap-2">
+          {toolbarExtra}
+          {enableExportExcel && (
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={handleExportExcel}
+              disabled={filteredData.length === 0}
+              className="h-9 px-3 text-xs font-semibold rounded-lg border-slate-200 hover:bg-slate-50 text-slate-700 flex items-center gap-1.5 shadow-2xs transition-all active:scale-95 cursor-pointer"
+              title="Download table data in Excel format"
+            >
+              <FileSpreadsheet className="h-3.5 w-3.5 text-emerald-600" />
+              <span>Export Excel</span>
+            </Button>
+          )}
+        </div>
       </div>
 
       {/* Table Container */}

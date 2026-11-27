@@ -30,12 +30,17 @@ import {
   ShieldCheck,
   Loader2,
   Check,
+  Mail,
+  Send,
+  Lock,
 } from "lucide-react";
 import { apiClient } from "@/lib/api-client";
 import { toast } from "sonner";
 
 interface AccountSettingsCardProps {
   email: string;
+  contactEmail?: string;
+  onUpdateContactEmail?: (newContactEmail: string) => Promise<void>;
   roleTitle: string;
   slug?: string;
   publishStatus?: string;
@@ -43,10 +48,183 @@ interface AccountSettingsCardProps {
 
 export function AccountSettingsCard({
   email,
+  contactEmail,
+  onUpdateContactEmail,
   roleTitle,
   slug,
   publishStatus = "PUBLISHED",
 }: AccountSettingsCardProps) {
+  // Dual Email States
+  const [currentAdminEmail, setCurrentAdminEmail] = React.useState(email);
+  const [contactEmailInput, setContactEmailInput] = React.useState(contactEmail || email);
+  const [isSavingContactEmail, setIsSavingContactEmail] = React.useState(false);
+
+  // Admin Email Change Modal States
+  const [isChangeEmailOpen, setIsChangeEmailOpen] = React.useState(false);
+  const [emailChangePassword, setEmailChangePassword] = React.useState("");
+  const [showEmailChangePassword, setShowEmailChangePassword] = React.useState(false);
+  const [isVerifyingPasswordForEmail, setIsVerifyingPasswordForEmail] = React.useState(false);
+  const [isPasswordVerifiedForEmail, setIsPasswordVerifiedForEmail] = React.useState(false);
+  const [newAdminEmail, setNewAdminEmail] = React.useState("");
+  const [isSendingEmailOtp, setIsSendingEmailOtp] = React.useState(false);
+  const [isEmailOtpSent, setIsEmailOtpSent] = React.useState(false);
+  const [emailOtp, setEmailOtp] = React.useState("");
+  const [isVerifyingEmailOtp, setIsVerifyingEmailOtp] = React.useState(false);
+
+  React.useEffect(() => {
+    setCurrentAdminEmail(email);
+  }, [email]);
+
+  React.useEffect(() => {
+    if (contactEmail) {
+      setContactEmailInput(contactEmail);
+    }
+  }, [contactEmail]);
+
+  const handleSaveContactEmail = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const clean = contactEmailInput.trim().toLowerCase();
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!clean || !emailRegex.test(clean)) {
+      toast.error("Please enter a valid email address for patient inquiries.");
+      return;
+    }
+
+    if (!onUpdateContactEmail) {
+      toast.error("Contact email updates are not supported for this role.");
+      return;
+    }
+
+    try {
+      setIsSavingContactEmail(true);
+      await onUpdateContactEmail(clean);
+      toast.success("Public inquiries & contact email updated successfully.");
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : "Failed to update contact email.";
+      toast.error(msg);
+    } finally {
+      setIsSavingContactEmail(false);
+    }
+  };
+
+  const handleVerifyPasswordForEmail = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!emailChangePassword.trim()) {
+      toast.error("Please enter your current account password.");
+      return;
+    }
+
+    setIsVerifyingPasswordForEmail(true);
+    try {
+      const res = await apiClient.post<{ success: boolean; message?: string }>(
+        "/auth/verify-old-password",
+        { oldPassword: emailChangePassword }
+      );
+      if (res.success) {
+        setIsPasswordVerifiedForEmail(true);
+        toast.success("Password verified. You can now enter your new admin email.");
+      }
+    } catch (err: unknown) {
+      const msg =
+        err instanceof Error
+          ? err.message
+          : (err as { message?: string })?.message || "Incorrect current password.";
+      toast.error(msg);
+    } finally {
+      setIsVerifyingPasswordForEmail(false);
+    }
+  };
+
+  const handleSendEmailOtp = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const clean = newAdminEmail.trim().toLowerCase();
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!clean || !emailRegex.test(clean)) {
+      toast.error("Please enter a valid new email address.");
+      return;
+    }
+
+    if (clean === currentAdminEmail.toLowerCase()) {
+      toast.error("New email is identical to your current admin email.");
+      return;
+    }
+
+    setIsSendingEmailOtp(true);
+    try {
+      const res = await apiClient.post<{ success: boolean; message?: string }>(
+        "/auth/change-email/send-otp",
+        {
+          currentPassword: emailChangePassword,
+          newEmail: clean,
+        }
+      );
+      if (res.success) {
+        setIsEmailOtpSent(true);
+        toast.success(res.message || "Verification code sent to your new email.");
+      }
+    } catch (err: unknown) {
+      const msg =
+        err instanceof Error
+          ? err.message
+          : (err as { message?: string })?.message || "Failed to send verification code.";
+      toast.error(msg);
+    } finally {
+      setIsSendingEmailOtp(false);
+    }
+  };
+
+  const handleVerifyEmailOtp = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const cleanOtp = emailOtp.trim();
+    if (cleanOtp.length !== 6) {
+      toast.error("Please enter the 6-digit verification code.");
+      return;
+    }
+
+    setIsVerifyingEmailOtp(true);
+    try {
+      const res = await apiClient.post<{
+        success: boolean;
+        message?: string;
+        data?: { email: string };
+      }>("/auth/change-email/verify-otp", {
+        currentPassword: emailChangePassword,
+        newEmail: newAdminEmail.trim().toLowerCase(),
+        otp: cleanOtp,
+      });
+
+      if (res.success) {
+        const updatedEmail = res.data?.email || newAdminEmail.trim().toLowerCase();
+        setCurrentAdminEmail(updatedEmail);
+        toast.success("Administrator login email updated successfully!");
+        // Reset dialog state
+        setIsChangeEmailOpen(false);
+        setEmailChangePassword("");
+        setIsPasswordVerifiedForEmail(false);
+        setNewAdminEmail("");
+        setIsEmailOtpSent(false);
+        setEmailOtp("");
+      }
+    } catch (err: unknown) {
+      const msg =
+        err instanceof Error
+          ? err.message
+          : (err as { message?: string })?.message || "Failed to verify code.";
+      toast.error(msg);
+    } finally {
+      setIsVerifyingEmailOtp(false);
+    }
+  };
+
+  const resetChangeEmailDialog = () => {
+    setIsChangeEmailOpen(false);
+    setEmailChangePassword("");
+    setIsPasswordVerifiedForEmail(false);
+    setNewAdminEmail("");
+    setIsEmailOtpSent(false);
+    setEmailOtp("");
+  };
+
   // Password Change State
   const [oldPassword, setOldPassword] = React.useState("");
   const [isOldPasswordVerified, setIsOldPasswordVerified] = React.useState(false);
@@ -214,10 +392,88 @@ export function AccountSettingsCard({
               {publishStatus}
             </Badge>
           </div>
+        </CardContent>
+      </Card>
 
-          <div className="p-3 rounded-lg border border-slate-200 space-y-1">
-            <span className="font-bold text-slate-900 block">Registered Email</span>
-            <span className="text-slate-700 font-mono">{email}</span>
+      {/* 2. Public Inquiries & Contact Email */}
+      {onUpdateContactEmail && (
+        <Card className="bg-white border-slate-200 shadow-2xs">
+          <CardHeader className="p-4 sm:p-5 pb-3">
+            <CardTitle className="text-base font-bold text-slate-900 flex items-center gap-2">
+              <Mail className="h-4 w-4 text-[#1a76d1]" />
+              <span>Public Inquiries & Contact Email</span>
+            </CardTitle>
+            <CardDescription className="text-xs text-slate-500">
+              This email is displayed publicly on your website footer, contact section, and patient appointment confirmations.
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="p-4 sm:p-5 pt-0">
+            <form onSubmit={handleSaveContactEmail} className="space-y-3">
+              <div className="space-y-1.5">
+                <Label htmlFor="contact-email" className="text-xs font-semibold text-slate-700">
+                  Website Display Email
+                </Label>
+                <div className="flex gap-2">
+                  <Input
+                    id="contact-email"
+                    type="email"
+                    value={contactEmailInput}
+                    onChange={(e) => setContactEmailInput(e.target.value)}
+                    placeholder="contact@clinic.com"
+                    className="text-xs font-mono"
+                    required
+                  />
+                  <Button
+                    type="submit"
+                    disabled={isSavingContactEmail || contactEmailInput === contactEmail}
+                    className="bg-[#1a76d1] hover:bg-[#1560aa] text-white text-xs h-9 px-4 shrink-0"
+                  >
+                    {isSavingContactEmail ? (
+                      <>
+                        <Loader2 className="h-3.5 w-3.5 animate-spin mr-1.5" />
+                        Saving...
+                      </>
+                    ) : (
+                      "Save Email"
+                    )}
+                  </Button>
+                </div>
+              </div>
+            </form>
+          </CardContent>
+        </Card>
+      )}
+
+      {/* 3. Administrator Login Email */}
+      <Card className="bg-white border-slate-200 shadow-2xs">
+        <CardHeader className="p-4 sm:p-5 pb-3">
+          <CardTitle className="text-base font-bold text-slate-900 flex items-center gap-2">
+            <Lock className="h-4 w-4 text-emerald-600" />
+            <span>Administrator Login Email</span>
+          </CardTitle>
+          <CardDescription className="text-xs text-slate-500">
+            Private credentials used to log in to this administrative console. Requires password and OTP verification to change.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="p-4 sm:p-5 pt-0">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between p-3.5 rounded-lg border border-slate-200 bg-slate-50 gap-3">
+            <div>
+              <span className="text-[11px] uppercase tracking-wider font-semibold text-slate-400 block">
+                Current Login Email
+              </span>
+              <span className="text-sm font-mono font-bold text-slate-800 break-all">
+                {currentAdminEmail}
+              </span>
+            </div>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={() => setIsChangeEmailOpen(true)}
+              className="text-xs font-semibold h-8.5 shrink-0"
+            >
+              Change Admin Email
+            </Button>
           </div>
         </CardContent>
       </Card>
@@ -522,6 +778,213 @@ export function AccountSettingsCard({
               )}
             </Button>
           </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Change Admin Email Dialog with Mandatory Password & OTP Verification */}
+      <Dialog
+        open={isChangeEmailOpen}
+        onOpenChange={(open) => {
+          if (!open && !isVerifyingEmailOtp && !isSendingEmailOtp) {
+            resetChangeEmailDialog();
+          }
+        }}
+      >
+        <DialogContent className="sm:max-w-md bg-white border border-slate-200 shadow-2xl rounded-2xl p-6">
+          <DialogHeader className="space-y-2">
+            <div className="flex h-10 w-10 items-center justify-center rounded-full bg-emerald-100 text-emerald-600">
+              <Mail className="h-5 w-5" />
+            </div>
+            <DialogTitle className="text-base font-bold text-slate-900">
+              Change Administrator Login Email
+            </DialogTitle>
+            <DialogDescription className="text-xs text-slate-500">
+              For security, confirm your current password before providing your new admin email and entering the verification OTP.
+            </DialogDescription>
+          </DialogHeader>
+
+          {/* STEP 1: Verify Current Password */}
+          {!isPasswordVerifiedForEmail ? (
+            <form onSubmit={handleVerifyPasswordForEmail} className="space-y-4 pt-2">
+              <div className="space-y-1.5">
+                <Label htmlFor="change-email-pwd" className="text-xs font-semibold text-slate-700">
+                  Current Account Password *
+                </Label>
+                <div className="relative">
+                  <Input
+                    id="change-email-pwd"
+                    type={showEmailChangePassword ? "text" : "password"}
+                    value={emailChangePassword}
+                    onChange={(e) => setEmailChangePassword(e.target.value)}
+                    placeholder="Enter your current password"
+                    className="pr-10 text-xs"
+                    autoComplete="current-password"
+                    required
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowEmailChangePassword(!showEmailChangePassword)}
+                    className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600"
+                  >
+                    {showEmailChangePassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                  </button>
+                </div>
+              </div>
+
+              <DialogFooter className="gap-2 sm:gap-0 pt-2">
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={resetChangeEmailDialog}
+                  disabled={isVerifyingPasswordForEmail}
+                  className="text-xs"
+                >
+                  Cancel
+                </Button>
+                <Button
+                  type="submit"
+                  size="sm"
+                  disabled={isVerifyingPasswordForEmail || !emailChangePassword.trim()}
+                  className="bg-[#1a76d1] hover:bg-[#1560aa] text-white text-xs font-semibold"
+                >
+                  {isVerifyingPasswordForEmail ? (
+                    <>
+                      <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
+                      Verifying Password...
+                    </>
+                  ) : (
+                    "Verify Password & Proceed"
+                  )}
+                </Button>
+              </DialogFooter>
+            </form>
+          ) : !isEmailOtpSent ? (
+            /* STEP 2: Enter New Admin Email & Send OTP */
+            <form onSubmit={handleSendEmailOtp} className="space-y-4 pt-2">
+              <div className="p-2.5 rounded-lg bg-emerald-50 border border-emerald-200 text-xs text-emerald-800 flex items-center gap-2">
+                <CheckCircle2 className="h-4 w-4 text-emerald-600 shrink-0" />
+                <span>Password verified. Enter your new administrator email below.</span>
+              </div>
+
+              <div className="space-y-1.5">
+                <Label htmlFor="new-admin-email" className="text-xs font-semibold text-slate-700">
+                  New Admin Email Address *
+                </Label>
+                <Input
+                  id="new-admin-email"
+                  type="email"
+                  value={newAdminEmail}
+                  onChange={(e) => setNewAdminEmail(e.target.value)}
+                  placeholder="newadmin@clinic.com"
+                  className="text-xs font-mono"
+                  required
+                />
+                <p className="text-[11px] text-slate-500">
+                  We will send a 6-digit confirmation code to this new address.
+                </p>
+              </div>
+
+              <DialogFooter className="gap-2 sm:gap-0 pt-2">
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={() => setIsPasswordVerifiedForEmail(false)}
+                  disabled={isSendingEmailOtp}
+                  className="text-xs"
+                >
+                  Back
+                </Button>
+                <Button
+                  type="submit"
+                  size="sm"
+                  disabled={isSendingEmailOtp || !newAdminEmail.trim()}
+                  className="bg-[#1a76d1] hover:bg-[#1560aa] text-white text-xs font-semibold"
+                >
+                  {isSendingEmailOtp ? (
+                    <>
+                      <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
+                      Sending OTP...
+                    </>
+                  ) : (
+                    <>
+                      <Send className="mr-1.5 h-3.5 w-3.5" />
+                      Send Verification OTP
+                    </>
+                  )}
+                </Button>
+              </DialogFooter>
+            </form>
+          ) : (
+            /* STEP 3: Verify OTP & Confirm Email Change */
+            <form onSubmit={handleVerifyEmailOtp} className="space-y-4 pt-2">
+              <div className="p-2.5 rounded-lg bg-blue-50 border border-blue-200 text-xs text-blue-800 space-y-1">
+                <div className="font-semibold flex items-center gap-1.5">
+                  <CheckCircle2 className="h-4 w-4 text-[#1a76d1] shrink-0" />
+                  <span>OTP Sent!</span>
+                </div>
+                <p className="text-[11px] text-slate-600">
+                  Enter the 6-digit verification code sent to <strong>{newAdminEmail}</strong>.
+                </p>
+              </div>
+
+              <div className="space-y-1.5">
+                <Label htmlFor="email-otp-input" className="text-xs font-semibold text-slate-700">
+                  6-Digit Verification Code *
+                </Label>
+                <Input
+                  id="email-otp-input"
+                  type="text"
+                  maxLength={6}
+                  value={emailOtp}
+                  onChange={(e) => setEmailOtp(e.target.value.replace(/[^0-9]/g, ""))}
+                  placeholder="123456"
+                  className="text-center font-mono tracking-widest text-lg h-11"
+                  required
+                />
+              </div>
+
+              <div className="flex justify-between items-center text-xs pt-1">
+                <button
+                  type="button"
+                  onClick={handleSendEmailOtp}
+                  disabled={isSendingEmailOtp}
+                  className="text-[#1a76d1] hover:underline text-[11px] font-medium"
+                >
+                  Didn&apos;t receive code? Resend OTP
+                </button>
+              </div>
+
+              <DialogFooter className="gap-2 sm:gap-0 pt-2">
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={() => setIsEmailOtpSent(false)}
+                  disabled={isVerifyingEmailOtp}
+                  className="text-xs"
+                >
+                  Change Email
+                </Button>
+                <Button
+                  type="submit"
+                  size="sm"
+                  disabled={isVerifyingEmailOtp || emailOtp.length !== 6}
+                  className="bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold"
+                >
+                  {isVerifyingEmailOtp ? (
+                    <>
+                      <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
+                      Verifying & Updating...
+                    </>
+                  ) : (
+                    "Confirm & Update Admin Email"
+                  )}
+                </Button>
+              </DialogFooter>
+            </form>
+          )}
         </DialogContent>
       </Dialog>
     </div>

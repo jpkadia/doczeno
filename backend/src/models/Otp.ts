@@ -3,7 +3,7 @@ import mongoose, { Document, Schema, Model } from "mongoose";
 export interface IOtp extends Document {
   email: string;
   otp: string;
-  purpose: "ONBOARDING" | "PASSWORD_RESET";
+  purpose: "ONBOARDING" | "PASSWORD_RESET" | "EMAIL_CHANGE";
   attempts: number;
   isVerified: boolean;
   expiresAt: Date;
@@ -26,7 +26,7 @@ const OtpSchema = new Schema<IOtp>(
     },
     purpose: {
       type: String,
-      enum: ["ONBOARDING", "PASSWORD_RESET"],
+      enum: ["ONBOARDING", "PASSWORD_RESET", "EMAIL_CHANGE"],
       default: "ONBOARDING",
     },
     attempts: {

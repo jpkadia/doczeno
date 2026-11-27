@@ -11,6 +11,7 @@ import { Plus, Trash2, Clock, AlertCircle } from "lucide-react";
 export interface TimeSlot {
   startTime: string;
   endTime: string;
+  maxPatients?: number | null;
 }
 
 export interface DaySchedule {
@@ -27,6 +28,7 @@ interface ConsultationHoursBuilderProps {
   disabled?: boolean;
   hospitalWeeklyOff?: string[];
   hospitalName?: string;
+  showCapacityControls?: boolean;
 }
 
 export const DEFAULT_WEEK_SCHEDULE: DaySchedule[] = DAYS_OF_WEEK.map((day) => ({
@@ -43,6 +45,7 @@ export function ConsultationHoursBuilder({
   disabled,
   hospitalWeeklyOff,
   hospitalName,
+  showCapacityControls = false,
 }: ConsultationHoursBuilderProps) {
   const schedules = value && value.length > 0 ? value : DEFAULT_WEEK_SCHEDULE;
 
@@ -105,7 +108,7 @@ export function ConsultationHoursBuilder({
   const handleSlotChange = (
     dayIndex: number,
     slotIndex: number,
-    field: "startTime" | "endTime",
+    field: "startTime" | "endTime" | "maxPatients",
     val: string
   ) => {
     const updated = [...schedules];
@@ -113,7 +116,12 @@ export function ConsultationHoursBuilder({
     if (!targetDay) return;
     const targetSlot = targetDay.slots[slotIndex];
     if (!targetSlot) return;
-    targetSlot[field] = val;
+    if (field === "maxPatients") {
+      const parsed = parseInt(val, 10);
+      targetSlot.maxPatients = !val.trim() || isNaN(parsed) || parsed <= 0 ? null : Math.min(500, parsed);
+    } else {
+      targetSlot[field] = val;
+    }
     onChange(updated);
   };
 
@@ -228,6 +236,26 @@ export function ConsultationHoursBuilder({
                             isInvalid ? "border-destructive text-destructive" : ""
                           }`}
                         />
+
+                        {showCapacityControls && (
+                          <div className="flex items-center gap-1.5" title="Maximum patients allowed in this slot (leave blank for unlimited)">
+                            <span className="text-[11px] text-muted-foreground font-medium whitespace-nowrap">
+                              Max Patients:
+                            </span>
+                            <Input
+                              type="number"
+                              min={1}
+                              max={500}
+                              placeholder="Unlimited"
+                              disabled={disabled}
+                              value={slot.maxPatients ?? ""}
+                              onChange={(e) =>
+                                handleSlotChange(dayIndex, slotIndex, "maxPatients", e.target.value)
+                              }
+                              className="h-8 w-24 text-xs font-mono"
+                            />
+                          </div>
+                        )}
 
                         {isInvalid && (
                           <span className="text-[10px] text-destructive font-medium">

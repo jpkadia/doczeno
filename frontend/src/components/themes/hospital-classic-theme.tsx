@@ -10,9 +10,11 @@ import { GalleryLightbox } from "./shared/gallery-lightbox";
 import { TestimonialsSection } from "./shared/testimonials-section";
 import { useWebsiteThemeMode } from "./shared/website-mode-context";
 import { ThemeModeToggle } from "./shared/theme-mode-toggle";
+import { MobileBottomNav } from "./shared/mobile-bottom-nav";
 import { ScrollReveal } from "./shared/scroll-reveal";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import { apiClient } from "@/lib/api-client";
 import { cn } from "@/lib/utils";
 import {
   Phone,
@@ -38,7 +40,14 @@ import {
   Sparkles,
   ShieldCheck,
 } from "lucide-react";
-import { SECTION_META } from "@/constants/website-sections";
+import { CustomSectionRenderer } from "./shared/custom-section-renderer";
+import {
+  SECTION_META,
+  CustomSectionConfig,
+  ReorderableSectionId,
+  resolveNormalizedHiddenSections,
+  resolveNormalizedSectionOrder,
+} from "@/constants/website-sections";
 import { resolveThemePalette } from "@/lib/theme-palettes";
 
 function getSpecialtyMeta(specialtyName: string) {
@@ -144,6 +153,31 @@ export function HospitalClassicTheme({ data }: HospitalClassicThemeProps) {
   const [isHeaderVisible, setIsHeaderVisible] = React.useState(true);
   const lastScrollYRef = React.useRef(0);
   const scrollStopTimerRef = React.useRef<NodeJS.Timeout | null>(null);
+  const [liveServingToken, setLiveServingToken] = React.useState<number>(0);
+
+  React.useEffect(() => {
+    if (data.websiteType === "HOSPITAL_CLINIC" || !data.doctorId) return;
+    let cancelled = false;
+    const fetchLiveQueue = () => {
+      apiClient
+        .get<{ success: boolean; data?: { currentServingToken?: number } }>(
+          "/appointments/public-live-queue",
+          { params: { doctorId: data.doctorId } }
+        )
+        .then((res) => {
+          if (!cancelled && res?.success && typeof res.data?.currentServingToken === "number") {
+            setLiveServingToken(res.data.currentServingToken);
+          }
+        })
+        .catch(() => {});
+    };
+    fetchLiveQueue();
+    const timer = setInterval(fetchLiveQueue, 30_000);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, [data.websiteType, data.doctorId]);
 
   React.useEffect(() => {
     const handleScroll = () => {
@@ -376,11 +410,26 @@ export function HospitalClassicTheme({ data }: HospitalClassicThemeProps) {
       ];
     }
 
-    return rawList.map((specName) => ({
-      title: specName,
-      ...getSpecialtyMeta(specName),
-    }));
-  }, [data.specialties, data.departments]);
+    const aiServicesMap = new Map<string, string>();
+    const aiSvcs = Array.isArray(c.services) ? c.services : Array.isArray(data.services) ? data.services : [];
+    for (const s of aiSvcs) {
+      const key = String((s as any)?.title || (s as any)?.name || "").trim().toLowerCase();
+      const desc = String((s as any)?.description || "").trim();
+      if (key && desc) {
+        aiServicesMap.set(key, desc);
+      }
+    }
+
+    return rawList.map((specName) => {
+      const meta = getSpecialtyMeta(specName);
+      const customDesc = aiServicesMap.get(String(specName).trim().toLowerCase());
+      return {
+        title: specName,
+        ...meta,
+        description: customDesc || meta.description,
+      };
+    });
+  }, [data.specialties, data.departments, c.services, data.services]);
 
   const effectiveTestimonials: TestimonialItem[] = React.useMemo(() => {
     if (data.testimonials && data.testimonials.length > 0) {
@@ -436,56 +485,117 @@ export function HospitalClassicTheme({ data }: HospitalClassicThemeProps) {
     ? `${data.degree ? `${data.degree} • ` : ""}${data.specialization || "Clinical Specialist"}`
     : `${data.organizationType === "CLINIC" ? "Specialty Medical Clinic" : "Multi-Specialty Hospital"}`;
 
-  // Alternating section backgrounds: Section 0 (Hero) is always Gradient
-  // Section 1 (About) is always Plain
-  // Section 2 (Treatments) is always Gradient
-  // Subsequent visible sections strictly alternate: Plain -> Gradient -> Plain -> Gradient...
-  let nextSectionIsGradient = false; // Section 3 starts as Plain
+  // Dynamic Section Ordering, Visibility & Strictly Alternating Backgrounds
+  // Hero (#home) = Always Gradient | About (#about) = Always Simple
+  // Subsequent visible middle sections strictly alternate: Gradient -> Simple -> Gradient -> Simple...
+  const sectionOrder = React.useMemo(
+    () => resolveNormalizedSectionOrder(!isDoctor, c.sectionOrder),
+    [isDoctor, c.sectionOrder]
+  );
 
-  const hasDoctorsSection = !isDoctor && Boolean(data.doctorDirectory && data.doctorDirectory.length > 0);
-  const isDoctorsGradient = hasDoctorsSection ? nextSectionIsGradient : false;
-  if (hasDoctorsSection) {
-    nextSectionIsGradient = !nextSectionIsGradient;
-  }
+  const hiddenSections = React.useMemo(
+    () => resolveNormalizedHiddenSections(!isDoctor, c.hiddenSections),
+    [isDoctor, c.hiddenSections]
+  );
 
-  const hasFacilitiesSection = Boolean(data.galleryPhotos && data.galleryPhotos.length > 0);
-  const isFacilitiesGradient = hasFacilitiesSection ? nextSectionIsGradient : false;
-  if (hasFacilitiesSection) {
-    nextSectionIsGradient = !nextSectionIsGradient;
-  }
+  const hiddenSet = React.useMemo(() => new Set<string>(hiddenSections), [hiddenSections]);
 
-  const hasReviewsSection = effectiveTestimonials.length > 0;
-  const isReviewsGradient = hasReviewsSection ? nextSectionIsGradient : false;
-  if (hasReviewsSection) {
-    nextSectionIsGradient = !nextSectionIsGradient;
-  }
+  const customSection: CustomSectionConfig | null = React.useMemo(() => {
+    if (isDoctor && c.customSection && typeof c.customSection === "object" && c.customSection.enabled) {
+      return c.customSection as CustomSectionConfig;
+    }
+    return null;
+  }, [isDoctor, c.customSection]);
 
-  // Timings & Schedule is always rendered
-  const isScheduleGradient = nextSectionIsGradient;
-  nextSectionIsGradient = !nextSectionIsGradient;
+  const hasServicesSection = !hiddenSet.has("services");
+  const hasDoctorsSection =
+    !hiddenSet.has("doctors") && !isDoctor && Boolean(data.doctorDirectory && data.doctorDirectory.length > 0);
+  const hasFacilitiesSection =
+    !hiddenSet.has("facility") && Boolean(data.galleryPhotos && data.galleryPhotos.length > 0);
+  const hasReviewsSection = !hiddenSet.has("reviews") && effectiveTestimonials.length > 0;
+  const hasTimingsSection = !hiddenSet.has("timings");
+  const hasFaqsSection = !hiddenSet.has("faqs") && faqsList.length > 0;
+  const hasCustomSection = !hiddenSet.has("custom") && Boolean(customSection && customSection.title?.trim());
 
-  // FAQ section
-  const hasFaqsSection = faqsList.length > 0;
-  const isFaqsGradient = hasFaqsSection ? nextSectionIsGradient : false;
+  const visibleMiddleSections = React.useMemo(() => {
+    const eligibility: Record<ReorderableSectionId, boolean> = {
+      services: hasServicesSection,
+      doctors: hasDoctorsSection,
+      facility: hasFacilitiesSection,
+      reviews: hasReviewsSection,
+      timings: hasTimingsSection,
+      faqs: hasFaqsSection,
+      custom: hasCustomSection,
+    };
+    const filtered = sectionOrder.filter((id) => eligibility[id]);
+    return filtered.map((id, idx) => ({
+      id,
+      isGradient: idx % 2 === 0,
+    }));
+  }, [
+    sectionOrder,
+    hasServicesSection,
+    hasDoctorsSection,
+    hasFacilitiesSection,
+    hasReviewsSection,
+    hasTimingsSection,
+    hasFaqsSection,
+    hasCustomSection,
+  ]);
 
-  // Active Navigation Tracking & ScrollSpy (Detects currently visible section on screen)
+  // Active Navigation Tracking & ScrollSpy (Detects currently visible section on screen in live order)
   const [activeNavId, setActiveNavId] = React.useState<string>("home");
   const isClickScrollingRef = React.useRef(false);
   const clickScrollTimeoutRef = React.useRef<NodeJS.Timeout | null>(null);
 
-  const navItems = React.useMemo(() => [
-    { id: "home", label: "Home", icon: Home },
-    { id: "about", label: "About", icon: User },
-    {
-      id: isDoctor ? "treatments" : "specializations",
-      label: isDoctor ? "Treatments" : "Specializations",
-      icon: Activity,
-    },
-    { id: "facility", label: "Facility", icon: Building2 },
-    ...(hasReviewsSection ? [{ id: "reviews", label: "Reviews", icon: Star }] : []),
-    { id: "timings", label: "Timings", icon: Clock },
-    { id: "contact", label: "Contact", icon: Phone },
-  ], [isDoctor, hasReviewsSection]);
+  const navItems = React.useMemo(() => {
+    const middleNavMap: Partial<Record<ReorderableSectionId, { id: string; label: string; icon: React.ComponentType<{ className?: string }> }>> = {
+      services: {
+        id: isDoctor ? "treatments" : "specializations",
+        label: isDoctor ? "Treatments" : "Specializations",
+        icon: Activity,
+      },
+      facility: !hiddenSet.has("facility")
+        ? { id: "facility", label: "Facility", icon: Building2 }
+        : undefined,
+      reviews: hasReviewsSection
+        ? { id: "reviews", label: "Reviews", icon: Star }
+        : undefined,
+      timings: hasTimingsSection
+        ? { id: "timings", label: "Timings", icon: Clock }
+        : undefined,
+      custom: hasCustomSection
+        ? {
+            id: "custom-section",
+            label: customSection?.navLabel?.trim() || "Highlights",
+            icon: Sparkles,
+          }
+        : undefined,
+    };
+
+    const orderedMiddleNav = sectionOrder
+      .map((id) => {
+        if (id === "services" && !hasServicesSection) return undefined;
+        return middleNavMap[id];
+      })
+      .filter((item): item is { id: string; label: string; icon: React.ComponentType<{ className?: string }> } => Boolean(item));
+
+    return [
+      { id: "home", label: "Home", icon: Home },
+      { id: "about", label: "About", icon: User },
+      ...orderedMiddleNav,
+      { id: "contact", label: "Contact", icon: Phone },
+    ];
+  }, [
+    isDoctor,
+    sectionOrder,
+    hiddenSet,
+    hasServicesSection,
+    hasReviewsSection,
+    hasTimingsSection,
+    hasCustomSection,
+    customSection?.navLabel,
+  ]);
 
   const navIds = React.useMemo(() => navItems.map((item) => item.id), [navItems]);
 
@@ -568,17 +678,17 @@ export function HospitalClassicTheme({ data }: HospitalClassicThemeProps) {
   };
 
   const aboutSectionProps = getAlternatingSectionProps(false);
-  const treatmentsSectionProps = getAlternatingSectionProps(true);
-  const doctorsSectionProps = getAlternatingSectionProps(isDoctorsGradient);
-  const facilitiesSectionProps = getAlternatingSectionProps(isFacilitiesGradient);
-  const scheduleSectionProps = getAlternatingSectionProps(isScheduleGradient);
-  const faqsSectionProps = getAlternatingSectionProps(isFaqsGradient);
+  const heroSecondaryTarget = hasServicesSection
+    ? (isDoctor ? "#treatments" : "#specializations")
+    : hasTimingsSection
+    ? "#timings"
+    : "#about";
 
   return (
     <div
       data-testid="theme-hospital-classic"
       className={cn(
-        "min-h-screen font-sans selection:bg-[var(--theme-primary)] selection:text-white transition-colors duration-200",
+        "min-h-screen font-sans selection:bg-[var(--theme-primary)] selection:text-white transition-colors duration-200 pb-[calc(4.5rem+env(safe-area-inset-bottom,0px))] min-[1033px]:pb-0",
         isDark ? "text-slate-100" : "text-slate-800"
       )}
       style={{
@@ -752,6 +862,8 @@ export function HospitalClassicTheme({ data }: HospitalClassicThemeProps) {
               consultationHours={data.consultationHours || data.workingHours}
               weeklyOff={data.weeklyOff}
               selectedTheme={data.selectedTheme}
+              doctorDirectory={data.doctorDirectory}
+              websiteType={data.websiteType}
             >
               <Button className="bg-[var(--theme-primary)] hover:bg-[var(--theme-primary-hover)] text-white font-bold px-5 sm:px-6 py-2.5 rounded-full shadow-md hover:shadow-lg transition-all">
                 <Calendar className="mr-2 h-4 w-4" />
@@ -787,17 +899,34 @@ export function HospitalClassicTheme({ data }: HospitalClassicThemeProps) {
         <div className="max-w-7xl mx-auto grid grid-cols-1 lg:grid-cols-12 gap-12 items-center">
           {/* Left Hero Text with ScrollReveal */}
           <ScrollReveal className="lg:col-span-7 space-y-6 text-left" delay={50} duration={650}>
-            <Badge
-              variant="outline"
-              className={cn(
-                "text-xs font-bold px-3 py-1 border shadow-2xs transition-colors duration-200",
-                isDark
-                  ? "bg-[var(--theme-primary)]/20 hover:bg-[var(--theme-primary)]/30 text-[var(--theme-primary-light)] border-[var(--theme-primary)]/30"
-                  : "bg-[var(--theme-primary)]/15 hover:bg-[var(--theme-primary)]/25 text-[var(--theme-primary)] border-[var(--theme-primary)]/25"
+            <div className="flex flex-wrap items-center gap-2.5">
+              <Badge
+                variant="outline"
+                className={cn(
+                  "text-xs font-bold px-3 py-1 border shadow-2xs transition-colors duration-200",
+                  isDark
+                    ? "bg-[var(--theme-primary)]/20 hover:bg-[var(--theme-primary)]/30 text-[var(--theme-primary-light)] border-[var(--theme-primary)]/30"
+                    : "bg-[var(--theme-primary)]/15 hover:bg-[var(--theme-primary)]/25 text-[var(--theme-primary)] border-[var(--theme-primary)]/25"
+                )}
+              >
+                {(typeof c.heroBadge === "string" && c.heroBadge) || "Trusted Healthcare"}
+              </Badge>
+
+              {isDoctor && liveServingToken > 0 && (
+                <Badge
+                  variant="outline"
+                  className={cn(
+                    "text-xs font-bold px-3 py-1 border shadow-2xs inline-flex items-center gap-1.5",
+                    isDark
+                      ? "bg-emerald-500/15 text-emerald-300 border-emerald-500/30"
+                      : "bg-emerald-50 text-emerald-700 border-emerald-200"
+                  )}
+                >
+                  <span className="h-2 w-2 rounded-full bg-emerald-500 animate-pulse" />
+                  <span>OPD Live: Serving Token #{liveServingToken}</span>
+                </Badge>
               )}
-            >
-              {(typeof c.heroBadge === "string" && c.heroBadge) || "Trusted Healthcare"}
-            </Badge>
+            </div>
 
             <h1
               className={cn(
@@ -823,24 +952,26 @@ export function HospitalClassicTheme({ data }: HospitalClassicThemeProps) {
                 <Search className="h-4 w-4" />
                 <span>{(typeof c.heroCtaPrimary === "string" && c.heroCtaPrimary) || "Track Appointment"}</span>
               </a>
-              <a
-                href={isDoctor ? "#treatments" : "#specializations"}
-                className={cn(
-                  "inline-flex items-center gap-2 px-7 py-3.5 rounded-full font-bold text-sm sm:text-base border shadow-md transition-all duration-200 group",
-                  "hover:bg-[var(--theme-primary)] hover:border-[var(--theme-primary)] hover:text-white hover:shadow-lg"
-                )}
-                style={{
-                  backgroundColor: isDark ? theme.innerCardBgDark : "#ffffff",
-                  borderColor: isDark ? theme.cardBorderDark : theme.cardBorderLight,
-                  color: isDark ? theme.primaryLight : theme.primary,
-                }}
-              >
-                <span>
-                  {(typeof c.heroCtaSecondary === "string" && c.heroCtaSecondary) ||
-                    (isDoctor ? "Explore Services" : "Explore Specializations")}
-                </span>
-                <ChevronRight className="h-4 w-4 transition-colors group-hover:text-white" />
-              </a>
+              {hasServicesSection && (
+                <a
+                  href={heroSecondaryTarget}
+                  className={cn(
+                    "inline-flex items-center gap-2 px-7 py-3.5 rounded-full font-bold text-sm sm:text-base border shadow-md transition-all duration-200 group",
+                    "hover:bg-[var(--theme-primary)] hover:border-[var(--theme-primary)] hover:text-white hover:shadow-lg"
+                  )}
+                  style={{
+                    backgroundColor: isDark ? theme.innerCardBgDark : "#ffffff",
+                    borderColor: isDark ? theme.cardBorderDark : theme.cardBorderLight,
+                    color: isDark ? theme.primaryLight : theme.primary,
+                  }}
+                >
+                  <span>
+                    {(typeof c.heroCtaSecondary === "string" && c.heroCtaSecondary) ||
+                      (isDoctor ? "Explore Services" : "Explore Specializations")}
+                  </span>
+                  <ChevronRight className="h-4 w-4 transition-colors group-hover:text-white" />
+                </a>
+              )}
             </div>
           </ScrollReveal>
 
@@ -1003,6 +1134,8 @@ export function HospitalClassicTheme({ data }: HospitalClassicThemeProps) {
                 consultationHours={data.consultationHours || data.workingHours}
                 weeklyOff={data.weeklyOff}
                 selectedTheme={data.selectedTheme}
+                doctorDirectory={data.doctorDirectory}
+                websiteType={data.websiteType}
               >
                 <Button className="bg-[var(--theme-primary)] hover:bg-[var(--theme-primary-hover)] text-white font-bold px-7 py-3 rounded-full">
                   {(typeof c.aboutCtaButton === "string" && c.aboutCtaButton) || "Book Your Visit Today"}
@@ -1011,7 +1144,7 @@ export function HospitalClassicTheme({ data }: HospitalClassicThemeProps) {
             </div>
           </div>
 
-          <div id={(!data.galleryPhotos || data.galleryPhotos.length === 0) ? "facility" : undefined} className="lg:col-span-5 scroll-mt-24">
+          <div id={(!hasFacilitiesSection && !hiddenSet.has("facility")) ? "facility" : undefined} className="lg:col-span-5 scroll-mt-24">
             <span id="facilities" className="sr-only" />
             <span id="clinic" className="sr-only" />
             <div
@@ -1103,12 +1236,18 @@ export function HospitalClassicTheme({ data }: HospitalClassicThemeProps) {
         </ScrollReveal>
       </section>
 
-      {/* Treatments & Services Section (Doctor) OR Specializations Section (Hospital) */}
-      <section
-        id={isDoctor ? "treatments" : "specializations"}
-        className={cn(treatmentsSectionProps.className)}
-        style={treatmentsSectionProps.style}
-      >
+      {/* Dynamic Reorderable & Toggleable Middle Sections (Strictly Alternating Gradient / Simple Backgrounds) */}
+      {visibleMiddleSections.map(({ id, isGradient }) => {
+        const sectionProps = getAlternatingSectionProps(isGradient);
+        switch (id) {
+          case "services":
+            return (
+              <section
+                key="services"
+                id={isDoctor ? "treatments" : "specializations"}
+                className={cn(sectionProps.className)}
+                style={sectionProps.style}
+              >
         <div className="max-w-7xl mx-auto">
           <span id="expertise" className="sr-only" />
           <span id="treatments" className="sr-only" />
@@ -1127,12 +1266,12 @@ export function HospitalClassicTheme({ data }: HospitalClassicThemeProps) {
             >
               {isDoctor
                 ? ((typeof c.servicesBadge === "string" && c.servicesBadge) || SECTION_META.treatments.badge)
-                : "Medical Departments"}
+                : ((typeof c.servicesBadge === "string" && c.servicesBadge) || "Medical Departments")}
             </Badge>
             <h2 className={cn("text-3xl sm:text-4xl font-black tracking-tight", isDark ? "text-white" : "text-slate-900")}>
               {isDoctor
                 ? ((typeof c.servicesTitle === "string" && c.servicesTitle) || "Treatments")
-                : "Specializations"}
+                : ((typeof c.servicesTitle === "string" && c.servicesTitle) || "Specializations")}
             </h2>
             <div className="flex items-center justify-center gap-3 my-4">
               <span className="w-16 h-[2px] bg-[var(--theme-primary)]/40" />
@@ -1145,7 +1284,8 @@ export function HospitalClassicTheme({ data }: HospitalClassicThemeProps) {
                     (data.specialization
                       ? `Patient-focused clinical care in ${data.specialization}.`
                       : "Comprehensive clinical care and medical treatments."))
-                : `Comprehensive multi-specialty clinical departments and specialized care at ${displayName}.`}
+                : ((typeof c.servicesSubtitle === "string" && c.servicesSubtitle) ||
+                    `Comprehensive multi-specialty clinical departments and specialized care at ${displayName}.`)}
             </p>
           </ScrollReveal>
 
@@ -1200,39 +1340,42 @@ export function HospitalClassicTheme({ data }: HospitalClassicThemeProps) {
           </div>
         </div>
       </section>
+            );
 
-      {/* Hospital Doctor Directory (if Hospital) */}
-      {!isDoctor && data.doctorDirectory && data.doctorDirectory.length > 0 && (
-        <section
-          id="doctors"
-          className={cn(doctorsSectionProps.className)}
-          style={doctorsSectionProps.style}
-        >
-          <div className="max-w-7xl mx-auto">
-            <ScrollReveal className="text-center max-w-2xl mx-auto mb-14" duration={600}>
-              <Badge
-                variant="outline"
-                className={cn(
-                  "border text-xs font-bold px-3 py-1 mb-3 transition-colors duration-200",
-                  isDark
-                    ? "bg-[var(--theme-primary)]/20 hover:bg-[var(--theme-primary)]/30 text-[var(--theme-primary-light)] border-[var(--theme-primary)]/30"
-                    : "bg-[var(--theme-primary)]/15 hover:bg-[var(--theme-primary)]/25 text-[var(--theme-primary)] border-[var(--theme-primary)]/25"
-                )}
+          case "doctors":
+            return (!isDoctor && data.doctorDirectory && data.doctorDirectory.length > 0) ? (
+              <section
+                key="doctors"
+                id="doctors"
+                className={cn(sectionProps.className)}
+                style={sectionProps.style}
               >
-                Medical Faculty
-              </Badge>
-              <h2 className={cn("text-3xl sm:text-4xl font-black tracking-tight", isDark ? "text-white" : "text-slate-900")}>
-                Specialist Doctors
-              </h2>
-              <div className="flex items-center justify-center gap-3 my-4">
-                <span className="w-16 h-[2px]" style={{ backgroundColor: theme.primary, opacity: 0.35 }} />
-                <Activity className="h-6 w-6 text-[var(--theme-primary)]" />
-                <span className="w-16 h-[2px]" style={{ backgroundColor: theme.primary, opacity: 0.35 }} />
-              </div>
-              <p className={cn("text-sm leading-relaxed", isDark ? "text-slate-400" : "text-slate-600")}>
-                Consult directly with affiliated department specialists and experienced clinical practitioners at {displayName}.
-              </p>
-            </ScrollReveal>
+                <div className="max-w-7xl mx-auto">
+                  <ScrollReveal className="text-center max-w-2xl mx-auto mb-14" duration={600}>
+                    <Badge
+                      variant="outline"
+                      className={cn(
+                        "border text-xs font-bold px-3 py-1 mb-3 transition-colors duration-200",
+                        isDark
+                          ? "bg-[var(--theme-primary)]/20 hover:bg-[var(--theme-primary)]/30 text-[var(--theme-primary-light)] border-[var(--theme-primary)]/30"
+                          : "bg-[var(--theme-primary)]/15 hover:bg-[var(--theme-primary)]/25 text-[var(--theme-primary)] border-[var(--theme-primary)]/25"
+                      )}
+                    >
+                      {(typeof c.doctorsBadge === "string" && c.doctorsBadge) || "Medical Faculty"}
+                    </Badge>
+                    <h2 className={cn("text-3xl sm:text-4xl font-black tracking-tight", isDark ? "text-white" : "text-slate-900")}>
+                      {(typeof c.doctorsTitle === "string" && c.doctorsTitle) || "Specialist Doctors"}
+                    </h2>
+                    <div className="flex items-center justify-center gap-3 my-4">
+                      <span className="w-16 h-[2px]" style={{ backgroundColor: theme.primary, opacity: 0.35 }} />
+                      <Activity className="h-6 w-6 text-[var(--theme-primary)]" />
+                      <span className="w-16 h-[2px]" style={{ backgroundColor: theme.primary, opacity: 0.35 }} />
+                    </div>
+                    <p className={cn("text-sm leading-relaxed", isDark ? "text-slate-400" : "text-slate-600")}>
+                      {(typeof c.doctorsSubtitle === "string" && c.doctorsSubtitle) ||
+                        `Consult directly with affiliated department specialists and experienced clinical practitioners at ${displayName}.`}
+                    </p>
+                  </ScrollReveal>
 
             <div className="flex flex-wrap justify-center gap-8">
               {data.doctorDirectory.map((doc, idx) => {
@@ -1368,78 +1511,84 @@ export function HospitalClassicTheme({ data }: HospitalClassicThemeProps) {
             </div>
           </div>
         </section>
-      )}
+            ) : null;
 
-      {/* 5. Facility & Gallery Section */}
-      {data.galleryPhotos && data.galleryPhotos.length > 0 && (
-        <section
-          id="facility"
-          className={cn(facilitiesSectionProps.className)}
-          style={facilitiesSectionProps.style}
-        >
-          <ScrollReveal className="max-w-7xl mx-auto" duration={650}>
-            <span id="facilities" className="sr-only" />
-            <span id="clinic" className="sr-only" />
-            <span id="gallery" className="sr-only" />
-            <div className="text-center max-w-2xl mx-auto mb-10">
-              <Badge
-                variant="outline"
-                className={cn(
-                  "border text-xs font-bold px-3 py-1 mb-3 transition-colors duration-200",
-                  isDark
-                    ? "bg-[var(--theme-primary)]/20 hover:bg-[var(--theme-primary)]/30 text-[var(--theme-primary-light)] border-[var(--theme-primary)]/30"
-                    : "bg-[var(--theme-primary)]/15 hover:bg-[var(--theme-primary)]/25 text-[var(--theme-primary)] border-[var(--theme-primary)]/25"
-                )}
+          case "facility":
+            return (data.galleryPhotos && data.galleryPhotos.length > 0) ? (
+              <section
+                key="facility"
+                id="facility"
+                className={cn(sectionProps.className)}
+                style={sectionProps.style}
               >
-                Facility Overview
-              </Badge>
-              <h2 className={cn("text-3xl sm:text-4xl font-black tracking-tight", isDark ? "text-white" : "text-slate-900")}>
-                Facility & Gallery
-              </h2>
-              <div className="flex items-center justify-center gap-3 my-3">
-                <span className="w-12 h-[2px] bg-[var(--theme-primary)]/40" />
-                <Activity className="h-5 w-5 text-[var(--theme-primary)]" />
-                <span className="w-12 h-[2px] bg-[var(--theme-primary)]/40" />
-              </div>
-              <p className={cn("text-xs sm:text-sm", isDark ? "text-slate-300" : "text-slate-600")}>
-                {(typeof c.facilitiesSubtitle === "string" && c.facilitiesSubtitle) || (typeof c.clinicDescription === "string" && c.clinicDescription) || (isDoctor ? "Sanitized consultation chambers and comfortable patient waiting area." : "Sanitized OPD chambers, treatment rooms, and diagnostic suites.")}
-              </p>
-            </div>
-            <div
-              className={cn(
-                "p-4 rounded-3xl border shadow-sm"
-              )}
-              style={{
-                backgroundColor: isDark ? theme.cardBgDark : "#ffffff",
-                borderColor: isDark ? theme.cardBorderDark : theme.cardBorderLight,
-              }}
-            >
-              <GalleryLightbox photos={data.galleryPhotos} />
-            </div>
-          </ScrollReveal>
-        </section>
-      )}
+                <ScrollReveal className="max-w-7xl mx-auto" duration={650}>
+                  <span id="facilities" className="sr-only" />
+                  <span id="clinic" className="sr-only" />
+                  <span id="gallery" className="sr-only" />
+                  <div className="text-center max-w-2xl mx-auto mb-10">
+                    <Badge
+                      variant="outline"
+                      className={cn(
+                        "border text-xs font-bold px-3 py-1 mb-3 transition-colors duration-200",
+                        isDark
+                          ? "bg-[var(--theme-primary)]/20 hover:bg-[var(--theme-primary)]/30 text-[var(--theme-primary-light)] border-[var(--theme-primary)]/30"
+                          : "bg-[var(--theme-primary)]/15 hover:bg-[var(--theme-primary)]/25 text-[var(--theme-primary)] border-[var(--theme-primary)]/25"
+                      )}
+                    >
+                      {(typeof c.facilitiesBadge === "string" && c.facilitiesBadge) || "Facility Overview"}
+                    </Badge>
+                    <h2 className={cn("text-3xl sm:text-4xl font-black tracking-tight", isDark ? "text-white" : "text-slate-900")}>
+                      {(typeof c.facilitiesTitle === "string" && c.facilitiesTitle) || "Facility & Gallery"}
+                    </h2>
+                    <div className="flex items-center justify-center gap-3 my-3">
+                      <span className="w-12 h-[2px] bg-[var(--theme-primary)]/40" />
+                      <Activity className="h-5 w-5 text-[var(--theme-primary)]" />
+                      <span className="w-12 h-[2px] bg-[var(--theme-primary)]/40" />
+                    </div>
+                    <p className={cn("text-xs sm:text-sm", isDark ? "text-slate-300" : "text-slate-600")}>
+                      {(typeof c.facilitiesSubtitle === "string" && c.facilitiesSubtitle) || (typeof c.clinicDescription === "string" && c.clinicDescription) || (isDoctor ? "Sanitized consultation chambers and comfortable patient waiting area." : "Sanitized OPD chambers, treatment rooms, and diagnostic suites.")}
+                    </p>
+                  </div>
+                  <div
+                    className={cn(
+                      "p-4 rounded-3xl border shadow-sm"
+                    )}
+                    style={{
+                      backgroundColor: isDark ? theme.cardBgDark : "#ffffff",
+                      borderColor: isDark ? theme.cardBorderDark : theme.cardBorderLight,
+                    }}
+                  >
+                    <GalleryLightbox photos={data.galleryPhotos} />
+                  </div>
+                </ScrollReveal>
+              </section>
+            ) : null;
 
-      {/* Testimonials Section */}
-      {effectiveTestimonials.length > 0 && (
-        <ScrollReveal duration={650}>
-          <TestimonialsSection
-            testimonials={effectiveTestimonials}
-            isDoctor={isDoctor}
-            practiceName={displayName}
-            specialization={data.specialization}
-            isGradient={isReviewsGradient}
-            selectedTheme={data.selectedTheme}
-          />
-        </ScrollReveal>
-      )}
+          case "reviews":
+            return effectiveTestimonials.length > 0 ? (
+              <ScrollReveal key="reviews" duration={650}>
+                <TestimonialsSection
+                  testimonials={effectiveTestimonials}
+                  isDoctor={isDoctor}
+                  practiceName={displayName}
+                  specialization={data.specialization}
+                  isGradient={isGradient}
+                  selectedTheme={data.selectedTheme}
+                  badgeText={typeof c.reviewsBadge === "string" ? c.reviewsBadge : undefined}
+                  title={typeof c.reviewsTitle === "string" ? c.reviewsTitle : undefined}
+                  subtitle={typeof c.reviewsSubtitle === "string" ? c.reviewsSubtitle : undefined}
+                />
+              </ScrollReveal>
+            ) : null;
 
-      {/* 7. Timings & Availability Section (Task 6 & Task 7: Equal dimensions, clean layout) */}
-      <section
-        id="timings"
-        className={cn(scheduleSectionProps.className)}
-        style={scheduleSectionProps.style}
-      >
+          case "timings":
+            return (
+              <section
+                key="timings"
+                id="timings"
+                className={cn(sectionProps.className)}
+                style={sectionProps.style}
+              >
         <div className="max-w-7xl mx-auto">
           <span id="schedule" className="sr-only" />
           <span id="availability" className="sr-only" />
@@ -1596,6 +1745,8 @@ export function HospitalClassicTheme({ data }: HospitalClassicThemeProps) {
                     consultationHours={data.consultationHours || data.workingHours}
                     weeklyOff={data.weeklyOff}
                     selectedTheme={data.selectedTheme}
+                    doctorDirectory={data.doctorDirectory}
+                    websiteType={data.websiteType}
                   >
                     <Button className="bg-[var(--theme-primary)] hover:bg-[var(--theme-primary-hover)] text-white font-bold rounded-full px-5 py-2 text-xs shadow-md">
                       Book Slot
@@ -1607,58 +1758,76 @@ export function HospitalClassicTheme({ data }: HospitalClassicThemeProps) {
           </div>
         </div>
       </section>
+            );
 
-      {/* 12. FAQ Section */}
-      {faqsList.length > 0 && (
-        <section
-          id="faqs"
-          className={cn(faqsSectionProps.className)}
-          style={faqsSectionProps.style}
-        >
-          <ScrollReveal className="max-w-4xl mx-auto" duration={650}>
-            <div
-              className={cn(
-                "p-6 sm:p-10 md:p-12 rounded-3xl border shadow-xl transition-all duration-200"
-              )}
-              style={{
-                backgroundColor: isDark
-                  ? theme.cardBgDark
-                  : (isFaqsGradient ? "#ffffff" : theme.sectionAltBgLight),
-                borderColor: isDark ? theme.cardBorderDark : theme.cardBorderLight,
-              }}
-            >
-              <div className="text-center space-y-2.5 mb-8 sm:mb-10">
-                <Badge
-                  variant="outline"
-                  className={cn(
-                    "text-xs font-bold px-3 py-1 mb-1 border shadow-2xs transition-colors duration-200",
-                    isDark
-                      ? "bg-[var(--theme-primary)]/20 hover:bg-[var(--theme-primary)]/30 text-[var(--theme-primary-light)] border-[var(--theme-primary)]/30"
-                      : "bg-[var(--theme-primary)]/15 hover:bg-[var(--theme-primary)]/25 text-[var(--theme-primary)] border-[var(--theme-primary)]/25"
-                  )}
-                >
-                  {(typeof c.faqsBadge === "string" && c.faqsBadge) || "Patient FAQs"}
-                </Badge>
-                <h2 className={cn("text-2xl sm:text-3xl font-black tracking-tight", isDark ? "text-white" : "text-slate-900")}>
-                  {(typeof c.faqsTitle === "string" && c.faqsTitle) || "Frequently Asked Questions"}
-                </h2>
-                <div className="flex items-center justify-center gap-3 my-2.5">
-                  <span className="w-10 h-[2px] bg-[var(--theme-primary)]/40" />
-                  <HelpCircle className="h-4 w-4 text-[var(--theme-primary)]" />
-                  <span className="w-10 h-[2px] bg-[var(--theme-primary)]/40" />
-                </div>
-                <p className={cn("text-xs sm:text-sm max-w-xl mx-auto", isDark ? "text-slate-400" : "text-slate-600")}>
-                  {(typeof c.faqsSubtitle === "string" && c.faqsSubtitle) || "Essential clinical information for your upcoming visit."}
-                </p>
-              </div>
+          case "faqs":
+            return faqsList.length > 0 ? (
+              <section
+                key="faqs"
+                id="faqs"
+                className={cn(sectionProps.className)}
+                style={sectionProps.style}
+              >
+                <ScrollReveal className="max-w-4xl mx-auto" duration={650}>
+                  <div
+                    className={cn(
+                      "p-6 sm:p-10 md:p-12 rounded-3xl border shadow-xl transition-all duration-200"
+                    )}
+                    style={{
+                      backgroundColor: isDark
+                        ? theme.cardBgDark
+                        : (isGradient ? "#ffffff" : theme.sectionAltBgLight),
+                      borderColor: isDark ? theme.cardBorderDark : theme.cardBorderLight,
+                    }}
+                  >
+                    <div className="text-center space-y-2.5 mb-8 sm:mb-10">
+                      <Badge
+                        variant="outline"
+                        className={cn(
+                          "text-xs font-bold px-3 py-1 mb-1 border shadow-2xs transition-colors duration-200",
+                          isDark
+                            ? "bg-[var(--theme-primary)]/20 hover:bg-[var(--theme-primary)]/30 text-[var(--theme-primary-light)] border-[var(--theme-primary)]/30"
+                            : "bg-[var(--theme-primary)]/15 hover:bg-[var(--theme-primary)]/25 text-[var(--theme-primary)] border-[var(--theme-primary)]/25"
+                        )}
+                      >
+                        {(typeof c.faqsBadge === "string" && c.faqsBadge) || "Patient FAQs"}
+                      </Badge>
+                      <h2 className={cn("text-2xl sm:text-3xl font-black tracking-tight", isDark ? "text-white" : "text-slate-900")}>
+                        {(typeof c.faqsTitle === "string" && c.faqsTitle) || "Frequently Asked Questions"}
+                      </h2>
+                      <div className="flex items-center justify-center gap-3 my-2.5">
+                        <span className="w-10 h-[2px] bg-[var(--theme-primary)]/40" />
+                        <HelpCircle className="h-4 w-4 text-[var(--theme-primary)]" />
+                        <span className="w-10 h-[2px] bg-[var(--theme-primary)]/40" />
+                      </div>
+                      <p className={cn("text-xs sm:text-sm max-w-xl mx-auto", isDark ? "text-slate-400" : "text-slate-600")}>
+                        {(typeof c.faqsSubtitle === "string" && c.faqsSubtitle) || "Essential clinical information for your upcoming visit."}
+                      </p>
+                    </div>
 
-              <div className="pt-1">
-                <FaqAccordion faqs={faqsList} />
-              </div>
-            </div>
-          </ScrollReveal>
-        </section>
-      )}
+                    <div className="pt-1">
+                      <FaqAccordion faqs={faqsList} />
+                    </div>
+                  </div>
+                </ScrollReveal>
+              </section>
+            ) : null;
+
+          case "custom":
+            return customSection ? (
+              <CustomSectionRenderer
+                key="custom"
+                config={customSection}
+                sectionClassName={sectionProps.className}
+                sectionStyle={sectionProps.style}
+                theme={theme}
+              />
+            ) : null;
+
+          default:
+            return null;
+        }
+      })}
 
       {/* 9. Minimal Healthcare Footer with Task 2 (Top 2 corners curved) */}
       <footer
@@ -1689,22 +1858,20 @@ export function HospitalClassicTheme({ data }: HospitalClassicThemeProps) {
                   <span>About</span>
                 </a>
               </li>
-              {isDoctor ? (
-                <li>
-                  <a href="#treatments" className="flex items-center gap-2 hover:text-white transition-colors group">
-                    <Activity className="h-3.5 w-3.5 text-[var(--theme-primary)] shrink-0 group-hover:scale-110 transition-transform" />
-                    <span>Treatments</span>
-                  </a>
-                </li>
-              ) : (
-                <li>
-                  <a href="#specializations" className="flex items-center gap-2 hover:text-white transition-colors group">
-                    <Activity className="h-3.5 w-3.5 text-[var(--theme-primary)] shrink-0 group-hover:scale-110 transition-transform" />
-                    <span>Specializations</span>
-                  </a>
-                </li>
-              )}
-              {!isDoctor && data.doctorDirectory && data.doctorDirectory.length > 0 && (
+              {navItems
+                .filter((item) => item.id !== "home" && item.id !== "about" && item.id !== "contact")
+                .map((item) => {
+                  const Icon = item.icon;
+                  return (
+                    <li key={item.id}>
+                      <a href={`#${item.id}`} className="flex items-center gap-2 hover:text-white transition-colors group">
+                        <Icon className="h-3.5 w-3.5 text-[var(--theme-primary)] shrink-0 group-hover:scale-110 transition-transform" />
+                        <span>{item.label}</span>
+                      </a>
+                    </li>
+                  );
+                })}
+              {hasDoctorsSection && (
                 <li>
                   <a href="#doctors" className="flex items-center gap-2 hover:text-white transition-colors group">
                     <Stethoscope className="h-3.5 w-3.5 text-[var(--theme-primary)] shrink-0 group-hover:scale-110 transition-transform" />
@@ -1712,24 +1879,6 @@ export function HospitalClassicTheme({ data }: HospitalClassicThemeProps) {
                   </a>
                 </li>
               )}
-              <li>
-                <a href="#facility" className="flex items-center gap-2 hover:text-white transition-colors group">
-                  <Building2 className="h-3.5 w-3.5 text-[var(--theme-primary)] shrink-0 group-hover:scale-110 transition-transform" />
-                  <span>Facility</span>
-                </a>
-              </li>
-              <li>
-                <a href="#reviews" className="flex items-center gap-2 hover:text-white transition-colors group">
-                  <Star className="h-3.5 w-3.5 text-[var(--theme-primary)] shrink-0 group-hover:scale-110 transition-transform" />
-                  <span>Reviews</span>
-                </a>
-              </li>
-              <li>
-                <a href="#timings" className="flex items-center gap-2 hover:text-white transition-colors group">
-                  <Clock className="h-3.5 w-3.5 text-[var(--theme-primary)] shrink-0 group-hover:scale-110 transition-transform" />
-                  <span>Timings</span>
-                </a>
-              </li>
               <li>
                 <a href="#contact" className="flex items-center gap-2 hover:text-white transition-colors group">
                   <Phone className="h-3.5 w-3.5 text-[var(--theme-primary)] shrink-0 group-hover:scale-110 transition-transform" />
@@ -1813,6 +1962,14 @@ export function HospitalClassicTheme({ data }: HospitalClassicThemeProps) {
           </p>
         </div>
       </footer>
+
+      {/* Mobile & Tablet Fixed Bottom Navigation Bar (WhatsApp / Material 3 style) */}
+      <MobileBottomNav
+        websiteType={data.websiteType}
+        selectedTheme={data.selectedTheme}
+        themePalette={theme}
+        hiddenSections={hiddenSections}
+      />
     </div>
   );
 }

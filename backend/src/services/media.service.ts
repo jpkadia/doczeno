@@ -11,27 +11,27 @@ export type MediaCategory = "DOCTOR_PHOTO" | "CLINIC_LOGO" | "LOGO" | "GALLERY" 
 
 export const CATEGORY_LIMITS: Record<MediaCategory, { maxSizeBytes: number; allowedMimes: string[] }> = {
   DOCTOR_PHOTO: {
-    maxSizeBytes: 3 * 1024 * 1024, // 3 MB
-    allowedMimes: ["image/jpeg", "image/png", "image/webp"],
+    maxSizeBytes: 10 * 1024 * 1024, // 10 MB
+    allowedMimes: ["image/jpeg", "image/png", "image/webp", "image/heic", "image/heif"],
   },
   CLINIC_LOGO: {
-    maxSizeBytes: 2 * 1024 * 1024, // 2 MB
-    allowedMimes: ["image/jpeg", "image/png", "image/webp"],
+    maxSizeBytes: 10 * 1024 * 1024, // 10 MB
+    allowedMimes: ["image/jpeg", "image/png", "image/webp", "image/heic", "image/heif"],
   },
   LOGO: {
-    maxSizeBytes: 2 * 1024 * 1024, // 2 MB
-    allowedMimes: ["image/jpeg", "image/png", "image/webp"],
+    maxSizeBytes: 10 * 1024 * 1024, // 10 MB
+    allowedMimes: ["image/jpeg", "image/png", "image/webp", "image/heic", "image/heif"],
   },
   BUILDING_PHOTO: {
-    maxSizeBytes: 5 * 1024 * 1024, // 5 MB
-    allowedMimes: ["image/jpeg", "image/png", "image/webp"],
+    maxSizeBytes: 10 * 1024 * 1024, // 10 MB
+    allowedMimes: ["image/jpeg", "image/png", "image/webp", "image/heic", "image/heif"],
   },
   GALLERY: {
-    maxSizeBytes: 3 * 1024 * 1024, // 3 MB
-    allowedMimes: ["image/jpeg", "image/png", "image/webp"],
+    maxSizeBytes: 10 * 1024 * 1024, // 10 MB
+    allowedMimes: ["image/jpeg", "image/png", "image/webp", "image/heic", "image/heif"],
   },
   DOCUMENT: {
-    maxSizeBytes: 5 * 1024 * 1024, // 5 MB
+    maxSizeBytes: 10 * 1024 * 1024, // 10 MB
     allowedMimes: ["application/pdf", "image/jpeg", "image/png"],
   },
 };
@@ -71,6 +71,15 @@ export function verifyImageFileSignature(buffer: Buffer): { valid: boolean; dete
     buffer[11] === 0x50
   ) {
     return { valid: true, detectedMime: "image/webp" };
+  }
+
+  // HEIC / HEIF (iPhone): ISO Base Media File Format "ftyp" at offset 4..7 + brand at 8..11
+  const boxType = buffer.subarray(4, 8).toString("ascii");
+  if (boxType === "ftyp") {
+    const brand = buffer.subarray(8, 12).toString("ascii").toLowerCase();
+    if (["heic", "heix", "hevc", "hevx", "mif1", "msf1"].includes(brand)) {
+      return { valid: true, detectedMime: brand === "mif1" || brand === "msf1" ? "image/heif" : "image/heic" };
+    }
   }
 
   return { valid: false };

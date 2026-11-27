@@ -28,9 +28,16 @@ export class EmailService {
     const senderName = "Doczeno Healthcare Websites";
 
     const isPasswordReset = purpose.toLowerCase().includes("password");
-    const badgeText = isPasswordReset ? "Password Reset Verification" : "Healthcare Identity Verification";
+    const isEmailChange = purpose.toLowerCase().includes("email");
+    const badgeText = isPasswordReset
+      ? "Password Reset Verification"
+      : isEmailChange
+      ? "Admin Email Change Verification"
+      : "Healthcare Identity Verification";
     const bodyInstructions = isPasswordReset
       ? "We received a request to reset your administrator password. Please use the 6-digit verification code below to verify your identity and create your new password:"
+      : isEmailChange
+      ? "We received a request to update your administrator login email to this address. Please use the 6-digit verification code below to verify your new email address:"
       : `Thank you for registering with Doczeno. Please use the verification code below to verify your email address and launch your official clinical website for <strong>${purpose}</strong>:`;
 
     const htmlContent = `

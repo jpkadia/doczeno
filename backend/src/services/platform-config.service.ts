@@ -1,10 +1,18 @@
-import { PlatformConfig } from "@/models/PlatformConfig";
+import { PlatformConfig, IOnboardingCategoriesConfig } from "@/models/PlatformConfig";
 
 export const FIXED_PLATFORM_DOMAIN = "doczeno.vercel.app";
+
+const DEFAULT_ONBOARDING_CATEGORIES: IOnboardingCategoriesConfig = {
+  portalEnabled: true,
+  onlyDoctor: true,
+  hospital: true,
+  hospitalDoctor: true,
+};
 
 let cachedConfig: {
   domain: string;
   name: string;
+  onboardingCategories: IOnboardingCategoriesConfig;
   timestamp: number;
 } | null = null;
 
@@ -27,6 +35,7 @@ export class PlatformConfigService {
     platformDomain: string;
     platformName: string;
     supportEmail: string;
+    onboardingCategories: IOnboardingCategoriesConfig;
   }> {
     const now = Date.now();
     if (cachedConfig && now - cachedConfig.timestamp < CACHE_TTL_MS) {
@@ -34,6 +43,7 @@ export class PlatformConfigService {
         platformDomain: FIXED_PLATFORM_DOMAIN,
         platformName: cachedConfig.name,
         supportEmail: "support@" + FIXED_PLATFORM_DOMAIN,
+        onboardingCategories: cachedConfig.onboardingCategories,
       };
     }
 
@@ -44,15 +54,24 @@ export class PlatformConfigService {
           platformDomain: FIXED_PLATFORM_DOMAIN,
           platformName: "Doczeno",
           supportEmail: "support@" + FIXED_PLATFORM_DOMAIN,
+          onboardingCategories: { ...DEFAULT_ONBOARDING_CATEGORIES },
         });
       } else if (config.platformDomain !== FIXED_PLATFORM_DOMAIN) {
         config.platformDomain = FIXED_PLATFORM_DOMAIN;
         await config.save();
       }
 
+      const categories: IOnboardingCategoriesConfig = {
+        portalEnabled: config.onboardingCategories?.portalEnabled !== false,
+        onlyDoctor: config.onboardingCategories?.onlyDoctor !== false,
+        hospital: config.onboardingCategories?.hospital !== false,
+        hospitalDoctor: config.onboardingCategories?.hospitalDoctor !== false,
+      };
+
       cachedConfig = {
         domain: FIXED_PLATFORM_DOMAIN,
         name: config.platformName || "Doczeno",
+        onboardingCategories: categories,
         timestamp: now,
       };
 
@@ -60,6 +79,7 @@ export class PlatformConfigService {
         platformDomain: FIXED_PLATFORM_DOMAIN,
         platformName: config.platformName,
         supportEmail: config.supportEmail || "support@" + FIXED_PLATFORM_DOMAIN,
+        onboardingCategories: categories,
       };
     } catch {
       // Fallback if DB is unavailable during startup
@@ -67,8 +87,56 @@ export class PlatformConfigService {
         platformDomain: FIXED_PLATFORM_DOMAIN,
         platformName: "Doczeno",
         supportEmail: "support@" + FIXED_PLATFORM_DOMAIN,
+        onboardingCategories: { ...DEFAULT_ONBOARDING_CATEGORIES },
       };
     }
+  }
+
+  /**
+   * Updates onboarding category availability toggles (Only Doctor, Hospital, Hospital-Affiliated Doctor)
+   */
+  public static async updateOnboardingCategories(
+    updates: Partial<IOnboardingCategoriesConfig>,
+    actor?: { userId?: string }
+  ): Promise<IOnboardingCategoriesConfig> {
+    let config = await PlatformConfig.findOne().sort({ createdAt: -1 });
+    if (!config) {
+      config = await PlatformConfig.create({
+        platformDomain: FIXED_PLATFORM_DOMAIN,
+        platformName: "Doczeno",
+        supportEmail: "support@" + FIXED_PLATFORM_DOMAIN,
+        onboardingCategories: { ...DEFAULT_ONBOARDING_CATEGORIES },
+      });
+    }
+
+    const current: IOnboardingCategoriesConfig = {
+      portalEnabled: config.onboardingCategories?.portalEnabled !== false,
+      onlyDoctor: config.onboardingCategories?.onlyDoctor !== false,
+      hospital: config.onboardingCategories?.hospital !== false,
+      hospitalDoctor: config.onboardingCategories?.hospitalDoctor !== false,
+    };
+
+    const next: IOnboardingCategoriesConfig = {
+      portalEnabled: typeof updates.portalEnabled === "boolean" ? updates.portalEnabled : current.portalEnabled,
+      onlyDoctor: typeof updates.onlyDoctor === "boolean" ? updates.onlyDoctor : current.onlyDoctor,
+      hospital: typeof updates.hospital === "boolean" ? updates.hospital : current.hospital,
+      hospitalDoctor: typeof updates.hospitalDoctor === "boolean" ? updates.hospitalDoctor : current.hospitalDoctor,
+    };
+
+    config.onboardingCategories = next;
+    if (actor?.userId) {
+      config.updatedBy = actor.userId as any;
+    }
+    await config.save();
+
+    cachedConfig = {
+      domain: FIXED_PLATFORM_DOMAIN,
+      name: config.platformName || "Doczeno",
+      onboardingCategories: next,
+      timestamp: Date.now(),
+    };
+
+    return next;
   }
 
   /**

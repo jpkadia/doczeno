@@ -34,7 +34,7 @@ export default async function HospitalDoctorAdminLoginPage({ params }: PageProps
 
   const website = await getEffectiveHospitalDoctor(slug, doctorSlug);
 
-  if (!website) {
+  if (!website || website.isTempPreview || website.isPendingApproval) {
     notFound();
   }
 

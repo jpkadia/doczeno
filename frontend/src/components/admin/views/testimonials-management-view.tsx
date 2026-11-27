@@ -1,7 +1,7 @@
 "use client";
 
 import * as React from "react";
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
 import {
   Star,
   MessageSquareQuote,
@@ -15,7 +15,7 @@ import { Card, CardHeader, CardTitle, CardDescription, CardContent } from "@/com
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
-import { apiClient } from "@/lib/api-client";
+import { apiClient, ApiError } from "@/lib/api-client";
 import { toast } from "sonner";
 import { cn } from "@/lib/utils";
 import {
@@ -41,17 +41,28 @@ export interface TestimonialData {
 interface TestimonialsManagementViewProps {
   portalType: "ONLY_DOCTOR" | "HOSPITAL" | "HOSPITAL_DOCTOR";
   practiceName?: string;
+  doctorId?: string;
+  embedded?: boolean;
 }
+
+const PRESET_TAGS = [
+  "Verified Patient",
+  "OPD Consultation",
+  "Follow-up Care",
+  "Inpatient Care",
+];
 
 export function TestimonialsManagementView({
   portalType,
   practiceName: _practiceName,
+  doctorId,
+  embedded = false,
 }: TestimonialsManagementViewProps) {
   const [testimonials, setTestimonials] = useState<TestimonialData[]>([]);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
 
-  // Dialog state
+  // Add / Edit Dialog state
   const [isDialogOpen, setIsDialogOpen] = useState(false);
   const [editingItem, setEditingItem] = useState<TestimonialData | null>(null);
   const [formName, setFormName] = useState("");
@@ -59,10 +70,21 @@ export function TestimonialsManagementView({
   const [formTag, setFormTag] = useState("Verified Patient");
   const [formComment, setFormComment] = useState("");
 
-  const fetchTestimonials = async () => {
+  // Styled Delete Dialog state
+  const [deleteTarget, setDeleteTarget] = useState<TestimonialData | null>(null);
+  const [deleting, setDeleting] = useState(false);
+
+  const fetchTestimonials = useCallback(async () => {
     setLoading(true);
     try {
-      const res: any = await apiClient.get("/reviews");
+      const params: Record<string, string | undefined> = {};
+      if (doctorId) {
+        params.doctorId = doctorId;
+      } else if (portalType === "HOSPITAL") {
+        params.scope = "hospital";
+      }
+
+      const res: any = await apiClient.get("/reviews", { params });
       if (res?.success && Array.isArray(res.data?.reviews)) {
         setTestimonials(res.data.reviews);
       }
@@ -71,11 +93,11 @@ export function TestimonialsManagementView({
     } finally {
       setLoading(false);
     }
-  };
+  }, [doctorId, portalType]);
 
   useEffect(() => {
     fetchTestimonials();
-  }, []);
+  }, [fetchTestimonials]);
 
   const handleOpenAdd = () => {
     if (testimonials.length >= 9) {
@@ -113,11 +135,10 @@ export function TestimonialsManagementView({
     setSaving(true);
     try {
       if (editingItem) {
-        // Update existing
         const res: any = await apiClient.put(`/reviews/${editingItem.id}`, {
           patientName: formName.trim(),
           rating: formRating,
-          tag: formTag.trim(),
+          tag: formTag.trim() || "Verified Patient",
           comment: formComment.trim(),
         });
         if (res?.success) {
@@ -128,13 +149,16 @@ export function TestimonialsManagementView({
           toast.error(res?.error || "Failed to update testimonial");
         }
       } else {
-        // Create new
-        const res: any = await apiClient.post("/reviews", {
+        const payload: Record<string, unknown> = {
           patientName: formName.trim(),
           rating: formRating,
-          tag: formTag.trim(),
+          tag: formTag.trim() || "Verified Patient",
           comment: formComment.trim(),
-        });
+        };
+        if (doctorId) {
+          payload.doctorId = doctorId;
+        }
+        const res: any = await apiClient.post("/reviews", payload);
         if (res?.success) {
           toast.success("Testimonial added successfully");
           setIsDialogOpen(false);
@@ -143,172 +167,230 @@ export function TestimonialsManagementView({
           toast.error(res?.error || "Failed to add testimonial");
         }
       }
-    } catch (err: any) {
-      toast.error(err?.response?.data?.error || "Could not save testimonial");
+    } catch (err: unknown) {
+      const msg = err instanceof ApiError ? err.message : "Could not save testimonial";
+      toast.error(msg);
     } finally {
       setSaving(false);
     }
   };
 
-  const handleDelete = async (id: string) => {
+  const handleConfirmDelete = async () => {
+    if (!deleteTarget) return;
     if (testimonials.length <= 3) {
       toast.error("Minimum 3 patient reviews are required on your website. You cannot delete below 3 reviews.");
+      setDeleteTarget(null);
       return;
     }
-    if (!window.confirm("Are you sure you want to delete this testimonial?")) return;
+    setDeleting(true);
     try {
-      const res: any = await apiClient.delete(`/reviews/${id}`);
+      const res: any = await apiClient.delete(`/reviews/${deleteTarget.id}`);
       if (res?.success) {
         toast.success("Testimonial deleted");
-        setTestimonials((prev) => prev.filter((t) => t.id !== id));
+        setTestimonials((prev) => prev.filter((t) => t.id !== deleteTarget.id));
+        setDeleteTarget(null);
       } else {
         toast.error(res?.error || "Failed to delete testimonial");
       }
-    } catch (err: any) {
-      toast.error(err?.response?.data?.error || "Could not delete testimonial");
+    } catch (err: unknown) {
+      const msg = err instanceof ApiError ? err.message : "Could not delete testimonial";
+      toast.error(msg);
+    } finally {
+      setDeleting(false);
     }
   };
 
-  return (
-    <div className="space-y-6">
-      {/* Header Card */}
-      <Card className="border-slate-200 shadow-xs">
-        <CardHeader className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-4">
-          <div className="space-y-1">
-            <CardTitle className="text-lg font-bold flex items-center gap-2 text-slate-900">
-              <MessageSquareQuote className="h-5 w-5 text-indigo-600" />
-              Patient Testimonials & Reviews ({testimonials.length}/9)
-            </CardTitle>
-            <CardDescription className="text-xs text-slate-500">
-              Display authentic patient stories on your website slider. Maintain between 3 and 9 reviews (default 3).
-            </CardDescription>
-          </div>
-          <div className="flex items-center gap-2.5 shrink-0">
-            <Button
-              size="sm"
-              onClick={handleOpenAdd}
-              disabled={testimonials.length >= 9}
-              className="bg-slate-900 hover:bg-slate-800 text-white text-xs font-semibold disabled:opacity-50"
+  const innerContent = (
+    <div className="space-y-4">
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+        <div className="space-y-0.5">
+          <div className="flex items-center gap-2 flex-wrap">
+            <span className="text-xs font-bold text-slate-800 dark:text-slate-100">
+              Patient Reviews ({testimonials.length}/9)
+            </span>
+            <Badge
+              variant="outline"
+              className={cn(
+                "text-[10px] font-semibold",
+                testimonials.length < 3
+                  ? "bg-amber-50 text-amber-700 border-amber-200"
+                  : "bg-emerald-50 text-emerald-700 border-emerald-200"
+              )}
             >
-              <Plus className="h-3.5 w-3.5 mr-1.5" />
-              Add Testimonial ({testimonials.length}/9)
-            </Button>
+              Min 3 • Max 9 Required
+            </Badge>
           </div>
-        </CardHeader>
+          <p className="text-[11px] text-slate-500">
+            Changes sync immediately to your live patient review slider (4 reviews generated by AI initially).
+          </p>
+        </div>
 
-        <CardContent>
-          {loading ? (
-            <div className="py-12 flex flex-col items-center justify-center text-slate-400 gap-2">
-              <Loader2 className="h-6 w-6 animate-spin text-slate-400" />
-              <span className="text-xs">Loading testimonials...</span>
-            </div>
-          ) : testimonials.length === 0 ? (
-            <div className="py-12 text-center space-y-3 bg-slate-50/70 border border-dashed border-slate-200 rounded-xl">
-              <Quote className="h-8 w-8 text-slate-300 mx-auto" />
-              <div className="space-y-1">
-                <p className="text-sm font-semibold text-slate-800">No testimonials yet</p>
-                <p className="text-xs text-slate-500 max-w-sm mx-auto">
-                  Add authentic patient reviews to showcase patient experiences on your live website.
-                </p>
-              </div>
-              <Button
-                size="sm"
-                onClick={handleOpenAdd}
-                className="text-xs bg-slate-900 hover:bg-slate-800 text-white"
-              >
-                <Plus className="h-3.5 w-3.5 mr-1.5" />
-                Add First Testimonial
-              </Button>
-            </div>
-          ) : (
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              {testimonials.map((t) => (
-                <div
-                  key={t.id}
-                  className="p-4 sm:p-5 rounded-xl border border-slate-200 bg-white hover:border-slate-300 transition-colors flex flex-col justify-between space-y-3 shadow-xs"
-                >
-                  <div className="space-y-2.5">
-                    <div className="flex items-center justify-between gap-2">
-                      {/* Rating Stars */}
-                      <div className="flex items-center gap-0.5 text-amber-500">
-                        {Array.from({ length: 5 }).map((_, i) => (
-                          <Star
-                            key={i}
-                            className={`h-4 w-4 ${
-                              i < t.rating
-                                ? "fill-amber-400 text-amber-400"
-                                : "text-slate-200"
-                            }`}
-                          />
-                        ))}
-                        <span className="text-xs font-semibold text-slate-700 ml-1.5">
-                          {t.rating}.0
-                        </span>
-                      </div>
+        <Button
+          type="button"
+          size="sm"
+          onClick={handleOpenAdd}
+          disabled={testimonials.length >= 9}
+          className="bg-[#1a76d1] hover:bg-[#1560aa] text-white text-xs font-semibold h-8 px-3 rounded-lg shadow-xs disabled:opacity-50 shrink-0 self-start sm:self-auto"
+        >
+          <Plus className="h-3.5 w-3.5 mr-1.5" />
+          Add Testimonial ({testimonials.length}/9)
+        </Button>
+      </div>
 
-                      {/* Tag Badge */}
-                      {t.tag && (
-                        <Badge variant="outline" className="text-[10px] bg-slate-50 font-medium">
-                          {t.tag}
-                        </Badge>
-                      )}
-                    </div>
-
-                    {/* Testimonial Text */}
-                    <p className="text-xs sm:text-sm text-slate-700 leading-relaxed italic">
-                      "{t.comment}"
-                    </p>
+      {loading ? (
+        <div className="py-10 flex flex-col items-center justify-center text-slate-400 gap-2 border border-slate-100 rounded-xl bg-slate-50/40">
+          <Loader2 className="h-5 w-5 animate-spin text-[#1a76d1]" />
+          <span className="text-xs">Loading patient testimonials...</span>
+        </div>
+      ) : testimonials.length === 0 ? (
+        <div className="py-10 text-center space-y-3 bg-slate-50/70 border border-dashed border-slate-200 rounded-xl px-4">
+          <Quote className="h-7 w-7 text-slate-300 mx-auto" />
+          <div className="space-y-1">
+            <p className="text-sm font-semibold text-slate-800">No testimonials added yet</p>
+            <p className="text-xs text-slate-500 max-w-sm mx-auto">
+              Add patient feedback cards to build trust on your website slider.
+            </p>
+          </div>
+          <Button
+            type="button"
+            size="sm"
+            onClick={handleOpenAdd}
+            className="text-xs bg-[#1a76d1] hover:bg-[#1560aa] text-white"
+          >
+            <Plus className="h-3.5 w-3.5 mr-1.5" />
+            Add First Testimonial
+          </Button>
+        </div>
+      ) : (
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-3.5">
+          {testimonials.map((t, idx) => (
+            <div
+              key={t.id}
+              className="p-4 rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 hover:border-blue-300 transition-colors flex flex-col justify-between space-y-3 shadow-2xs"
+            >
+              <div className="space-y-2.5">
+                <div className="flex items-center justify-between gap-2">
+                  <div className="flex items-center gap-1 text-amber-500">
+                    {Array.from({ length: 5 }).map((_, i) => (
+                      <Star
+                        key={i}
+                        className={`h-3.5 w-3.5 ${
+                          i < t.rating
+                            ? "fill-amber-400 text-amber-400"
+                            : "text-slate-200"
+                        }`}
+                      />
+                    ))}
+                    <span className="text-[11px] font-bold text-slate-700 dark:text-slate-300 ml-1">
+                      {t.rating}.0
+                    </span>
                   </div>
 
-                  {/* Card Footer: Patient Name & Actions */}
-                  <div className="pt-3 border-t border-slate-100 flex items-center justify-between gap-2">
-                    <div className="flex items-center gap-2">
-                      <div className="h-7 w-7 rounded-full bg-indigo-100 text-indigo-800 font-bold text-xs flex items-center justify-center shrink-0">
-                        {t.patientName?.charAt(0) || "P"}
-                      </div>
-                      <span className="text-xs font-semibold text-slate-900">
-                        {t.patientName}
-                      </span>
-                    </div>
-
-                    <div className="flex items-center gap-1">
-                      <Button
-                        size="sm"
-                        variant="ghost"
-                        onClick={() => handleOpenEdit(t)}
-                        className="h-7 px-2 text-xs text-slate-600 hover:text-slate-900"
-                        title="Edit testimonial"
-                      >
-                        <Edit2 className="h-3.5 w-3.5 mr-1" />
-                        Edit
-                      </Button>
-                      <Button
-                        size="sm"
-                        variant="ghost"
-                        onClick={() => handleDelete(t.id)}
-                        disabled={testimonials.length <= 3}
-                        className={cn(
-                          "h-7 px-2 text-xs",
-                          testimonials.length <= 3
-                            ? "text-slate-300 dark:text-slate-600 cursor-not-allowed"
-                            : "text-rose-600 hover:text-rose-700 hover:bg-rose-50"
-                        )}
-                        title={testimonials.length <= 3 ? "Minimum 3 reviews required" : "Delete testimonial"}
-                      >
-                        <Trash2 className="h-3.5 w-3.5" />
-                      </Button>
-                    </div>
+                  <div className="flex items-center gap-1.5">
+                    {t.tag && (
+                      <Badge variant="outline" className="text-[10px] bg-slate-50 dark:bg-slate-800 font-medium max-w-[130px] truncate">
+                        {t.tag}
+                      </Badge>
+                    )}
+                    <span className="text-[10px] font-mono text-slate-400">#{idx + 1}</span>
                   </div>
                 </div>
-              ))}
+
+                <p className="text-xs text-slate-700 dark:text-slate-300 leading-relaxed italic line-clamp-4">
+                  &ldquo;{t.comment}&rdquo;
+                </p>
+              </div>
+
+              <div className="pt-2.5 border-t border-slate-100 dark:border-slate-800 flex items-center justify-between gap-2">
+                <div className="flex items-center gap-2 min-w-0">
+                  <div className="h-7 w-7 rounded-full bg-blue-50 text-[#1a76d1] font-bold text-xs flex items-center justify-center shrink-0 border border-blue-100">
+                    {t.patientName?.charAt(0)?.toUpperCase() || "P"}
+                  </div>
+                  <span className="text-xs font-semibold text-slate-900 dark:text-slate-100 truncate">
+                    {t.patientName}
+                  </span>
+                </div>
+
+                <div className="flex items-center gap-1 shrink-0">
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="ghost"
+                    onClick={() => handleOpenEdit(t)}
+                    className="h-7 px-2 text-xs text-slate-600 hover:text-[#1a76d1] hover:bg-blue-50"
+                    title="Edit testimonial"
+                  >
+                    <Edit2 className="h-3.5 w-3.5 mr-1" />
+                    Edit
+                  </Button>
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="ghost"
+                    onClick={() => setDeleteTarget(t)}
+                    disabled={testimonials.length <= 3}
+                    className={cn(
+                      "h-7 w-7 p-0 text-xs",
+                      testimonials.length <= 3
+                        ? "text-slate-300 dark:text-slate-600 cursor-not-allowed"
+                        : "text-rose-600 hover:text-rose-700 hover:bg-rose-50"
+                    )}
+                    title={testimonials.length <= 3 ? "Minimum 3 reviews required" : "Delete testimonial"}
+                  >
+                    <Trash2 className="h-3.5 w-3.5" />
+                  </Button>
+                </div>
+              </div>
             </div>
+          ))}
+
+          {/* Quick-Add Grid Slot Card */}
+          {testimonials.length < 9 && (
+            <button
+              type="button"
+              onClick={handleOpenAdd}
+              className="min-h-[140px] rounded-xl border-2 border-dashed border-slate-200 dark:border-slate-700 hover:border-[#1a76d1] hover:bg-blue-50/40 transition-all flex flex-col items-center justify-center gap-2 p-4 text-center group cursor-pointer"
+            >
+              <div className="h-9 w-9 rounded-full bg-blue-50 text-[#1a76d1] flex items-center justify-center group-hover:scale-110 transition-transform">
+                <Plus className="h-4 w-4" />
+              </div>
+              <div>
+                <span className="text-xs font-semibold text-slate-800 dark:text-slate-200 block">
+                  Add Patient Review
+                </span>
+                <span className="text-[10px] text-slate-500">
+                  {9 - testimonials.length} slot{9 - testimonials.length === 1 ? "" : "s"} remaining
+                </span>
+              </div>
+            </button>
           )}
-        </CardContent>
-      </Card>
+        </div>
+      )}
+    </div>
+  );
+
+  return (
+    <div className={embedded ? "" : "space-y-6"}>
+      {embedded ? (
+        innerContent
+      ) : (
+        <Card className="border-slate-200 shadow-xs">
+          <CardHeader className="pb-3 border-b border-slate-100">
+            <CardTitle className="text-base font-bold flex items-center gap-2 text-slate-900">
+              <MessageSquareQuote className="h-5 w-5 text-[#1a76d1]" />
+              Patient Testimonials &amp; Reviews
+            </CardTitle>
+            <CardDescription className="text-xs text-slate-500">
+              Display authentic patient stories on your website slider. Maintain between 3 and 9 reviews.
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="pt-4">{innerContent}</CardContent>
+        </Card>
+      )}
 
       {/* Add / Edit Dialog */}
       <Dialog open={isDialogOpen} onOpenChange={setIsDialogOpen}>
-        <DialogContent className="sm:max-w-md">
+        <DialogContent className="sm:max-w-md bg-white">
           <DialogHeader>
             <DialogTitle className="text-base font-bold text-slate-900">
               {editingItem ? "Edit Patient Testimonial" : "Add Patient Testimonial"}
@@ -318,69 +400,96 @@ export function TestimonialsManagementView({
             </DialogDescription>
           </DialogHeader>
 
-          <form onSubmit={handleSave} className="space-y-4 py-2">
+          <form onSubmit={handleSave} className="space-y-4 py-1">
             <div className="space-y-1.5">
-              <label className="text-xs font-medium text-slate-700 block">
-                Patient Name <span className="text-rose-500">*</span>
-              </label>
+              <div className="flex items-center justify-between">
+                <label className="text-xs font-semibold text-slate-700">
+                  Patient Name <span className="text-rose-500">*</span>
+                </label>
+                <span className="text-[10px] text-slate-400">{formName.length}/60</span>
+              </div>
               <Input
+                maxLength={60}
                 value={formName}
                 onChange={(e) => setFormName(e.target.value)}
                 placeholder="e.g. Rajesh Mehta"
-                className="text-xs"
+                className="text-xs h-9"
                 required
               />
             </div>
 
-            <div className="grid grid-cols-2 gap-3">
-              <div className="space-y-1.5">
-                <label className="text-xs font-medium text-slate-700 block">
-                  Rating (Stars)
-                </label>
-                <div className="flex items-center gap-1 pt-1">
-                  {[1, 2, 3, 4, 5].map((star) => (
-                    <button
-                      key={star}
-                      type="button"
-                      onClick={() => setFormRating(star)}
-                      className="p-1 hover:scale-110 transition-transform focus:outline-none"
-                    >
-                      <Star
-                        className={`h-5 w-5 ${
-                          star <= formRating
-                            ? "fill-amber-400 text-amber-400"
-                            : "text-slate-300"
-                        }`}
-                      />
-                    </button>
-                  ))}
-                  <span className="text-xs font-bold text-slate-700 ml-1">{formRating} / 5</span>
-                </div>
-              </div>
-
-              <div className="space-y-1.5">
-                <label className="text-xs font-medium text-slate-700 block">
-                  Tag / Treatment
-                </label>
-                <Input
-                  value={formTag}
-                  onChange={(e) => setFormTag(e.target.value)}
-                  placeholder="e.g. Cardiology Patient"
-                  className="text-xs"
-                />
+            <div className="space-y-1.5">
+              <label className="text-xs font-semibold text-slate-700 block">
+                Star Rating
+              </label>
+              <div className="flex items-center gap-1 pt-0.5">
+                {[1, 2, 3, 4, 5].map((star) => (
+                  <button
+                    key={star}
+                    type="button"
+                    onClick={() => setFormRating(star)}
+                    className="p-1 hover:scale-110 transition-transform focus:outline-none"
+                  >
+                    <Star
+                      className={`h-5 w-5 ${
+                        star <= formRating
+                          ? "fill-amber-400 text-amber-400"
+                          : "text-slate-300"
+                      }`}
+                    />
+                  </button>
+                ))}
+                <span className="text-xs font-bold text-slate-700 ml-1.5">{formRating}.0 / 5.0</span>
               </div>
             </div>
 
             <div className="space-y-1.5">
-              <label className="text-xs font-medium text-slate-700 block">
-                Testimonial / Review Text <span className="text-rose-500">*</span>
-              </label>
+              <div className="flex items-center justify-between">
+                <label className="text-xs font-semibold text-slate-700">
+                  Visit Tag / Treatment
+                </label>
+                <span className="text-[10px] text-slate-400">{formTag.length}/35</span>
+              </div>
+              <Input
+                maxLength={35}
+                value={formTag}
+                onChange={(e) => setFormTag(e.target.value)}
+                placeholder="e.g. Verified Patient"
+                className="text-xs h-9"
+              />
+              <div className="flex flex-wrap gap-1.5 pt-1">
+                {PRESET_TAGS.map((tag) => (
+                  <button
+                    key={tag}
+                    type="button"
+                    onClick={() => setFormTag(tag)}
+                    className={cn(
+                      "px-2 py-0.5 rounded-full text-[10px] font-medium border transition-colors",
+                      formTag === tag
+                        ? "bg-blue-50 text-[#1a76d1] border-blue-200"
+                        : "bg-slate-50 text-slate-600 border-slate-200 hover:bg-slate-100"
+                    )}
+                  >
+                    {tag}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div className="space-y-1.5">
+              <div className="flex items-center justify-between">
+                <label className="text-xs font-semibold text-slate-700">
+                  Testimonial / Review Text <span className="text-rose-500">*</span>
+                </label>
+                <span className="text-[10px] text-slate-400">{formComment.length}/350</span>
+              </div>
               <textarea
+                maxLength={350}
                 rows={4}
                 value={formComment}
                 onChange={(e: React.ChangeEvent<HTMLTextAreaElement>) => setFormComment(e.target.value)}
                 placeholder="Write the patient's feedback or consultation experience..."
-                className="flex min-h-[90px] w-full rounded-md border border-slate-200 bg-white px-3 py-2 text-xs shadow-xs placeholder:text-slate-400 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-slate-900 resize-none"
+                className="flex min-h-[90px] w-full rounded-md border border-slate-200 bg-white px-3 py-2 text-xs shadow-xs placeholder:text-slate-400 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#1a76d1]/20 focus-visible:border-[#1a76d1] resize-none"
                 required
               />
             </div>
@@ -400,7 +509,7 @@ export function TestimonialsManagementView({
                 type="submit"
                 size="sm"
                 disabled={saving}
-                className="bg-slate-900 hover:bg-slate-800 text-white text-xs font-semibold"
+                className="bg-[#1a76d1] hover:bg-[#1560aa] text-white text-xs font-semibold"
               >
                 {saving ? (
                   <>
@@ -415,6 +524,41 @@ export function TestimonialsManagementView({
               </Button>
             </DialogFooter>
           </form>
+        </DialogContent>
+      </Dialog>
+
+      {/* Styled Delete Confirmation Dialog */}
+      <Dialog open={Boolean(deleteTarget)} onOpenChange={(open) => { if (!open) setDeleteTarget(null); }}>
+        <DialogContent className="sm:max-w-sm bg-white">
+          <DialogHeader>
+            <DialogTitle className="text-base font-bold text-slate-900">
+              Delete Patient Review?
+            </DialogTitle>
+            <DialogDescription className="text-xs text-slate-500">
+              Remove testimonial by <strong>{deleteTarget?.patientName}</strong> from your live website? This cannot be undone.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter className="pt-2">
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={() => setDeleteTarget(null)}
+              disabled={deleting}
+              className="text-xs"
+            >
+              Cancel
+            </Button>
+            <Button
+              type="button"
+              size="sm"
+              onClick={handleConfirmDelete}
+              disabled={deleting}
+              className="bg-rose-600 hover:bg-rose-700 text-white text-xs font-semibold"
+            >
+              {deleting ? "Deleting..." : "Delete Review"}
+            </Button>
+          </DialogFooter>
         </DialogContent>
       </Dialog>
     </div>

@@ -17,6 +17,9 @@ interface TestimonialsSectionProps {
   themeVariant?: "clinical" | "minimal" | "compact";
   isGradient?: boolean;
   selectedTheme?: string;
+  badgeText?: string;
+  title?: string;
+  subtitle?: string;
 }
 
 export function TestimonialsSection({
@@ -27,6 +30,9 @@ export function TestimonialsSection({
   themeVariant = "clinical",
   isGradient = true,
   selectedTheme,
+  badgeText,
+  title,
+  subtitle,
 }: TestimonialsSectionProps) {
   const { isDark } = useWebsiteThemeMode();
   const theme = resolveThemePalette(selectedTheme);
@@ -126,7 +132,7 @@ export function TestimonialsSection({
             )}
           >
             <Quote className="h-3 w-3 text-[var(--theme-primary)]" />
-            Patient Reviews
+            {badgeText || "Patient Reviews"}
           </Badge>
           <h2
             className={cn(
@@ -134,10 +140,12 @@ export function TestimonialsSection({
               isDark ? "text-white" : "text-slate-900"
             )}
           >
-            What Our Patients Say
+            {title || "What Our Patients Say"}
           </h2>
           <p className={cn("text-xs sm:text-sm leading-relaxed", isDark ? "text-slate-300" : "text-slate-600")}>
-            {isDoctor
+            {subtitle?.trim()
+              ? subtitle
+              : isDoctor
               ? `Real experiences and feedback from patients treated under the dedicated medical care of ${
                   practiceName.startsWith("Dr.") ? practiceName : `Dr. ${practiceName}`
                 }${specialization ? ` (${specialization})` : ""}.`

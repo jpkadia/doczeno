@@ -2,6 +2,7 @@ import { Router, Request, Response, NextFunction } from "express";
 import mongoose from "mongoose";
 import { DoctorService } from "@/services/doctor.service";
 import { MediaService } from "@/services/media.service";
+import { CustomDomainService } from "@/services/custom-domain.service";
 import { doctorCreateSchema, doctorUpdateSchema } from "@/validations";
 import { requireAuthenticatedUser } from "@/middleware/auth";
 import {
@@ -18,6 +19,8 @@ import {
   AIContent,
   Media,
   Appointment,
+  Review,
+  PlatformConfig,
   ChatbotConversation,
 } from "@/models";
 import { logAuditEvent } from "@/services/audit.service";
@@ -346,6 +349,38 @@ doctorRouter.get(
 );
 
 /**
+ * Authenticated: List all doctors (including PENDING approval requests & tempSlug) for a hospital
+ * Guard: HOSPITAL_ADMIN (own org) or SUPERADMIN
+ */
+doctorRouter.get(
+  "/hospital-directory",
+  requireAuthenticatedUser,
+  requireRole([UserRole.HOSPITAL_ADMIN, UserRole.SUPERADMIN]),
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const targetOrgId =
+        req.user!.role === UserRole.SUPERADMIN && typeof req.query.organizationId === "string"
+          ? req.query.organizationId
+          : req.user!.organizationId?.toString();
+
+      if (!targetOrgId) {
+        res.status(400).json({
+          success: false,
+          error: "Organization ID is required",
+          code: "BAD_REQUEST",
+        });
+        return;
+      }
+
+      const doctors = await Doctor.find({ organizationId: targetOrgId }).sort({ createdAt: -1 });
+      res.status(200).json({ success: true, data: { doctors } });
+    } catch (error) {
+      next(error);
+    }
+  }
+);
+
+/**
  * Public / Authenticated: List doctors with filters and pagination
  */
 doctorRouter.get(
@@ -510,6 +545,74 @@ doctorRouter.patch(
 );
 
 /**
+ * PATCH /api/v1/doctors/:id/approve
+ * Protected: Approve a pending hospital-affiliated doctor request.
+ * Activates the doctor's requested slug and expires the temporary preview slug.
+ */
+doctorRouter.patch(
+  "/:id/approve",
+  requireAuthenticatedUser,
+  requireRole([UserRole.HOSPITAL_ADMIN, UserRole.SUPERADMIN]),
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const paramId = String(req.params.id || "");
+      let doctor: any = null;
+      if (mongoose.Types.ObjectId.isValid(paramId)) {
+        doctor = await Doctor.findById(paramId);
+      }
+      if (!doctor) {
+        res.status(404).json({ success: false, error: "Doctor request not found", code: "NOT_FOUND" });
+        return;
+      }
+
+      if (
+        req.user!.role === UserRole.HOSPITAL_ADMIN &&
+        (!doctor.organizationId || doctor.organizationId.toString() !== req.user!.organizationId?.toString())
+      ) {
+        res.status(403).json({
+          success: false,
+          error: "Forbidden: You can only approve doctors affiliated with your hospital",
+          code: "FORBIDDEN",
+        });
+        return;
+      }
+
+      doctor.approvalStatus = "APPROVED";
+      doctor.status = "ACTIVE";
+      doctor.approvedAt = new Date();
+      // Keep doctor.tempSlug in DB (unique sparse index) so the code can NEVER be reused,
+      // while approvalStatus === "APPROVED" automatically expires the preview URL.
+      await doctor.save();
+
+      await Website.updateMany(
+        { doctorId: doctor._id },
+        { $set: { publishStatus: "PUBLISHED" } }
+      );
+
+      await logAuditEvent({
+        userId: req.user!.userId,
+        userEmail: req.user!.email,
+        userRole: req.user!.role,
+        action: "DOCTOR_APPROVED",
+        entityType: "Doctor",
+        entityId: doctor._id.toString(),
+        organizationId: doctor.organizationId ? doctor.organizationId.toString() : null,
+        doctorId: doctor._id.toString(),
+        details: { doctorName: doctor.doctorName, slug: doctor.slug, expiredTempSlug: doctor.tempSlug },
+      });
+
+      res.status(200).json({
+        success: true,
+        message: "Doctor approved and live website activated!",
+        data: { doctor },
+      });
+    } catch (error) {
+      next(error);
+    }
+  }
+);
+
+/**
  * PATCH /api/v1/doctors/:id/status
  * Protected: Activate or Deactivate doctor (Hospital Admin for their doctors or Superadmin)
  */
@@ -542,12 +645,50 @@ doctorRouter.patch(
         return;
       }
 
-      doctor.status = status;
+      const actorRole = req.user!.role;
+      const normalizedDoctorStatus = status === "ACTIVE" ? "ACTIVE" : "INACTIVE";
+
+      // Strict hierarchy: Hospital Admin CANNOT reactivate a doctor/website deactivated by Superadmin
+      if (actorRole === UserRole.HOSPITAL_ADMIN && normalizedDoctorStatus === "ACTIVE") {
+        const superadminLockedSite = await Website.findOne({
+          doctorId: doctor._id,
+          deactivatedByRole: "SUPERADMIN",
+        })
+          .select("_id")
+          .lean();
+
+        if (doctor.deactivatedByRole === "SUPERADMIN" || superadminLockedSite) {
+          res.status(403).json({
+            success: false,
+            error: "Deactive by Superadmin — Only Superadmin can reactivate this doctor's website.",
+            code: "DEACTIVATED_BY_SUPERADMIN",
+          });
+          return;
+        }
+      }
+
+      const deactivatedByRole =
+        normalizedDoctorStatus === "ACTIVE"
+          ? null
+          : actorRole === UserRole.SUPERADMIN
+          ? "SUPERADMIN"
+          : "HOSPITAL_ADMIN";
+
+      doctor.status = normalizedDoctorStatus;
+      doctor.deactivatedByRole = deactivatedByRole;
       await doctor.save();
 
-      // Sync website publish status
-      const publishStatus = status === "ACTIVE" ? "PUBLISHED" : "DRAFT";
-      await Website.updateMany({ doctorId: doctor._id }, { $set: { publishStatus } });
+      // Sync website publish status & deactivation authority
+      const publishStatus =
+        normalizedDoctorStatus === "ACTIVE"
+          ? "PUBLISHED"
+          : actorRole === UserRole.SUPERADMIN
+          ? "SUSPENDED"
+          : "DRAFT";
+      await Website.updateMany(
+        { doctorId: doctor._id },
+        { $set: { publishStatus, deactivatedByRole } }
+      );
 
       await logAuditEvent({
         userId: req.user!.userId,
@@ -618,17 +759,24 @@ doctorRouter.delete(
           return;
         }
 
-        // 1. Delete doctor record
-        await Doctor.findByIdAndDelete(doctor._id);
-
-        // 2. Delete doctor website record
+        // 1. Clean up custom domains & delete doctor website records
+        const doctorWebsites = await Website.find({ doctorId: doctor._id });
+        for (const dw of doctorWebsites) {
+          if (dw.customDomain) {
+            await CustomDomainService.removeCustomDomain(dw).catch(() => {});
+          }
+        }
         await Website.deleteMany({ doctorId: doctor._id });
+
+        // 2. Delete doctor record
+        await Doctor.findByIdAndDelete(doctor._id);
 
         // 3. Delete user account associated with doctor
         await User.deleteMany({ doctorProfileId: doctor._id });
 
-        // 4. Delete AI Content records
+        // 4. Delete AI Content & Review records
         await AIContent.deleteMany({ targetId: doctor._id.toString() });
+        await Review.deleteMany({ doctorId: doctor._id });
 
         // 5. Delete Media assets and destroy Cloudinary assets
         if (doctor.doctorPhoto?.publicId) {
@@ -652,8 +800,13 @@ doctorRouter.delete(
         // 6. Delete Appointments
         await Appointment.deleteMany({ doctorId: doctor._id });
 
-        // 7. Delete Chatbot conversations
+        // 7. Delete Chatbot conversations & increment deleted count
         await ChatbotConversation.deleteMany({ doctorId: doctor._id });
+        await PlatformConfig.findOneAndUpdate(
+          {},
+          { $inc: { deletedDoctorsCount: 1 } },
+          { upsert: true }
+        ).catch(() => {});
 
         await logAuditEvent({
           userId: req.user!.userId,
@@ -676,11 +829,22 @@ doctorRouter.delete(
       }
 
       // Safe deactivation
+      const deactivatedBy =
+        req.user!.role === UserRole.SUPERADMIN ? "SUPERADMIN" : "HOSPITAL_ADMIN";
       doctor.status = "INACTIVE";
+      doctor.deactivatedByRole = deactivatedBy;
       await doctor.save();
 
       // Unpublish website
-      await Website.updateMany({ doctorId: doctor._id }, { $set: { publishStatus: "DRAFT" } });
+      await Website.updateMany(
+        { doctorId: doctor._id },
+        {
+          $set: {
+            publishStatus: deactivatedBy === "SUPERADMIN" ? "SUSPENDED" : "DRAFT",
+            deactivatedByRole: deactivatedBy,
+          },
+        }
+      );
 
       await logAuditEvent({
         userId: req.user!.userId,
